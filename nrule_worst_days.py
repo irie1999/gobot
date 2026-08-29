@@ -63,7 +63,12 @@ def build_rows(sym: str) -> pd.DataFrame | None:
     d["gap"] = d["open"] / d["prev_close"] - 1.0
     d["o2c"] = d["close"] / d["open"] - 1.0
     d["atr"] = G._atr_pct(d, ATR_N)
-    d["turnover"] = (d["close"] * d["volume"]).rolling(20).mean()
+    # ⛔ 先読み防止: 20日平均売買代金は **当日を含めてはいけません**。
+    #   監視枠 (上位50) は前夜に選ぶので、当日の出来高は使えません。
+    #   rolling(20).mean() は当日を含むので shift(1) が要ります。
+    #   (2026-08-29 に検査で発見。§11「前夜の売買代金」が実際には
+    #    当日の出来高を見ていました)
+    d["turnover"] = (d["close"] * d["volume"]).rolling(20).mean().shift(1)
     d["next_open"] = d["open"].shift(-1)   # 強制持ち越しの評価にだけ使う
     sane = ((d["gap"].abs() <= MAX_MOVE) & (d["o2c"].abs() <= MAX_MOVE)
             & (d["ret"].abs() <= MAX_MOVE))
