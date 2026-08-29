@@ -82,36 +82,56 @@ def build_candidates(cache_dir: str, index_symbol: str,
         raise SystemExit(f"{index_symbol} が見つかりません")
     idx_ret = idx_df["close"].pct_change()
 
+    # 除外理由を数える。出力が少ないときに推測しないで済むように。
+    drop = {k: 0 for k in ("短すぎ", "β算出不可", "ATR異常", "価格帯外",
+                           "売買代金不足", "前日リターン欠損", "古いキャッシュ")}
+    last_dates = []
+    idx_last = idx_df.index[-1]
+
     rows = []
     for sym in syms:
         df = gd.fetch_daily(sym)
         if df is None or len(df) < BETA_WINDOW + ATR_PERIOD + 5:
+            drop["短すぎ"] += 1
             continue
+        last_dates.append(df.index[-1])
         c = df["close"]
         ret = c.pct_change()
-        j = pd.DataFrame({"ret": ret}).join(idx_ret.rename("idx_ret"), how="left")
-        cov = j["ret"].rolling(BETA_WINDOW).cov(j["idx_ret"])
-        var = j["idx_ret"].rolling(BETA_WINDOW).var()
-        beta = float((cov / var.replace(0, np.nan)).clip(-3, 3).iloc[-1])
+        # β: 指数と日付が揃う行だけを使う。rolling は窓内に NaN が1つでも
+        # あると NaN を返すので、事前に整列してから計算しないと全滅する。
+        pair = pd.concat([ret.rename("r"), idx_ret.rename("i")], axis=1,
+                         join="inner").dropna()
+        if len(pair) < BETA_WINDOW:
+            drop["β算出不可"] += 1
+            continue
+        w = pair.tail(BETA_WINDOW)
+        v = float(w["i"].var())
+        if not np.isfinite(v) or v <= 0:
+            drop["β算出不可"] += 1
+            continue
+        beta = float(np.clip(w["r"].cov(w["i"]) / v, -3, 3))
         atr = float(gd._atr_pct(df).iloc[-1])
         turnover = float((c * df["volume"]).rolling(20).mean().iloc[-1])
         prev_close = float(c.iloc[-1])
+        if not np.isfinite(atr) or atr <= 0.001:
+            drop["ATR異常"] += 1          # ATR 0.1% 未満は株式ではあり得ない
+            continue
+        if not (gd.MIN_PRICE <= prev_close <= gd.MAX_PRICE):
+            drop["価格帯外"] += 1
+            continue
+        if not np.isfinite(turnover) or turnover < gd.MIN_TURNOVER:
+            drop["売買代金不足"] += 1
+            continue
         # 前日の残差リターン (同符号条件はこれで前夜に決まる)
         r_last = float(ret.iloc[-1])
-        ir_last = float(j["idx_ret"].iloc[-1]) if np.isfinite(j["idx_ret"].iloc[-1]) else 0.0
-        resid_prev = r_last - beta * ir_last
-        if not all(np.isfinite(x) for x in (beta, atr, turnover, prev_close)):
+        ir = idx_ret.get(df.index[-1], np.nan)
+        if not np.isfinite(r_last):
+            drop["前日リターン欠損"] += 1
             continue
-        if atr <= 0 or not (gd.MIN_PRICE <= prev_close <= gd.MAX_PRICE):
-            continue
-        if turnover < gd.MIN_TURNOVER:
-            continue
+        resid_prev = r_last - beta * (float(ir) if np.isfinite(ir) else 0.0)
         prev_z = resid_prev / atr
-        # 同符号条件: prev_z >= PREV_THR なら上げ側、<= -PREV_THR なら下げ側
         up_ok = prev_z >= PREV_THR
         dn_ok = prev_z <= -PREV_THR
-        if not (up_ok or dn_ok):
-            continue
         rows.append({
             "asof": df.index[-1].strftime("%Y-%m-%d"),
             "symbol": sym,
@@ -120,15 +140,33 @@ def build_candidates(cache_dir: str, index_symbol: str,
             "beta": round(beta, 4),
             "prev_z": round(prev_z, 4),
             "turnover20_oku": round(turnover / 1e8, 1),
-            # 同符号条件により、各銘柄は片側しか発火しない
             "eligible_side": ("short" if up_ok and not dn_ok
                               else "long" if dn_ok and not up_ok else "both"),
-            # 指数ギャップ 0 を仮定したときのトリガー価格 (朝に補正する)
             "trigger_up_at_idx0": round(prev_close * (1 + GAP_THR * atr), 2),
             "trigger_dn_at_idx0": round(prev_close * (1 - GAP_THR * atr), 2),
-            # 朝の補正係数: トリガー = 上記 + prev_close * beta * idx_gap
             "idx_adj_per_1pct": round(prev_close * beta * 0.01, 4),
         })
+
+    print(f"\n候補の絞り込み: {len(syms):,} 銘柄 → {len(rows):,} 銘柄")
+    for k, v in drop.items():
+        if v:
+            print(f"    除外 {k:<16} {v:>6,}")
+    if last_dates:
+        ld = pd.Series(last_dates)
+        newest = ld.max()
+        stale = int((ld < newest).sum())
+        print(f"    最終バー: 最新 {newest:%Y-%m-%d} / "
+              f"それより古い銘柄 {stale:,} 件")
+        if stale > len(ld) * 0.1:
+            print("    ⚠ 最終バーの日付が揃っていません。キャッシュの更新漏れです。")
+    print(f"    指数 {index_symbol} の最終バー: {idx_last:%Y-%m-%d}")
+    if rows:
+        a = pd.Series([r["asof"] for r in rows])
+        if a.nunique() > 1:
+            print(f"    ⚠ 候補の asof が {a.nunique()} 種類あります: "
+                  f"{sorted(a.unique())[:5]}")
+            print("       同じ日のデータで揃っていないと、翌朝の候補になりません。")
+
     out = pd.DataFrame(rows)
     return out.sort_values("turnover20_oku", ascending=False).reset_index(drop=True)
 
