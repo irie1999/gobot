@@ -1192,6 +1192,39 @@ def nrule_report(panel: pd.DataFrame, mkt: pd.Series, args) -> int:
     print("⚠ 直近が OOS だから信じられる、とは書きません。正しくは"
           " 『TRAIN では一度も使っていない期間』です。")
 
+    # ── 件数が合わないときに、どの条件で落ちたかを特定する ──────────
+    #  ⛔ 件数が参照値と桁で違うなら、成績の一致・不一致は論じられません。
+    #    まずこの漏斗を見て、仕様差を特定してから数字を読むこと。
+    print("\n■ 発火までの漏斗 (件数が合わないときはここで仕様差を特定する)")
+    ndays = panel["date"].nunique()
+    thr50 = panel["date"].map(_TOPN_THR[N_TOPN]) if N_TOPN in _TOPN_THR else None
+    stages = [("パネルの候補行", pd.Series(True, index=panel.index))]
+    if thr50 is not None:
+        top = panel["turnover"] >= thr50
+        stages.append((f"売買代金 上位{N_TOPN}位以内", top))
+        stages.append(("  かつ 前日 |ret| >= 閾値",
+                       top & (panel["prev_ret"].abs() >= N_PREV_THR)))
+        stages.append(("  かつ ギャップ |gap| >= 閾値",
+                       top & (panel["prev_ret"].abs() >= N_PREV_THR)
+                       & (panel["gap"].abs() >= N_GAP_THR)))
+    for lbl, m in stages:
+        k = int(m.sum())
+        print(f"    {lbl:<30} {k:>10,} 行  ({k/ndays:>6.2f} 行/営業日)")
+    print(f"    営業日 {ndays:,} 日 / 月あたりに直すと "
+          f"{stages[-1][1].sum()/ndays*20.7:.0f} 件/月 "
+          "(20.7営業日/月)")
+    print("    ★ 参照値と月あたり件数が合わなければ、成績は比較できません。")
+    print("      上位50位の母集団がどこで数えられているか (株価帯で絞る前か後か)、")
+    print("      流動性の下限、ユニバースの広さ — この3つを先に突き合わせること。")
+    # 年別の発火件数。指数の穴で年が丸ごと落ちていないかの確認も兼ねる
+    if thr50 is not None:
+        fin = stages[-1][1]
+        by_y = panel.loc[fin, "date"].dt.year.value_counts().sort_index()
+        allow = panel["date"].dt.year.value_counts().sort_index()
+        print("    年別 (発火 / パネル候補行):")
+        print("      " + "  ".join(f"{y}:{by_y.get(y,0)}/{allow[y]:,}"
+                                   for y in allow.index))
+
     sigs = {}
     for name, side in (("N (空売り)", "short"), ("鏡像 (買い)", "long")):
         sg = nrule_signal(panel, side)
@@ -1825,6 +1858,28 @@ def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
         print("    発火率‰ = 取引数 / その年のユニバース銘柄日数 × 1000。")
         print("    これが横ばいなら発火数の増加は母集団の成長で説明できます。")
         d_all = _year_table(run, hcol, args.cost_bps, args.max_names, panel=panel)
+
+        # 方向別の年別。★ 直近で弱いのが『この戦略に固有の劣化』なのか
+        #   『その年は買い側が弱かった』という市場の性質なのかを切り分ける。
+        #   両側を同じエンジンで出さないとこの区別はできません。
+        if run["side"].nunique() > 1:
+            for lbl, m in (("買い側", run["side"] > 0),
+                           ("空売り側", run["side"] < 0)):
+                g = run[m]
+                if len(g) < 30:
+                    print(f"\n  【方向別】{lbl}: {len(g)} 件で不足")
+                    continue
+                print(f"\n  【方向別】{lbl} の年別 "
+                      f"({len(g)} 件)")
+                _year_table(g, hcol, args.cost_bps, args.max_names)
+            print("    ★ 片側だけが直近で落ちているなら、それはその方向の"
+                  "市場の性質です。")
+            print("      両側とも落ちているなら、この戦略に固有の劣化を疑うこと。")
+        else:
+            sd = "買い側" if float(run["side"].iloc[0]) > 0 else "空売り側"
+            print(f"\n  ⚠ {sd} だけで回しています。直近の強弱がこの戦略に固有か、"
+                  "その方向の")
+            print("    市場の性質かは、--side both で両側を出さないと切り分けられません。")
 
         print("\n  前半/後半の差の検定")
         print(_half_split(d_all, run.groupby("date").size()))
