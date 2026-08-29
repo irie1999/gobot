@@ -536,9 +536,23 @@ def risk_report(trades: pd.DataFrame) -> None:
               f"   最悪10日の平均 {srt[:10].mean():>12,.0f}")
         print(f"      観測最悪の1日  {srt[0]:>12,.0f}"
               "   ← ⛔ これで決めないこと")
+    d0 = trades.groupby("date")["pnl"].sum()
+    mu0 = float(d0.mean())
+    es0 = _es(carried.groupby("date")["pnl"].sum().to_numpy(), 0.01)
+    if mu0 > 0 and es0:
+        nd = abs(es0) / mu0
+        per_month = len(d0) / max(len(pd.PeriodIndex(d0.index, freq="M")
+                                      .unique()), 1)
+        print(f"\n  ★ 言い換え: 下位1%の日 1回を取り返すのに、平均的な発火日が"
+              f" **{nd:,.0f} 日** 必要です")
+        print(f"     (発火は月 {per_month:.1f} 日 なので およそ "
+              f"{nd / max(per_month, 1e-9):.1f} ヶ月)")
     print("\n  ★ 予算の決め方: 許容できる1日の損失 ÷ |下位1% ES の信頼下端|")
     print("     を現行の400万に掛ける。ESの下端 (悪い側) を使うのは、")
     print("     点推定で決めると半分の確率で外れるからです。")
+    print("  ⚠ ただし 100株が最小単位なので、**1銘柄あたりを小さくはできません**。")
+    print("     下げる手段は『1日に建てる銘柄数の上限』だけで、それは平均も")
+    print("     同じ比率で削ります。ES だけを選んで削ることはできません。")
 
 
 def vol_regression(sig: pd.DataFrame, trades: pd.DataFrame,
@@ -590,13 +604,25 @@ def vol_regression(sig: pd.DataFrame, trades: pd.DataFrame,
               f"{(mu/abs(es) if es else float('nan')):>11.3f}")
     lo = j[j["q"] == j["q"].min()]["pnl"]
     hi = j[j["q"] == j["q"].max()]["pnl"]
-    rat = (hi.mean() / lo.mean()) if lo.mean() else float("nan")
     vr = (hi.std(ddof=1) / lo.std(ddof=1)) if lo.std(ddof=1) else float("nan")
-    print(f"\n      Q5/Q1  平均 {rat:.2f}倍 / σ {vr:.2f}倍")
-    print("      ★ 平均が σ と同じ比率で増えている (比例) → サイズ変更は中立。")
-    print("        **打ち切り**です。深追いしないこと。")
-    print("        平均がフラット (比 1.0 近辺) でσだけ増えている → 高ボラ日を")
-    print("        小さくすれば 平均/|ES| が改善します。そのときだけ次へ。")
+    # ⛔ Q1 の平均がほぼゼロだと比が発散します。比ではなく **平均/σ の推移**
+    #   で読むこと。一度 234.71倍 という無意味な数字を出しました。
+    if abs(lo.mean()) < 0.05 * abs(hi.mean()):
+        print(f"\n      ⛔ Q1 の平均が {lo.mean():,.0f} 円でほぼゼロなので、"
+              "Q5/Q1 の比は発散します。")
+        print("         比ではなく上の **平均/σ と 平均/|ES| の推移** で読んでください。")
+        print(f"         (σ比だけは意味があります: {vr:.2f}倍)")
+    else:
+        print(f"\n      Q5/Q1  平均 {hi.mean()/lo.mean():.2f}倍 / σ {vr:.2f}倍")
+    print("      ★ 読み方は3つに分かれます:")
+    print("        平均/|ES| が分位で **フラット**        → サイズ変更は中立。打ち切り")
+    print("        平均/|ES| が高分位で **下がる**        → 高ボラ日を小さくすれば改善")
+    print("        平均/|ES| が高分位で **上がる**        → ⛔ 逆。高ボラ日こそ")
+    print("          エッジがある。落とすと悪化する。**仮説は逆向きに棄却**")
+    print("      ⚠ n_pre (候補件数) が効いている場合、この『ボラ』の正体は")
+    print("        建玉数です。件数が増えると平均は n に比例、σ は √n でしか")
+    print("        増えないので、平均/σ は自動的に上がります。**分散の効果**")
+    print("        であって高ボラ日のエッジではありません。混同しないこと。")
 
 
 def self_test() -> int:
