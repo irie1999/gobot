@@ -936,30 +936,44 @@ def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
     print("  サバイバーシップが効いています。フラットならバイアスは小さい。")
     bnds = [pd.Timestamp(x) for x in args.split_dates]
     edges = [sig["date"].min()] + bnds + [sig["date"].max() + pd.Timedelta(days=1)]
-    print(f"    {'期間':<22}{'件数':>7}{'グロス':>10}{'コスト後':>10}"
+    print(f"    {'期間':<22}{'件数':>7}{'グロス':>10}{'±SE':>8}"
           f"{'日次bp':>9}{'日次t':>8}")
-    prev_gross = None
-    monotone_down = True
+    segs = []
     for i in range(len(edges) - 1):
         lo, hi = edges[i], edges[i + 1]
         g = sig[(sig["date"] >= lo) & (sig["date"] < hi)]
         if len(g) < 10:
             print(f"    {lo:%Y-%m}〜{hi:%Y-%m}     件数不足 ({len(g)})")
-            prev_gross = None
             continue
-        gross = g["alpha"].mean() * 10000
-        net = gross - args.cost_bps
+        a = g["alpha"] * 10000
+        gross, se = float(a.mean()), float(a.std(ddof=1) / math.sqrt(len(a)))
         st = stats(to_daily(g, "alpha", args.cost_bps, args.max_names))
         print(f"    {lo:%Y-%m}〜{hi:%Y-%m}      {len(g):>6,}"
-              f"{gross:>10.1f}{net:>10.1f}"
-              f"{st.get('mean_bp', float('nan')):>9.1f}{st.get('t', float('nan')):>8.2f}")
-        if prev_gross is not None and gross > prev_gross:
-            monotone_down = False
-        prev_gross = gross
-    if monotone_down and prev_gross is not None:
-        print("    ⚠ グロスが単調に減衰しています。サバイバーシップの疑いがあります。")
-    else:
-        print("    → 単調減衰ではありません。サバイバーシップの影響は小さいと見られます。")
+              f"{gross:>10.1f}{se:>8.1f}"
+              f"{st.get('mean_bp', float('nan')):>9.1f}"
+              f"{st.get('t', float('nan')):>8.2f}")
+        segs.append((gross, se, len(a), st.get("mean_bp", float("nan"))))
+
+    if len(segs) >= 2:
+        # 最古と最新の差の検定。単調性だけを見ると 3 点なら 1/6 の確率で
+        # 偶然そう並ぶので、誤差を伴わない「単調減衰」の判定には意味がない。
+        (g0, s0, n0, d0), (g1, s1, n1, d1) = segs[0], segs[-1]
+        se_d = math.sqrt(s0 ** 2 + s1 ** 2)
+        t_d = (g0 - g1) / se_d if se_d > 0 else 0.0
+        print(f"\n    最古 − 最新 = {g0 - g1:+.1f}bp  (SE {se_d:.1f}, t = {t_d:.2f})")
+        mono_gross = all(segs[i][0] > segs[i + 1][0] for i in range(len(segs) - 1))
+        mono_daily = all(segs[i][3] > segs[i + 1][3] for i in range(len(segs) - 1))
+        if abs(t_d) < 2.0:
+            print("    → 差は誤差の範囲です。**この標本ではサバイバーシップを")
+            print("       検出も棄却もできません** (検出力不足)。単調に見えても、")
+            print(f"       {len(segs)} 点が偶然そう並ぶ確率は "
+                  f"{1/math.factorial(len(segs))*100:.0f}% あります。")
+        elif t_d > 0:
+            print("    ⚠ 最古が最新より有意に強い。サバイバーシップの疑いがあります。")
+        else:
+            print("    → 最新の方が強く、サバイバーシップとは逆向きです。")
+        print(f"    (参考: グロスは{'単調減衰' if mono_gross else '単調ではない'} / "
+              f"日次bpは{'単調減衰' if mono_daily else '単調ではない'})")
 
     # ── §4 ギャップ幅の単調性 ─────────────────────────────────────
     print("\n【4】ギャップ幅(ATR単位)の分位別 α  ← 単調に増えなければノイズ")
