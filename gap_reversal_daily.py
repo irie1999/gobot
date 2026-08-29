@@ -70,6 +70,12 @@ TOPN_LIST = [13, 25, 50, 100, 200]
 TOPN_MAX = 200
 _TOPN_THR: dict = {}
 
+# kabu の /ranking は 値上がり率/値下がり率 の上位30件を返す。
+# 生の騰落率での並びなので、ATR正規化した条件と食い違う。その差を測る。
+RANK_LIST = [10, 20, 30, 50]
+RANK_MAX = 50
+_RANK_THR: dict = {}
+
 COST_BPS      = 30.0    # 往復コスト (bp)。呼値+板寄せ+引け成行の想定
 TRADING_DAYS  = 245
 
@@ -490,6 +496,13 @@ def build_symbol_rows(
     j["prev_close"] = j["close"].shift(1)
 
     # 有効行
+    j["next_open"] = j["open"].shift(-1)     # 持ち越し評価にだけ使う (先読み)
+
+    # 騰落率ランキング用の母集団。kabu の /ranking は価格帯で絞らないので、
+    # ここも価格帯フィルタを掛ける前の生ギャップを使う。
+    rk = j.loc[j["gap"].notna() & (j["gap"].abs() <= MAX_GAP), "gap"]
+    rank_pool = pd.DataFrame({"date": rk.index, "gap": rk.to_numpy()})
+
     ok = (
         j["atr"].notna() & j["beta"].notna() & j["o2c"].notna()
         & j["resid_gap"].notna() & j["resid_prev"].notna()
@@ -504,7 +517,7 @@ def build_symbol_rows(
         _note_bad("gap", len(bad), bad.assign(symbol=symbol))
     j = j[ok & sane]
     if j.empty:
-        return pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     # 日次ユニバース集計 (α のベースライン)。フィルタ前の広い母集団を使う
     uni = pd.DataFrame({"date": j.index, "o2c": j["o2c"].to_numpy(),
@@ -517,7 +530,7 @@ def build_symbol_rows(
     keep = liquid & ((j["prev_z"].abs() >= min_prev_atr) | (j["gap_z"].abs() >= 0.3))
     cand = j[keep]
     if cand.empty:
-        return pd.DataFrame(), uni
+        return pd.DataFrame(), uni, rank_pool
 
     if earn is None:
         earn_flag = np.full(len(cand), -1)          # -1 = 不明
@@ -543,9 +556,10 @@ def build_symbol_rows(
         "ibs_prev": cand["ibs_prev"].to_numpy(),
         "turnover": cand["turnover"].to_numpy(),
         "open": cand["open"].to_numpy(),
+        "next_open": cand["next_open"].to_numpy(),
         "is_earn": earn_flag,
     })
-    return out, uni
+    return out, uni, rank_pool
 
 
 def build_panel(
@@ -575,6 +589,9 @@ def build_panel(
     # 全銘柄日を保持するとメモリが持たないので、日ごとに小さなヒープで持つ。
     import heapq
     top_heap: dict = defaultdict(list)
+    # 騰落率ランキング用。日ごとに 下落上位RANK_MAX / 上昇上位RANK_MAX を持つ。
+    dn_heap: dict = defaultdict(list)   # 最も負のギャップ (max-heap を符号反転で)
+    up_heap: dict = defaultdict(list)   # 最も正のギャップ (min-heap)
     done = failed = 0
 
     def work(sym: str):
@@ -595,7 +612,7 @@ def build_panel(
             if res is None:
                 failed += 1
             else:
-                cand, uni = res
+                cand, uni, rkp = res
                 if len(uni):
                     g = uni.groupby("date")["o2c"]
                     for dt, v in g.sum().items():
@@ -611,6 +628,19 @@ def build_panel(
                             heapq.heappush(h, float(tv))
                         elif tv > h[0]:
                             heapq.heapreplace(h, float(tv))
+                if len(rkp):
+                    for dt, gv in zip(rkp["date"].to_numpy(),
+                                      rkp["gap"].to_numpy()):
+                        h = dn_heap[dt]        # 下落側: 小さいほど上位
+                        if len(h) < RANK_MAX:
+                            heapq.heappush(h, -float(gv))
+                        elif -gv > h[0]:
+                            heapq.heapreplace(h, -float(gv))
+                        h = up_heap[dt]        # 上昇側: 大きいほど上位
+                        if len(h) < RANK_MAX:
+                            heapq.heappush(h, float(gv))
+                        elif gv > h[0]:
+                            heapq.heapreplace(h, float(gv))
                 if len(cand):
                     rows.append(cand)
             if done % 200 == 0:
@@ -624,7 +654,17 @@ def build_panel(
     ).sort_index()
     mkt.name = "mkt_o2c"
     # 日ごとの「上位N位の売買代金」を閾値表にする
-    global _TOPN_THR
+    global _TOPN_THR, _RANK_THR
+    _RANK_THR = {"dn": {}, "up": {}}
+    for n in RANK_LIST:
+        # その日の銘柄数が N 未満なら全部が上位N以内なので、閾値は緩い側に置く。
+        # 下落側は gap <= thr で判定するので +大、上昇側は gap >= thr なので -大。
+        _RANK_THR["dn"][n] = pd.Series(
+            {dt: (-sorted(h, reverse=True)[n - 1] if len(h) >= n else 1e9)
+             for dt, h in dn_heap.items()}).sort_index()
+        _RANK_THR["up"][n] = pd.Series(
+            {dt: (sorted(h, reverse=True)[n - 1] if len(h) >= n else -1e9)
+             for dt, h in up_heap.items()}).sort_index()
     _TOPN_THR = {}
     for n in TOPN_LIST:
         _TOPN_THR[n] = pd.Series(
@@ -1232,6 +1272,69 @@ def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
         print("  ただし bp も高いならトレードオフです。単純除外は損かもしれません。")
     except Exception as e:
         print(f"\n  headroom 別の集計に失敗: {e}")
+
+    # 決済できなかった建玉を翌営業日の始値まで持ち越した場合。
+    # 買い側でストップ安引け = その建玉を翌日に持ち越すだけで、一般信用の
+    # 強制決済とは事情が違う。除外ではなく値付けをする。
+    # ⛔ next_open は先読みなので、持ち越しの評価にだけ使う列です。
+    if "next_open" in sig.columns and bool(bad.any()):
+        b = sig[bad]
+        ok2 = b["next_open"].notna() & (b["next_open"] > 0)
+        if int(ok2.sum()) >= 5:
+            bb = b[ok2]
+            r_hold = bb["side"] * (bb["next_open"] / bb["open"] - 1.0)
+            d = (r_hold - bb["ret"]) * 10000
+            print(f"\n  持ち越しの評価 (決済できなかった {int(ok2.sum())} 件を"
+                  f"翌営業日の始値まで持った場合)")
+            print(f"    引けで決済できた前提 {bb['ret'].mean()*10000:>8.1f}bp")
+            print(f"    翌日始値まで持ち越し {r_hold.mean()*10000:>8.1f}bp"
+                  f"   差 {d.mean():>+8.1f}bp (中央 {d.median():+.1f})")
+            print(f"    悪化した件数 {int((d < 0).sum())} / {len(d)} "
+                  f"({(d < 0).mean()*100:.0f}%)")
+            sig2 = sig.copy()
+            sig2.loc[bb.index, "alpha"] = (sig2.loc[bb.index, "alpha"]
+                                           + (r_hold - bb["ret"]))
+            print(_fmt("    持ち越しを織り込んだ全体",
+                       stats(to_daily(sig2, "alpha", args.cost_bps,
+                                      args.max_names)), width=24))
+            print("    ⛔ next_open は先読みです。持ち越しの評価にだけ使います。")
+        else:
+            print(f"\n  持ち越しの評価: 該当が {int(ok2.sum())} 件で不足")
+
+    # ── §12 生の騰落率ランキングで拾えるか ───────────────────────
+    print("\n【12】生の騰落率ランキング 上位N位に入っていた割合")
+    print("  kabu の /ranking は銘柄登録不要で 値上がり率/値下がり率 の上位30件を")
+    print("  返します。ただし並びは **生の騰落率** で、こちらの条件は")
+    print("  |残差ギャップ| >= 3×ATR20 です。低ボラ銘柄は小さいギャップでも発火")
+    print("  するので、生の騰落率では上位に入りません。その食い違いを測ります。")
+    if not _RANK_THR:
+        print("  (閾値表が未計算です)")
+    else:
+        tot_bp = float((sig["alpha"] * 10000).sum())
+        print(f"    {'N':>5}{'カバー件数':>12}{'件数%':>9}{'利益%':>9}"
+              f"{'1件bp':>9}{'漏れの1件bp':>13}")
+        for n in RANK_LIST:
+            dn_thr = sig["date"].map(_RANK_THR["dn"][n])
+            up_thr = sig["date"].map(_RANK_THR["up"][n])
+            inn = np.where(sig["side"] > 0,
+                           sig["gap"] <= dn_thr, sig["gap"] >= up_thr)
+            inn = pd.Series(inn, index=sig.index)
+            k = int(inn.sum())
+            if k == 0:
+                print(f"    {n:>5}{0:>12}{0.0:>9.1f}{0.0:>9.1f}")
+                continue
+            bp_in = float((sig.loc[inn, "alpha"] * 10000).sum())
+            m_in = float(sig.loc[inn, "alpha"].mean() * 10000)
+            m_out = (float(sig.loc[~inn, "alpha"].mean() * 10000)
+                     if (~inn).any() else float("nan"))
+            print(f"    {n:>5}{k:>12,}{k/len(sig)*100:>9.1f}"
+                  f"{(bp_in/tot_bp*100 if tot_bp else float('nan')):>9.1f}"
+                  f"{m_in:>9.1f}{m_out:>13.1f}")
+        print("  判定: N=30 で 95%以上 → ranking で足りる (事前選択の問題が消える)")
+        print("        70〜95% → 漏れる帯の性質を見る / 70%未満 → 適時開示へ")
+        print("  ⚠ 母集団はこのキャッシュの銘柄のみです。実際の /ranking は")
+        print("    株価帯で絞らない全プライム銘柄が競合するので、実運用の順位は")
+        print("    ここより悪くなります (低位株ほど%で大きく動くため)。")
 
     print("\n" + "=" * 78)
     print("判定の目安: 日次t>3 かつ 年別で大半がプラス かつ 単調性あり かつ")
