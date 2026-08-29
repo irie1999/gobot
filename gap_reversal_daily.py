@@ -620,15 +620,24 @@ def build_panel(
 # シグナル & 損益
 # ══════════════════════════════════════════════════════════════════
 def apply_signal(panel: pd.DataFrame, mkt: pd.Series, raw: bool,
-                 prev_thr: float, gap_thr: float) -> pd.DataFrame:
-    """side (+1=買い / -1=空売り) を付与し、シグナル行だけ返す。"""
+                 prev_thr: float | None, gap_thr: float) -> pd.DataFrame:
+    """side (+1=買い / -1=空売り) を付与し、シグナル行だけ返す。
+
+    ⚠ `prev_thr = 0.0` は「前日の条件なし」ではありません。
+      `prev_z >= 0` を要求するので、**前日の動きがギャップと同符号**である
+      ことを課しています。ギャップ事象の約半分が落ちます。
+      本当に条件を課さない場合は `prev_thr = None` を渡してください
+      (CLI では `--prev-thr none`)。
+    """
     p = panel
-    if raw:
-        up = (p["prev_ret"] >= prev_thr) & (p["gap"] >= gap_thr)
-        dn = (p["prev_ret"] <= -prev_thr) & (p["gap"] <= -gap_thr)
+    col_prev = "prev_ret" if raw else "prev_z"
+    col_gap = "gap" if raw else "gap_z"
+    if prev_thr is None:
+        up = p[col_gap] >= gap_thr
+        dn = p[col_gap] <= -gap_thr
     else:
-        up = (p["prev_z"] >= prev_thr) & (p["gap_z"] >= gap_thr)
-        dn = (p["prev_z"] <= -prev_thr) & (p["gap_z"] <= -gap_thr)
+        up = (p[col_prev] >= prev_thr) & (p[col_gap] >= gap_thr)
+        dn = (p[col_prev] <= -prev_thr) & (p[col_gap] <= -gap_thr)
 
     sig = p[up | dn].copy()
     # 上げ側にギャップ → 空売り、下げ側 → 買い
@@ -806,8 +815,7 @@ def _fmt(label: str, st: dict, width: int = 26) -> str:
 # レポート
 # ══════════════════════════════════════════════════════════════════
 def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
-    prev_thr = args.prev_thr if args.prev_thr is not None else (
-        PREV_MOVE_PCT if args.raw else PREV_MOVE_ATR)
+    prev_thr = args.prev_thr   # None なら前日の条件を課さない
     gap_thr = args.gap_thr if args.gap_thr is not None else (
         GAP_PCT if args.raw else GAP_ATR)
 
@@ -818,8 +826,11 @@ def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
     mode = "生%" if args.raw else "ATR単位"
     print("\n" + "=" * 78)
     print(provenance("gap_reversal_daily.py"))
+    pl = "なし(同符号も要求しない)" if prev_thr is None else (
+        f"{prev_thr} (0.0 は『同符号であること』の要求)" if prev_thr == 0.0
+        else f"{prev_thr}")
     print(f"ギャップ反転 検証レポート  [{mode}]  "
-          f"前日={prev_thr}  ギャップ={gap_thr}  コスト={args.cost_bps}bp 往復")
+          f"前日={pl}  ギャップ={gap_thr}  コスト={args.cost_bps}bp 往復")
     print(f"期間 {panel['date'].min():%Y-%m-%d} 〜 {panel['date'].max():%Y-%m-%d}"
           f"   シグナル {len(sig):,} 件 "
           f"({len(sig)/max(len(mkt),1):.1f} 件/日)")
@@ -915,8 +926,11 @@ def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
 
     # ── §4 ギャップ幅の単調性 ─────────────────────────────────────
     print("\n【4】ギャップ幅(ATR単位)の分位別 α  ← 単調に増えなければノイズ")
-    cand = panel[panel["prev_z"].abs() >= prev_thr] if not args.raw else \
-        panel[panel["prev_ret"].abs() >= prev_thr]
+    if prev_thr is None:
+        cand = panel
+    else:
+        cand = (panel[panel["prev_z"].abs() >= prev_thr] if not args.raw
+                else panel[panel["prev_ret"].abs() >= prev_thr])
     c = cand.copy()
     c["side"] = np.where(c["gap_z"] >= 0, -1.0, 1.0)
     c = attach_pnl(c, mkt)
@@ -934,7 +948,9 @@ def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
     # ── §5 プラセボ ───────────────────────────────────────────────
     print("\n【5】プラセボ (予想通りに壊れるか)")
     # (a) 前日の大きな動きなし + ギャップだけ
-    if args.raw:
+    if prev_thr is None:
+        pl = panel.iloc[0:0]
+    elif args.raw:
         flat = panel[panel["prev_ret"].abs() < prev_thr * 0.3]
         pl = flat[flat["gap"].abs() >= gap_thr]
     else:
@@ -1150,7 +1166,7 @@ def grid_scan(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
             return default
         return [float(x) for x in spec.replace(",", " ").split()]
 
-    prevs = _parse(args.grid_prev, [0.0, 0.5, 1.0, 1.25, 1.5, 2.0, 2.5])
+    prevs: list = [None] + _parse(args.grid_prev, [0.0, 0.5, 1.0, 1.25, 1.5, 2.0, 2.5])
     gaps = _parse(args.grid_gap, [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0])
     if min(gaps) < 0.3:
         print("  ⚠ ギャップ閾値 0.3 未満の区画は母集団が不完全です "
@@ -1175,12 +1191,15 @@ def grid_scan(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
                 (f"{pick(cells[(pv, g)]):>8{fmt}}" if (pv, g) in cells
                  else f"{'-':>8}")
                 for g in gaps)
-            print(f"   {pv:>10.2f}" + row)
+            lbl = "なし" if pv is None else f"{pv:.2f}"
+            print(f"   {lbl:>10}" + row)
 
     print("\n" + "=" * 78)
     print(provenance("gap_reversal_daily.py --grid"))
     print(f"閾値グリッド  行 = 前日の動き (ATR単位) / 列 = ギャップ (ATR単位)")
-    print(f"前日 0.00 = 前日の動きを条件にしない")
+    print("  前日『なし』  = 前日の動きに一切条件を課さない")
+    print("  前日 0.00     = 前日の動きがギャップと同符号であることを要求")
+    print("                  (『条件なし』ではない。ギャップ事象の約半分が落ちる)")
     print("=" * 78)
     _table(f"[1] 日次 t (コスト {args.cost_bps}bp 控除後)", lambda c: c[0], ".2f")
     _table("[2] グロス α (1トレードあたり bp、コスト控除前)", lambda c: c[1], ".0f")
@@ -1189,16 +1208,16 @@ def grid_scan(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
     print("\n  読み方:")
     print("   - t の高い区画が『面』で広がっていれば本物。1区画だけ高く周囲が")
     print("     低いなら、その閾値はデータを見て選んだ偶然の可能性が高い。")
-    print("   - 前日 0.00 の行が下の行と同じなら、前日の条件は効いていない。")
+    print("   - 『なし』と 0.00 の差 = 同符号を要求することの効果。")
     print("   - 件数が3桁を切る区画は、t の値によらず信頼できない。")
     print("   - 端の列で単調増加が続いているなら、探索範囲が狭い。--grid-gap で伸ばす。")
     if cells:
         best = max(cells.items(), key=lambda kv: kv[1][0])
         (bp, bg), (bt, ba, bn) = best
-        print(f"\n  最良 t: 前日={bp} / ギャップ={bg} → "
+        bps = "none" if bp is None else f"{bp}"
+        print(f"\n  最良 t: 前日={bps} / ギャップ={bg} → "
               f"t={bt:.2f} / グロス={ba:.0f}bp / {bn}件")
-        print(f"  そのまま実行するには: "
-              f"--prev-thr {bp} --gap-thr {bg}")
+        print(f"  そのまま実行するには: --prev-thr {bps} --gap-thr {bg}")
     print("=" * 78)
 
 
@@ -1231,7 +1250,7 @@ def self_test() -> int:
             "date": dates, "symbol": sym, "prev_ret": prev, "resid_prev": rp,
             "prev_z": rp / atr, "gap": gap, "resid_gap": rg, "gap_z": rg / atr,
             "atr": atr, "o2c": o2c, "ibs_prev": 0.5, "turnover": 1e9,
-            "prev_close": 2000.0, "is_earn": -1,
+            "open": 2000.0, "is_earn": -1,
         })
         keep = (np.abs(df["prev_z"]) >= 0.9) | (np.abs(df["gap_z"]) >= 0.3)
         rows.append(df[keep])
@@ -1289,7 +1308,9 @@ def main() -> int:
     ap.add_argument("--limit", type=int, help="先頭N銘柄だけ (デバッグ)")
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--raw", action="store_true", help="ATR正規化せず生パーセントの固定閾値を使う")
-    ap.add_argument("--prev-thr", dest="prev_thr", type=float)
+    ap.add_argument("--prev-thr", dest="prev_thr",
+                    help="前日の動きの閾値 (ATR単位)。'none' で条件を課さない。"
+                         "0.0 は『同符号であること』を要求する点に注意")
     ap.add_argument("--gap-thr", dest="gap_thr", type=float)
     ap.add_argument("--cost-bps", dest="cost_bps", type=float, default=COST_BPS)
     ap.add_argument("--max-names", dest="max_names", type=int, default=13,
@@ -1306,8 +1327,11 @@ def main() -> int:
     INDEX_SYM = args.index_symbol
     globals()["MAX_GAP"] = args.max_gap
 
+    if isinstance(args.prev_thr, str):
+        args.prev_thr = (None if args.prev_thr.strip().lower() in ("none", "なし")
+                         else float(args.prev_thr))
     min_prev = (args.prev_thr if args.prev_thr is not None
-                else (PREV_MOVE_PCT if args.raw else PREV_MOVE_ATR))
+                else 0.0)   # パネル保持は |gap_z|>=0.3 で担保されるので 0 でよい
 
     syms: list[str] = []
     if args.data_dir or args.data_file:
