@@ -55,6 +55,10 @@ import pickle
 import pandas as pd
 
 from backtest_limit_entry import _CACHE_DIR, _clean_prices, fetch
+# ⛔ 固定%で判定すると **低位株を誤検出**する。100円未満の値幅制限は±30円=
+#   株価比30%超なので、正常な値動きが引っかかる(2026-08-28 実測: 44件の
+#   最多 6740.T の7件が全部これ)。東証の制限値幅テーブルで判定する。
+from check_price_limit import _width
 
 
 def _load_symbols(path: str) -> list[str]:
@@ -75,9 +79,11 @@ def main() -> None:
     ap.add_argument("--days", type=int, default=4200)
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--workers", type=int, default=8)
-    ap.add_argument("--thr", type=float, default=0.30,
-                    help="この比率を超える始値ギャップ/日中変化を異常とみなす。"
-                         "既定0.30は東証の値幅制限(株価比14〜30%%)より緩い上限")
+    ap.add_argument("--thr", type=float, default=0.0,
+                    help="固定比率で判定する(0.30=30%%)。**既定0=値幅制限で判定**。"
+                         "⛔ 固定%%は低位株を誤検出する(100円未満は±30円=30%%超が合法)")
+    ap.add_argument("--limit-slack", type=float, default=1.10,
+                    help="値幅制限の何倍を超えたら異常とみなすか(既定1.10)")
     ap.add_argument("--gap-bp", type=float, default=100.0,
                     help="N のギャップ条件(bp)。汚染がここを通る件数を数える")
     ap.add_argument("--list", type=int, default=0, help="該当行をN件並べる")
@@ -120,7 +126,9 @@ def main() -> None:
     syms = _load_symbols(a.symbols)
     if a.limit > 0:
         syms = syms[:a.limit]
-    print(f"[info] 銘柄 {len(syms):,} / 遡り {a.days:,}日 / 閾値 {a.thr * 100:.0f}%"
+    _mode = (f"固定 {a.thr * 100:.0f}%" if a.thr > 0
+             else f"**東証の値幅制限 × {a.limit_slack:.2f}**")
+    print(f"[info] 銘柄 {len(syms):,} / 遡り {a.days:,}日 / 判定 {_mode}"
           + ("" if a.allow_download else " / キャッシュのみ(DLしない)"))
     print(f"[info] ⛔ 何も直しません。件数を数えるだけです"
           + ("(--purge 指定あり → 最後に該当銘柄のキャッシュを消します)"
@@ -176,8 +184,15 @@ def main() -> None:
         # B. 始値のギャップ / C. 日中の値幅
         t["gap"] = (o / pc - 1.0).to_numpy()
         t["intra"] = (c / o - 1.0).to_numpy()
-        t["bad_gap"] = t["gap"].abs() > a.thr
-        t["bad_intra"] = t["intra"].abs() > a.thr
+        # 制限値幅(円)を前日終値から引き、比率に直す。0 なら固定%にフォールバック
+        if a.thr > 0:
+            _lim = pd.Series(a.thr, index=t.index)
+        else:
+            _pcv = t["prev_close"].fillna(0.0)
+            _lim = (_pcv.map(lambda x: _width(x) if x > 0 else 0.0)
+                    / _pcv.replace(0.0, float("nan"))) * a.limit_slack
+        t["bad_gap"] = t["gap"].abs() > _lim
+        t["bad_intra"] = t["intra"].abs() > _lim
         t["bad"] = t["bad_ohlc"] | t["bad_gap"] | t["bad_intra"]
         t["n_gap"] = t["gap"] * 10_000.0 >= a.gap_bp     # N の条件を通るか
         t = t.dropna(subset=["prev_close"])
@@ -193,6 +208,8 @@ def main() -> None:
             "ng": int(_ng.sum()), "ng_bad": int(_nb.sum()), "ng_ok": int(_no.sum()),
             "ng_bad_gap": float(_g[_nb].sum()), "ng_bad_intra": float(_i[_nb].sum()),
             "ng_ok_gap": float(_g[_no].sum()), "ng_ok_intra": float(_i[_no].sum()),
+            # ★ 平均は異常値1件(株価559億など)で壊れるので、中央値用に生値も持つ
+            "_bi": list(_i[_nb].to_numpy()), "_oi": list(_i[_no].to_numpy()),
         }
         # ★ エンジン(_clean_prices)を通したら何が残るか。
         #   「キャッシュに汚染がある」と「エンジンがそれを見ている」は別の話。
@@ -229,8 +246,8 @@ def main() -> None:
     print(f"■ 日足の始値・OHLC 監査 — {ok:,}銘柄 / {_n:,}銘柄日")
     print(f"{'=' * 72}")
     for _k, _lbl in (("bad_ohlc", "A. OHLC 整合性エラー(始値/終値が安値〜高値の外)"),
-                     ("bad_gap", f"B. 始値ギャップが ±{a.thr * 100:.0f}% 超"),
-                     ("bad_intra", f"C. 日中変化が ±{a.thr * 100:.0f}% 超")):
+                     ("bad_gap", f"B. 始値ギャップが {_mode} 超"),
+                     ("bad_intra", f"C. 日中変化が {_mode} 超")):
         _c = int(s[_k].sum())
         print(f"  {_lbl:<44}{_c:>7,}件 ({_c / max(1, _n) * 100:.4f}%)")
     _bad = int(s["bad"].sum())
@@ -247,9 +264,18 @@ def main() -> None:
         print(f"     汚染行の平均ギャップ  "
               f"{s['ng_bad_gap'].sum() / _NB * 100:+.1f}%"
               f"  (正常行 {s['ng_ok_gap'].sum() / max(1, _NO) * 100:+.2f}%)")
+        import numpy as _np
+        _bi = _np.array([x for v in s["_bi"] for x in v], float)
+        _oi = _np.array([x for v in s["_oi"] for x in v], float)
         print(f"     汚染行の平均 日中変化 "
               f"{s['ng_bad_intra'].sum() / _NB * 100:+.1f}%"
               f"  (正常行 {s['ng_ok_intra'].sum() / max(1, _NO) * 100:+.2f}%)")
+        if len(_bi):
+            print(f"     ★ 汚染行の**中央値** 日中変化 "
+                  f"{_np.median(_bi) * 100:+.2f}%"
+                  f"  (正常行 {_np.median(_oi) * 100:+.2f}%)")
+            print(f"        ⚠ 平均は異常値1件(株価559億など)で壊れます。"
+                  f"**判断は中央値で**")
         print(f"     ⚠ 日中変化がショートに有利な向き(マイナス)へ偏っていれば、"
               f"汚染が利益を作っています")
 
