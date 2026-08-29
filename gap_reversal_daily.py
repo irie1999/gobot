@@ -1720,7 +1720,8 @@ def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
                 n2 = int(((bb["next_close"] - dn1).abs() <= 0.01).sum())
                 print(f"    D+2 も張り付き (D+1 もストップ安引け): "
                       f"{n2} / {len(bb)} 件")
-                print("      → -355.7bp は下限です" if n2
+                print(f"      → 上の {r_hold.mean()*10000:.1f}bp は下限です"
+                      if n2
                       else "      → ゼロ。D+1 の始値で決済できた前提で妥当です")
 
             sig["alpha_hold"] = sig["alpha"]
@@ -1851,6 +1852,20 @@ def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
         print(f"  全体  {st_all.get('n', 0):>5}日  "
               f"{st_all.get('mean_bp', float('nan')):>7.2f}bp  "
               f"t={st_all.get('t', float('nan')):>5.2f}")
+        # ⛔ 両側を混ぜた見出しは解釈できません。片側のエッジがもう片側の
+        #   2〜4倍あることがあり、件数の多い弱い側に引きずられます。
+        #   判定に使うのは実際に運用する側の行です。
+        if run["side"].nunique() > 1:
+            for lbl, m in (("  うち 買い側", run["side"] > 0),
+                           ("  うち 空売り側", run["side"] < 0)):
+                g = run[m]
+                st = stats(to_daily(g, hcol, args.cost_bps, args.max_names))
+                print(f"{lbl}  {st.get('n', 0):>5}日  {len(g):>5}件  "
+                      f"{st.get('mean_bp', float('nan')):>7.2f}bp  "
+                      f"t={st.get('t', float('nan')):>5.2f}")
+            print("  ⛔ 上の『全体』は両側の混合です。片側だけを運用するなら"
+                  "その行を見てください。")
+            print("     件数の多い側が弱いと、全体は弱い側に引きずられます。")
 
         print("\n  年別 (この行が判定の対象)")
         print("  ⚠ 発火日数の列を必ず見ること。3日の年の +200bp と 47日の年の")
@@ -1888,6 +1903,19 @@ def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
         _tail_report(d_all)
 
         # 計画値は標本の厚い近年を使う。全期間平均は薄い年に引っ張られる。
+        # ⛔ 両側混在ならここも方向別に出す (混合の近年水準は意味を持たない)。
+        if run["side"].nunique() > 1:
+            y2 = run["date"].dt.year
+            c2 = int(y2.max()) - 3
+            print("    方向別の近年水準:")
+            for lbl, ms in (("買い側", run["side"] > 0),
+                            ("空売り側", run["side"] < 0)):
+                for tag, mm in ((f"〜{c2-1}", y2 < c2), (f"{c2}〜", y2 >= c2)):
+                    d = to_daily(run[ms & mm], hcol, args.cost_bps,
+                                 args.max_names)
+                    if len(d) >= 20:
+                        print(f"      {lbl:<8}{tag:<8} {len(d):>4}日 "
+                              f"{float(d.mean())*10000:>7.2f}bp")
         yr = run["date"].dt.year
         cut = int(yr.max()) - 3
         for lbl, m in ((f"〜{cut-1}", yr < cut), (f"{cut}〜", yr >= cut)):
