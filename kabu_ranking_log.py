@@ -42,6 +42,19 @@ DEMO_URL = "http://localhost:18081"
 #                   "TS"=スタンダード "TG"=グロース "M"=名証
 PLAN = [("1", "TP"), ("2", "TP"), ("1", "ALL"), ("2", "ALL")]
 
+# ETF の初約定時刻を測るための銘柄。
+# ⛔ 「ETF は 09:00 に必ず確定する」は成立しません。**ETF も板寄せ**なので
+#   注文不均衡があれば特別気配で寄りません。ETF を指数の代わりに使える
+#   必要条件は:
+#       ETF の初約定時刻 ＋ 計算・発注時間 ＜ 対象銘柄の板寄せ成立時刻
+#   これは履歴では測れないので、朝に OpeningPriceTime を記録して測ります。
+# ⚠ 1306 は 1321 の代替ではなく **頑健性の確認** として扱うこと。
+#   成績の良い方を選ぶと、指数の選択そのものが探索になります。
+# ⚠ 指数として使うなら **分配落ちと分割の補正が必須**です
+#   (1321 は毎年7月8日、1306 は7月10日が分配基準日、1306 は 2026年4月に分割)。
+#   β も調整済みリターンで推定し直す必要があります。
+ETF_SYMBOLS = [("1321", 1), ("1306", 1)]     # (銘柄コード, 市場コード 1=東証)
+
 
 def _now() -> str:
     return dt.datetime.now().astimezone().isoformat(timespec="milliseconds")
@@ -96,6 +109,56 @@ def append(path: Path, rec: dict) -> None:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
+def register(base_url: str, token: str, symbols: list) -> dict:
+    """板を読むための銘柄登録。⛔ 登録は50件が上限です。
+
+    ここで登録するのは ETF 2件だけ。発火候補の板は登録しません
+    (登録直後の初回読み取りに 40〜140秒かかり、同じ朝に 429 が積み上がって
+     発注が危うくなった実例があるため)。
+    """
+    body = {"Symbols": [{"Symbol": s, "Exchange": e} for s, e in symbols]}
+    rec = {"req_ts": _now(), "kind": "register", "body_sent": body}
+    try:
+        r = requests.put(f"{base_url}/kabusapi/register",
+                         headers={"X-API-KEY": token,
+                                  "Content-Type": "application/json"},
+                         json=body, timeout=15)
+        rec["resp_ts"] = _now()
+        rec["status"] = r.status_code
+        rec["ok"] = r.status_code == 200
+        try:
+            rec["body"] = r.json()
+        except ValueError:
+            rec["body"] = {"_text": r.text[:2000]}
+    except Exception as e:
+        rec["resp_ts"] = _now()
+        rec["ok"] = False
+        rec["status"] = None
+        rec["error"] = f"{type(e).__name__}: {e}"
+    return rec
+
+
+def fetch_board(base_url: str, token: str, sym: str, exch: int) -> dict:
+    """1銘柄の板。**見るのは OpeningPriceTime (初約定時刻) です。**"""
+    rec = {"req_ts": _now(), "kind": "board", "symbol": sym, "exchange": exch}
+    try:
+        r = requests.get(f"{base_url}/kabusapi/board/{sym}@{exch}",
+                         headers={"X-API-KEY": token}, timeout=15)
+        rec["resp_ts"] = _now()
+        rec["status"] = r.status_code
+        rec["ok"] = r.status_code == 200
+        try:
+            rec["body"] = r.json()      # 生 JSON。列は作らない
+        except ValueError:
+            rec["body"] = {"_text": r.text[:2000]}
+    except Exception as e:
+        rec["resp_ts"] = _now()
+        rec["ok"] = False
+        rec["status"] = None
+        rec["error"] = f"{type(e).__name__}: {e}"
+    return rec
+
+
 def probe(base_url: str, token: str, path: Path) -> None:
     """件数指定 / ページングの引数があるかを試す。コストはゼロ。
 
@@ -127,6 +190,9 @@ def main() -> int:
     ap.add_argument("--interval", type=float, default=60.0, help="間隔 (秒)")
     ap.add_argument("--probe", action="store_true",
                     help="件数指定/ページングの引数があるかを試す")
+    ap.add_argument("--etf", action="store_true",
+                    help="ranking の合間に ETF (1321/1306) の板を読み、"
+                         "OpeningPriceTime (初約定時刻) を記録する")
     args = ap.parse_args()
 
     base = args.base_url or (DEMO_URL if args.demo else PROD_URL)
@@ -144,9 +210,26 @@ def main() -> int:
         probe(base, token, path)
         return 0
 
+    if args.etf:
+        rec = register(base, token, ETF_SYMBOLS)
+        append(path, rec)
+        print(f"  ETF 登録 {len(ETF_SYMBOLS)} 件  ok={rec.get('ok')} "
+              f"(登録上限は50件。ここでは2件だけ使います)")
+        print("  ⛔ ETF も板寄せです。特別気配で寄らないことがあります。")
+        print("     必要条件: ETFの初約定時刻 + 計算・発注時間 < 対象銘柄の板寄せ成立時刻")
+
     for i in range(args.repeat):
         if i:
             time.sleep(args.interval)
+        if args.etf:
+            for sym, exch in ETF_SYMBOLS:
+                rec = fetch_board(base, token, sym, exch)
+                append(path, rec)
+                b = rec.get("body") or {}
+                print(f"  {rec['req_ts']}  board {sym}  ok={rec.get('ok')}  "
+                      f"初約定 {b.get('OpeningPriceTime')}  "
+                      f"始値 {b.get('OpeningPrice')}  現値 {b.get('CurrentPrice')}")
+                time.sleep(1.0)
         for typ, div in PLAN:
             rec = fetch_ranking(base, token, typ, div)
             append(path, rec)
