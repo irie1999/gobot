@@ -396,11 +396,22 @@ def report(ex: pd.DataFrame, sig_all: pd.DataFrame, mkt: pd.Series,
     print("  条件が判定できるため)。下の行が実際に入れる価格です。")
     base_r = ex["side"] * (ex["exit_p"] / ex["open_day"] - 1.0) - args.cost_bps / 1e4
     b = gd.stats(daily_from_trades(ex, base_r))
-    print(gd._fmt("日足の始値 (執行不能)", b, width=30))
+    # 寄りが遅れているなら、寄る前に指数の始値は確定しており、寄成注文で
+    # 板寄せに参加できる。その場合「板寄せ価格 = 執行不能」ではない。
+    med_delay = float(ex["delay_min"].median()) if "delay_min" in ex else 0.0
+    joinable = med_delay >= 5.0
+    lbl = ("板寄せ価格 (寄成で参加可)" if joinable
+           else "分足の板寄せ価格 (執行不能)")
+    print(gd._fmt("日足の始値", b, width=30))
     r_auc = exec_returns(ex, "auction", args.cost_bps)
-    print(gd._fmt("分足の板寄せ価格 (執行不能)",
-                  gd.stats(daily_from_trades(ex, r_auc)), width=30))
-    print("  ↑ ここまでは条件判定に使う価格。↓ ここからが実際に入れる価格。")
+    print(gd._fmt(lbl, gd.stats(daily_from_trades(ex, r_auc)), width=30))
+    if joinable:
+        print(f"  ↑ 寄りが中央値 {med_delay:.0f} 分遅れるので、その前に指数の始値は")
+        print("     確定しており、寄成注文を出して板寄せに参加できます。")
+        print("     ただし気配→板寄せ価格の予測誤差と、自分の注文の影響は未検証。")
+    else:
+        print("  ↑ ほぼ 09:00 に寄るため、条件判定の前に注文を出す必要があります。")
+    print("  ↓ 板寄せに乗り損ねた場合に入れる価格。")
     # ⛔ 執行価格が板寄せ価格と一致していないかを検査する。
     # 分足の参照に失敗して公式始値に落ちる実装事故が起きやすく、そうなると
     # 「劣化ゼロ」という結果が出るが、それは執行不能な価格を測り直しただけ。
