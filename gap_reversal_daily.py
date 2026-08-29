@@ -743,6 +743,38 @@ def stats(daily: pd.Series) -> dict:
     }
 
 
+# 東証の制限値幅 (基準値段の下限 → 値幅、円)。
+# check_price_limit._TSE_LIMIT_TABLE 相当。このリポジトリには無いので自前で持つ。
+_TSE_LIMIT_TABLE = [
+    (0, 30), (100, 50), (200, 80), (500, 100), (700, 150),
+    (1_000, 300), (1_500, 400), (2_000, 500), (3_000, 700),
+    (5_000, 1_000), (7_000, 1_500), (10_000, 3_000), (15_000, 4_000),
+    (20_000, 5_000), (30_000, 7_000), (50_000, 10_000), (70_000, 15_000),
+    (100_000, 30_000), (150_000, 40_000), (200_000, 50_000),
+    (300_000, 70_000), (500_000, 100_000), (700_000, 150_000),
+    (1_000_000, 300_000),
+]
+
+
+def tse_price_limit(base: float) -> float:
+    """基準値段 (前日終値) に対する1日の制限値幅 (円)。
+
+    検算: 前日終値 1,530円 → 1,500〜2,000円未満の帯なので値幅 400円。
+    ストップ高は 1,930円。実データで観測した 2767.T / 6480.T の
+    「1,930円 / +26.14%」と一致する。
+
+    ⚠ 連続ストップ時の値幅拡大 (制限値幅の4倍化など) は考慮していない。
+      拡大が入った日は、ここで「ストップ」と判定されない可能性がある。
+    """
+    w = _TSE_LIMIT_TABLE[0][1]
+    for lo, width in _TSE_LIMIT_TABLE:
+        if base >= lo:
+            w = width
+        else:
+            break
+    return float(w)
+
+
 def provenance(script: str) -> str:
     """出所を1行で返す。結果を貼るときは必ずこれを添える。
 
@@ -1019,6 +1051,42 @@ def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
                   "特定の日への集中で決まっています。")
     print("  → 買い側だけで成立するなら、空売りの制度的制約を回避できます。")
     print("     空売り側にしか無いなら、実弾の前に証券会社への照会が必須です。")
+
+    # ── §10 決済できない恐れ (ストップ張り付き) ──────────────────
+    print("\n【10】引けで決済できない恐れ (値幅制限)")
+    print("  買い側はストップ安で売れない、空売り側はストップ高で買い戻せない。")
+    print("  終値と前日終値から、その日がストップ値で引けたかを判定します。")
+    px_prev = sig["open"] / (1.0 + sig["gap"])
+    px_close = sig["open"] * (1.0 + sig["o2c"])
+    lim = px_prev.map(tse_price_limit)
+    up, dn = px_prev + lim, px_prev - lim
+    tol = 0.01
+    at_up = (px_close - up).abs() <= tol
+    at_dn = (px_close - dn).abs() <= tol
+    yrs = max((sig["date"].max() - sig["date"].min()).days / 365.25, 1e-9)
+
+    rows = [
+        ("買い側 (ストップ安で売れない)", sig["side"] > 0, at_dn),
+        ("空売り側 (ストップ高で買い戻せない)", sig["side"] < 0, at_up),
+    ]
+    bad = pd.Series(False, index=sig.index)
+    for name, side_m, hit_m in rows:
+        n_side = int(side_m.sum())
+        n_hit = int((side_m & hit_m).sum())
+        bad |= side_m & hit_m
+        per_month = n_hit / (yrs * 12)
+        print(f"    {name:<34} {n_hit:>4} / {n_side:,} 件 "
+              f"({n_hit/max(n_side,1)*100:>5.2f}%)  月 {per_month:.2f} 件")
+    print(f"  参考: 始値がストップ値と一致 (建てられない恐れ) "
+          f"{int(((sig['open'] - up).abs() <= tol).sum() + ((sig['open'] - dn).abs() <= tol).sum()):>4} 件")
+    print("  ⚠ 終値がストップ値と一致でも板寄せは成立しているので、比例配分で")
+    print("    決済できた可能性はあります。これは『決済できなかった恐れの上限』です。")
+    print("  ⚠ 連続ストップ時の値幅拡大は考慮していないため、過小評価の側に振れます。")
+    if bad.any():
+        st_ok = stats(to_daily(sig[~bad], "alpha", args.cost_bps, args.max_names))
+        print(_fmt("  該当を除いた成績", st_ok, width=26))
+        print(f"  (該当 {int(bad.sum())} 件を除外。成績が大きく変わるなら、"
+              f"その分の損益は決済できたか次第です)")
 
     print("\n" + "=" * 78)
     print("判定の目安: 日次t>3 かつ 年別で大半がプラス かつ 単調性あり かつ")
