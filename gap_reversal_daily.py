@@ -86,6 +86,17 @@ TRADING_DAYS  = 245
 # ローカル日足を読み込んだ場合の置き場 (yfinance を使わずに済ませる)
 _LOCAL: dict[str, pd.DataFrame] | None = None
 
+# N ルール (固定%の別実装) を同じパネルで測るためのフラグ。
+# 候補行の keep 条件が ATR 正規化ベースなので、生%の条件で発火する行が
+# 落ちることがある。--nrule のときだけ keep を広げる。
+_NRULE: bool = False
+N_PREV_THR = 0.01753     # ⛔ 1.75% ではない。丸めない
+N_GAP_THR  = 0.01000
+N_TOPN     = 50          # 売買代金20日平均の上位N銘柄
+N_ONEWAY_BPS = 4.4       # 呼値1円 / 建値2,257円
+# 日ごとのユニバース銘柄数 (年別の発火率を出すため)
+_UNI_CNT: pd.Series | None = None
+
 _NEED = ["open", "high", "low", "close"]
 
 # 東証には値幅制限があるので、これを超えるギャップは物理的に起こり得ない。
@@ -529,6 +540,11 @@ def build_symbol_rows(
     # 候補 = 本命(前日に大きな動き) + プラセボ用(動きなしだがギャップあり)
     liquid = j["turnover"] >= MIN_TURNOVER
     keep = liquid & ((j["prev_z"].abs() >= min_prev_atr) | (j["gap_z"].abs() >= 0.3))
+    if _NRULE:
+        # 生%の固定閾値でも発火しうる行を落とさない
+        keep = keep | (liquid
+                       & (j["prev_ret"].abs() >= N_PREV_THR)
+                       & (j["gap"].abs() >= N_GAP_THR))
     cand = j[keep]
     if cand.empty:
         return pd.DataFrame(), uni, rank_pool
@@ -658,7 +674,8 @@ def build_panel(
     ).sort_index()
     mkt.name = "mkt_o2c"
     # 日ごとの「上位N位の売買代金」を閾値表にする
-    global _TOPN_THR, _RANK_THR
+    global _TOPN_THR, _RANK_THR, _UNI_CNT
+    _UNI_CNT = pd.Series({d: uni_cnt[d] for d in uni_cnt}).sort_index()
     _RANK_THR = {"dn": {}, "up": {}}
     for n in RANK_LIST:
         # その日の銘柄数が N 未満なら全部が上位N以内なので、閾値は緩い側に置く。
@@ -886,6 +903,224 @@ def _fmt(label: str, st: dict, width: int = 26) -> str:
 # ══════════════════════════════════════════════════════════════════
 # レポート
 # ══════════════════════════════════════════════════════════════════
+def _half_split(daily: pd.Series, w: pd.Series | None = None) -> str:
+    """前半/後半の差を SE 付きで検定する。
+
+    3点の単調性は偶然で出る (§16.6.35) ので、必ず差の検定で見る。
+    w を渡すと日ごとの取引数で重み付けする。3件の年と47件の年を
+    同じ重みで扱うと、標本の薄い年がそのまま結論を動かすため。
+    """
+    if len(daily) < 40:
+        return "  (日数不足)"
+    half = daily.index[len(daily) // 2]
+    out = []
+    for name, ww in (("等重み", None), ("取引数で重み付け", w)):
+        if ww is None and name != "等重み":
+            continue
+        wgt = pd.Series(1.0, index=daily.index) if ww is None else ww.reindex(
+            daily.index).fillna(0.0)
+        res = []
+        for m in (daily.index < half, daily.index >= half):
+            x, u = daily[m], wgt[m]
+            if len(x) < 6 or u.sum() <= 0:
+                return "  (日数不足)"
+            mu = float((u * x).sum() / u.sum())
+            # 重み付き平均の頑健な標準誤差
+            se = float(np.sqrt((u ** 2 * (x - mu) ** 2).sum()) / u.sum())
+            res.append((mu, se))
+        (m0, s0), (m1, s1) = res
+        se = math.sqrt(s0 ** 2 + s1 ** 2)
+        t = (m0 - m1) / se if se > 0 else float("nan")
+        out.append(f"    {name:<18} 前半 {m0*10000:>7.1f}bp / 後半 {m1*10000:>7.1f}bp"
+                   f"   差 {(m0-m1)*10000:>+7.1f}bp (SE {se*10000:.1f}, t={t:.2f})")
+    out.append("    |t| < 2 は『直近が弱くない』ではなく"
+               " **この標本では分からない** です")
+    return "\n".join(out)
+
+
+def _year_table(run: pd.DataFrame, col: str, cost_bps: float,
+                max_names: int | None, panel: pd.DataFrame | None = None,
+                drop_partial: bool = True) -> pd.Series:
+    """年別の α/t を出し、日次系列を返す。
+
+    ⚠ 発火日数の列を必ず出すこと。3日の年の +200bp と 47日の年の +50bp を
+      並べて『昔は良かった』と読むのが最も起こりやすい誤読です。
+    """
+    if drop_partial:
+        # 最終年が途中までなら年別から外す (月が揃っていない年は比較できない)
+        last = run["date"].max()
+        if last.month < 12:
+            run = run[run["date"].dt.year < last.year]
+            print(f"    ⚠ {last.year} 年は {last:%Y-%m} までで未完なので"
+                  " 年別から外しました (別記)")
+    print(f"    {'年':<6}{'発火日':>7}{'取引':>7}{'発火率‰':>9}{'日次bp':>9}{'t':>7}"
+          f"{'勝率':>7}{'累計%':>9}{'|gap|%':>9}{'ATR%':>7}")
+    for y in sorted(run["date"].dt.year.unique()):
+        g = run[run["date"].dt.year == y]
+        d = to_daily(g, col, cost_bps, max_names)
+        if not len(d):
+            continue
+        mu = float(d.mean())
+        sd = float(d.std(ddof=1)) if len(d) > 1 else 0.0
+        t = mu / (sd / math.sqrt(len(d))) if sd > 0 and len(d) > 1 else float("nan")
+        rate = float("nan")
+        if _UNI_CNT is not None and len(_UNI_CNT):
+            cnt = float(_UNI_CNT[_UNI_CNT.index.year == y].sum())
+            rate = len(g) / cnt * 1000 if cnt else float("nan")
+        print(f"    {y:<6}{len(d):>7}{len(g):>7}{rate:>9.3f}{mu*10000:>9.1f}"
+              f"{t:>7.2f}{float((d > 0).mean())*100:>6.0f}%{float(d.sum())*100:>9.2f}"
+              f"{g['gap'].abs().median()*100:>9.2f}{g['atr'].median()*100:>7.2f}")
+    if panel is not None:
+        # 発火0の年が、候補行そのものが無い年 (データ欠落) かどうかの切り分け
+        fired = set(run["date"].dt.year)
+        yrs = sorted(set(panel["date"].dt.year))
+        zero = [y for y in yrs if y not in fired]
+        if zero:
+            print("    発火0の年:", ", ".join(
+                f"{y} (候補行 {int((panel['date'].dt.year == y).sum()):,})"
+                for y in zero))
+            print("      候補行がゼロでないなら『その年は条件を満たさなかった』"
+                  "だけでデータ欠落ではありません")
+    return to_daily(run, col, cost_bps, max_names)
+
+
+def _tail_report(d_all: pd.Series) -> None:
+    if len(d_all) < 20:
+        print("    日数が足りません")
+        return
+    tot = float(d_all.sum())
+    srt = d_all.sort_values(ascending=False)
+    if abs(tot) < abs(float(d_all.abs().sum())) * 0.05:
+        print("    ⚠ 総和がほぼゼロなので『寄与%』は発散します。"
+              "パーセントではなく bp の絶対値で見てください。")
+    for k in (1, 5, 10):
+        if len(srt) > k:
+            print(f"    上位{k:>2}日の寄与  "
+                  f"{float(srt.head(k).sum())/tot*100 if tot else float('nan'):>6.1f}%")
+    k10 = max(1, int(len(srt) * 0.10))
+    print(f"    上位10%の日 ({k10}日) の寄与  "
+          f"{float(srt.head(k10).sum())/tot*100 if tot else float('nan'):>6.1f}%")
+    print(f"    日次の中央値  {float(d_all.median())*10000:>7.1f}bp")
+    lo, hi = d_all.quantile(0.01), d_all.quantile(0.99)
+    trm = d_all[(d_all >= lo) & (d_all <= hi)]
+    st_t = stats(trm)
+    print(f"    上下1%除去後  {st_t.get('mean_bp', float('nan')):>7.1f}bp"
+          f"  t={st_t.get('t', float('nan')):>5.2f}  ({len(trm)}日)")
+    print("    ⛔ 上下1%除去は『1ヶ月まるごと』の依存を検出できません。"
+          "年別と併せて見ること。")
+
+
+def nrule_signal(panel: pd.DataFrame, side: str) -> pd.DataFrame:
+    """N ルール (固定%・売買代金上位N) をこのエンジンで表現する。
+
+    仕様 (丸めない):
+      前夜  前日リターン >= +1.753%  かつ 売買代金20日平均が その日の上位50位以内
+      09:00 始値が前日終値の +100bp 以上 → 空売り
+      決済  その日の終値。損切りも利確も置かない
+    鏡像 (mirror) は符号を全部反転して買い。
+    ⚠ 価格帯 1,000〜6,000円 はパネル構築時に適用済み。
+    """
+    p = panel
+    if N_TOPN not in _TOPN_THR:
+        raise SystemExit(f"売買代金の上位{N_TOPN}位の閾値表がありません")
+    thr = p["date"].map(_TOPN_THR[N_TOPN])
+    liq = p["turnover"] >= thr
+    if side == "short":
+        m = (p["prev_ret"] >= N_PREV_THR) & (p["gap"] >= N_GAP_THR) & liq
+        sd = -1
+    else:
+        m = (p["prev_ret"] <= -N_PREV_THR) & (p["gap"] <= -N_GAP_THR) & liq
+        sd = +1
+    out = p[m].copy()
+    out["side"] = sd
+    out["raw"] = sd * out["o2c"]          # 生リターン (始値→終値)
+    return out
+
+
+def nrule_report(panel: pd.DataFrame, mkt: pd.Series, args) -> int:
+    """N ルールと鏡像を、§13 と同じ形式で測る。"""
+    print(provenance("gap_reversal_daily.py"))
+    print(f"\nN ルール検証  前日 {N_PREV_THR*100:.3f}% / ギャップ "
+          f"{N_GAP_THR*100:.2f}% / 売買代金 上位{N_TOPN}位 / 引け決済")
+    print(f"母集団 {panel['symbol'].nunique()} 銘柄 / "
+          f"{panel['date'].min():%Y-%m-%d} 〜 {panel['date'].max():%Y-%m-%d}")
+    print(f"コスト 片道 {N_ONEWAY_BPS}bp (呼値1円 / 建値2,257円) → 往復 "
+          f"{N_ONEWAY_BPS*2}bp")
+    print("⚠ 直近が OOS だから信じられる、とは書きません。正しくは"
+          " 『TRAIN では一度も使っていない期間』です。")
+
+    sigs = {}
+    for name, side in (("N (空売り)", "short"), ("鏡像 (買い)", "long")):
+        sg = nrule_signal(panel, side)
+        sigs[side] = sg
+        print("\n" + "=" * 78)
+        print(f"■ {name}   発火 {len(sg):,} 件 / "
+              f"{sg['date'].nunique():,} 日")
+        if len(sg) < 30:
+            print("  件数が足りません")
+            continue
+        # α (同日ユニバース平均を控除) も併記する。円ベースの参照値とは
+        # 単位が違うので、一致を見るのは発火日数と符号・順位のパターン。
+        sg["alpha"] = sg["raw"] - sg["date"].map(mkt).fillna(0.0) * sg["side"]
+        for lbl, col, cost in (("グロス", "raw", 0.0),
+                               (f"往復 {N_ONEWAY_BPS*2}bp 控除後", "raw",
+                                N_ONEWAY_BPS * 2),
+                               ("α (同日ユニバース控除)", "alpha", 0.0)):
+            st = stats(to_daily(sg, col, cost, None))
+            print(_fmt(f"  {lbl}", st, width=26))
+        print(f"  1件あたり グロス {sg['raw'].mean()*10000:.1f}bp / "
+              f"往復控除後 {(sg['raw'].mean()-N_ONEWAY_BPS*2/10000)*10000:.1f}bp")
+
+        print("\n  年別 (発火日数を必ず見ること)")
+        d_all = _year_table(sg, "raw", N_ONEWAY_BPS * 2, None, panel=panel)
+        print("\n  前半/後半の差の検定")
+        print(_half_split(d_all, sg.groupby("date").size()))
+        print("\n  裾の依存度")
+        _tail_report(d_all)
+        last = sg["date"].max()
+        if last.month < 12:
+            tailrows = sg[sg["date"].dt.year == last.year]
+            dt = to_daily(tailrows, "raw", N_ONEWAY_BPS * 2, None)
+            if len(dt):
+                print(f"\n  別記 {last.year} 年 (未完, {last:%Y-%m} まで): "
+                      f"{len(dt)}日 {len(tailrows)}件 "
+                      f"{float(dt.mean())*10000:.1f}bp 累計 {float(dt.sum())*100:.2f}%")
+
+    # ── 重なり ────────────────────────────────────────────
+    print("\n" + "=" * 78)
+    print("■ こちらの買い側 (残差3ATR) と N鏡像 (固定%) の重なり")
+    print("  同じものなら足し算になりません (置き換えであって追加ではない)")
+    mine = apply_signal(panel, mkt, args.raw,
+                        None if args.prev_thr is None else args.prev_thr,
+                        args.gap_thr if args.gap_thr is not None else 3.0)
+    mine = mine[mine["side"] > 0]
+    mir = sigs.get("long")
+    if mir is None or not len(mine) or not len(mir):
+        print("  片方が空です")
+        return 0
+    key = lambda d: set(zip(d["date"], d["symbol"]))
+    a, b = key(mine), key(mir)
+    both = a & b
+    print(f"    こちらの買い側 {len(a):,} 件 / N鏡像 {len(b):,} 件 / "
+          f"重なり {len(both):,} 件")
+    print(f"    こちら側から見た重なり率 {len(both)/len(a)*100:.1f}% / "
+          f"N鏡像から見て {len(both)/len(b)*100:.1f}%")
+    da, db = set(mine["date"]), set(mir["date"])
+    print(f"    発火日   こちら {len(da):,} 日 / N鏡像 {len(db):,} 日 / "
+          f"両方 {len(da & db):,} 日")
+    for lbl, d, k in (("こちらの買い側", mine, a), ("N鏡像", mir, b)):
+        ov = pd.Series([(x, y) in both for x, y in zip(d["date"], d["symbol"])],
+                       index=d.index)
+        col = "alpha" if "alpha" in d.columns else "raw"
+        for sub, m in (("重なった分", ov), ("片方だけ", ~ov)):
+            if m.sum():
+                print(f"    {lbl:<14}{sub:<10} {int(m.sum()):>6,}件  "
+                      f"1件 {d.loc[m, col].mean()*10000:>7.1f}bp")
+    print("  ★ 重なり率が高ければ同じ現象の別表現です。低ければ別の現象で、")
+    print("    そのときだけ足し算の余地があります。")
+    return 0
+
+
 def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
     prev_thr = args.prev_thr   # None なら前日の条件を課さない
     gap_thr = args.gap_thr if args.gap_thr is not None else (
@@ -1428,65 +1663,33 @@ def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
         if hcol == "alpha":
             print("  ⚠ 持ち越し列がありません (§10 で該当が無かったか未実行)。"
                   "持ち越し無視の数字と一致します。")
-        d_all = to_daily(run, hcol, args.cost_bps, args.max_names)
-        st_all = stats(d_all)
-        print(f"  全体  日次{len(d_all):>5}日  "
+        st_all = stats(to_daily(run, hcol, args.cost_bps, args.max_names))
+        print(f"  全体  {st_all.get('n', 0):>5}日  "
               f"{st_all.get('mean_bp', float('nan')):>7.2f}bp  "
               f"t={st_all.get('t', float('nan')):>5.2f}")
 
         print("\n  年別 (この行が判定の対象)")
-        print(f"    {'年':<6}{'日数':>6}{'件数':>7}{'日次bp':>10}{'t':>7}"
-              f"{'勝率':>8}{'累計%':>9}")
-        yrs = sorted(run["date"].dt.year.unique())
-        for y in yrs:
-            g = run[run["date"].dt.year == y]
-            d = to_daily(g, hcol, args.cost_bps, args.max_names)
-            if not len(d):
-                continue
-            mu = float(d.mean())
-            sd = float(d.std(ddof=1)) if len(d) > 1 else 0.0
-            t = mu / (sd / math.sqrt(len(d))) if sd > 0 and len(d) > 1 else float("nan")
-            print(f"    {y:<6}{len(d):>6}{len(g):>7}{mu*10000:>10.1f}{t:>7.2f}"
-                  f"{float((d > 0).mean())*100:>7.0f}%{float(d.sum())*100:>9.2f}")
+        print("  ⚠ 発火日数の列を必ず見ること。3日の年の +200bp と 47日の年の")
+        print("    +50bp を並べて『昔は良かった』と読むのが最も起こりやすい誤読です。")
+        print("    発火率‰ = 取引数 / その年のユニバース銘柄日数 × 1000。")
+        print("    これが横ばいなら発火数の増加は母集団の成長で説明できます。")
+        d_all = _year_table(run, hcol, args.cost_bps, args.max_names, panel=panel)
 
-        # 直近が体系的に落ちているか。3点の単調性ではなく差の検定で見る
-        # (§16.6.35 と同じ理由: 少数点の並びは偶然で単調になる)。
-        if len(d_all) >= 40:
-            half = d_all.index[len(d_all) // 2]
-            old, new_ = d_all[d_all.index < half], d_all[d_all.index >= half]
-            if len(old) > 5 and len(new_) > 5:
-                diff = float(old.mean() - new_.mean())
-                se = math.sqrt(old.var(ddof=1) / len(old)
-                               + new_.var(ddof=1) / len(new_))
-                td = diff / se if se > 0 else float("nan")
-                print(f"\n  前半 ({old.index[0]:%Y-%m} 〜) {old.mean()*10000:>7.1f}bp"
-                      f" / 後半 ({new_.index[0]:%Y-%m} 〜) {new_.mean()*10000:>7.1f}bp"
-                      f"   差 {diff*10000:+.1f}bp (SE {se*10000:.1f}, t={td:.2f})")
-                print("    |t| < 2 なら『直近が弱い』は検出できていません"
-                      " (弱くない、ではなく分からない)")
+        print("\n  前半/後半の差の検定")
+        print(_half_split(d_all, run.groupby("date").size()))
 
-        # 裾の依存度。順位フィルタ後・持ち越し後で測り直す。
         print("\n  裾の依存度 (順位フィルタ後・持ち越し後)")
-        if len(d_all) >= 20:
-            tot = float(d_all.sum())
-            srt = d_all.sort_values(ascending=False)
-            for k in (1, 5, 10):
-                if len(srt) > k:
-                    print(f"    上位{k:>2}日の寄与  "
-                          f"{float(srt.head(k).sum())/tot*100 if tot else float('nan'):>6.1f}%")
-            k10 = max(1, int(len(srt) * 0.10))
-            print(f"    上位10%の日 ({k10}日) の寄与  "
-                  f"{float(srt.head(k10).sum())/tot*100 if tot else float('nan'):>6.1f}%")
-            print(f"    日次の中央値  {float(d_all.median())*10000:>7.1f}bp")
-            lo, hi = d_all.quantile(0.01), d_all.quantile(0.99)
-            trm = d_all[(d_all >= lo) & (d_all <= hi)]
-            st_t = stats(trm)
-            print(f"    上下1%除去後  {st_t.get('mean_bp', float('nan')):>7.1f}bp"
-                  f"  t={st_t.get('t', float('nan')):>5.2f}  ({len(trm)}日)")
-            print("    ⛔ 上下1%除去は『1ヶ月まるごと』の依存を検出できません。"
-                  "上の年別と併せて見てください。")
-        else:
-            print("    日数が足りません")
+        _tail_report(d_all)
+
+        # 計画値は標本の厚い近年を使う。全期間平均は薄い年に引っ張られる。
+        yr = run["date"].dt.year
+        cut = int(yr.max()) - 3
+        for lbl, m in ((f"〜{cut-1}", yr < cut), (f"{cut}〜", yr >= cut)):
+            d = to_daily(run[m], hcol, args.cost_bps, args.max_names)
+            if len(d) >= 20:
+                print(f"    {lbl:<10} {len(d):>4}日 {float(d.mean())*10000:>7.2f}bp")
+        print("    ★ 計画値には全期間平均ではなく、標本の厚い近年の水準を"
+              "使ってください (保守側)。")
 
     print("\n" + "=" * 78)
     print("判定の目安: 日次t>3 かつ 年別で大半がプラス かつ 単調性あり かつ")
@@ -1649,7 +1852,8 @@ def self_test() -> int:
     mkt = pd.Series({d: uni_s[d] / uni_c[d] for d in uni_c}).sort_index()
 
     # 順位の閾値表 (§11-§13 を合成データでも通すため)
-    global _RANK_THR, _TOPN_THR
+    global _RANK_THR, _TOPN_THR, _UNI_CNT
+    _UNI_CNT = pd.Series({d: uni_c[d] for d in uni_c}).sort_index()
     _RANK_THR = {"dn": {}, "up": {}}
     for nn in RANK_LIST:
         _RANK_THR["dn"][nn] = panel.groupby("date")["gap"].apply(
@@ -1724,6 +1928,9 @@ def main() -> int:
     ap.add_argument("--capital", type=float, default=4_000_000)
     ap.add_argument("--earnings", action="store_true", help="決算日を取得して分離")
     ap.add_argument("--csv", help="候補パネルを CSV に書き出す")
+    ap.add_argument("--nrule", action="store_true",
+                    help="N ルール (固定パーセント・売買代金上位50) を"
+                         "同じエンジンで測り、こちらの買い側との重なりも出す")
     ap.add_argument("--self-test", dest="self_test", action="store_true")
     args = ap.parse_args()
 
@@ -1768,6 +1975,9 @@ def main() -> int:
     if args.coverage:
         print(f"\n対象 {len(syms)} 銘柄。--coverage 指定のためここで終了します。")
         return 0
+    if args.nrule:
+        # 生パーセントの固定閾値で発火する行を候補から落とさない
+        globals()["_NRULE"] = True
     keep_thr = 0.9 if args.grid else min_prev * (1.0 if args.raw else 0.9)
     panel, mkt = build_panel(syms, args.workers, args.earnings, keep_thr,
                              no_index=args.no_index)
@@ -1778,6 +1988,8 @@ def main() -> int:
         audit_report()
     if args.grid:
         grid_scan(panel, mkt, args)
+    elif args.nrule:
+        return nrule_report(panel, mkt, args)
     else:
         report(panel, mkt, args)
     return 0
