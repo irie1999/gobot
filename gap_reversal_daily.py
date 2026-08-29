@@ -1077,10 +1077,12 @@ def _year_table(run: pd.DataFrame, col: str, cost_bps: float,
     ⚠ 発火日数の列を必ず出すこと。3日の年の +200bp と 47日の年の +50bp を
       並べて『昔は良かった』と読むのが最も起こりやすい誤読です。
     """
+    dropped_year = None
     if drop_partial:
         # 最終年が途中までなら年別から外す (月が揃っていない年は比較できない)
         last = run["date"].max()
         if last.month < 12:
+            dropped_year = int(last.year)
             run = run[run["date"].dt.year < last.year]
             print(f"    ⚠ {last.year} 年は {last:%Y-%m} までで未完なので"
                   " 年別から外しました (別記)")
@@ -1105,7 +1107,8 @@ def _year_table(run: pd.DataFrame, col: str, cost_bps: float,
         # 発火0の年が、候補行そのものが無い年 (データ欠落) かどうかの切り分け
         fired = set(run["date"].dt.year)
         yrs = sorted(set(panel["date"].dt.year))
-        zero = [y for y in yrs if y not in fired]
+        # ⚠ 未完で外した年は「発火0」ではないので混ぜない
+        zero = [y for y in yrs if y not in fired and y != dropped_year]
         if zero:
             print("    発火0の年 (候補行 / 閾値までどれくらい近かったか):")
             for y in zero:
@@ -1916,14 +1919,38 @@ def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
                     if len(d) >= 20:
                         print(f"      {lbl:<8}{tag:<8} {len(d):>4}日 "
                               f"{float(d.mean())*10000:>7.2f}bp")
+        # ⛔ 近年の水準は **コスト控除後** です。エッジ/コスト比は
+        #   グロスで測るので、期間ごとに両方出さないと基準と突き合わせられません。
         yr = run["date"].dt.year
         cut = int(yr.max()) - 3
+        print(f"    {'期間':<10}{'日数':>6}{'件数':>7}{'net bp':>9}"
+              f"{'1件グロスbp':>13}{'エッジ/コスト':>13}")
         for lbl, m in ((f"〜{cut-1}", yr < cut), (f"{cut}〜", yr >= cut)):
-            d = to_daily(run[m], hcol, args.cost_bps, args.max_names)
-            if len(d) >= 20:
-                print(f"    {lbl:<10} {len(d):>4}日 {float(d.mean())*10000:>7.2f}bp")
+            g = run[m]
+            d = to_daily(g, hcol, args.cost_bps, args.max_names)
+            if len(d) < 20:
+                continue
+            gross = float(g[hcol].mean()) * 10000
+            ratio = gross / args.cost_bps if args.cost_bps else float("inf")
+            print(f"    {lbl:<10}{len(d):>6}{len(g):>7}"
+                  f"{float(d.mean())*10000:>9.2f}{gross:>13.1f}{ratio:>13.2f}")
         print("    ★ 計画値には全期間平均ではなく、標本の厚い近年の水準を"
               "使ってください (保守側)。")
+        print("    ⛔ エッジ/コスト比は **近年の行** で 3.0 を満たしているか"
+              "を見ること。")
+        print("       全期間で 4 を超えていても、近年が 2 なら実運用は近年の側です。")
+        # 未完の年は年別表から外れて見えなくなるので別記する
+        last = sig["date"].max()
+        if last.month < 12:
+            py = int(last.year)
+            tailrows = sig[inn & (sig["date"].dt.year == py)]
+            if len(tailrows):
+                dt_ = to_daily(tailrows, hcol, args.cost_bps, args.max_names)
+                if len(dt_):
+                    print(f"\n    別記 {py} 年 (未完, {last:%Y-%m} まで): "
+                          f"{len(dt_)}日 {len(tailrows)}件 "
+                          f"{float(dt_.mean())*10000:.2f}bp 累計 "
+                          f"{float(dt_.sum())*100:.2f}%")
 
     print("\n" + "=" * 78)
     print("判定の目安: 日次t>3 かつ 年別で大半がプラス かつ 単調性あり かつ")
