@@ -832,6 +832,31 @@ def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
         print(f"    {y}  n={len(s):>4}  {m:>7.2f}bp/日  {bar}")
     print(f"  → プラスの年: {pos}/{yr.ngroups}")
 
+    # 月単位の寄与。裾1%除去は1トレード単位なので、1ヶ月まるごとの依存は
+    # 検出できない。相場イベント (暴落月など) 1つで説明がつく戦略を弾く。
+    print("\n  月別の寄与 (単月依存の検査)")
+    d_g = to_daily(sig, "alpha", 0.0, args.max_names)      # グロスで見る
+    mo = d_g.groupby(d_g.index.to_period("M")).sum()
+    tot = float(mo.sum())
+    if tot > 0 and len(mo) >= 12:
+        top = mo.sort_values(ascending=False)
+        print(f"    月数 {len(mo)}  /  プラスの月 {int((mo > 0).sum())} "
+              f"({(mo > 0).mean()*100:.0f}%)")
+        for i, (m, v) in enumerate(top.head(3).items(), 1):
+            print(f"    寄与 第{i}位  {m}  {v*100:>7.1f}%  "
+                  f"(グロス総和の {v/tot*100:>5.1f}%)")
+        for k, lbl in ((1, "最大の1ヶ月"), (3, "上位3ヶ月")):
+            drop = set(top.head(k).index)
+            sub = sig[~sig["date"].dt.to_period("M").isin(drop)]
+            st = stats(to_daily(sub, "alpha", args.cost_bps, args.max_names))
+            print(_fmt(f"    {lbl}を除外", st, width=24))
+        share1 = float(top.iloc[0]) / tot * 100
+        if share1 > 40:
+            print(f"    ⚠ 最大の1ヶ月がグロス総和の {share1:.0f}%。"
+                  f"単月依存です。")
+    else:
+        print("    (月数が少ないか総和が非正のため省略)")
+
     # ── §4 ギャップ幅の単調性 ─────────────────────────────────────
     print("\n【4】ギャップ幅(ATR単位)の分位別 α  ← 単調に増えなければノイズ")
     cand = panel[panel["prev_z"].abs() >= prev_thr] if not args.raw else \
@@ -956,8 +981,18 @@ def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
             continue
         st = stats(to_daily(g, "alpha", args.cost_bps, args.max_names))
         print(_fmt(name, st, width=30))
+        # トレード単位と日次で符号が食い違っていないかを検査する。
+        # 食い違うなら、その方向の損益は特定の日への集中で決まっている。
+        tr = g["alpha"] - args.cost_bps / 10000.0
+        t_tr = (float(tr.mean() / (tr.std(ddof=1) / math.sqrt(len(tr))))
+                if tr.std(ddof=1) > 0 else 0.0)
+        print(f"      トレード単位 {tr.mean()*10000:>7.2f}bp (t={t_tr:>5.2f})  /  "
+              f"日次 {st.get('mean_bp', 0):>7.2f}bp (t={st.get('t', 0):>5.2f})")
         print(f"      グロス {g['alpha'].mean()*10000:>6.1f}bp/件  "
               f"{len(g):,}件  平均ギャップ {g['gap'].abs().mean()*100:.2f}%")
+        if tr.mean() * st.get("mean_bp", 0) < 0:
+            print("      ⚠ トレード単位と日次で符号が逆転しています。"
+                  "特定の日への集中で決まっています。")
     print("  → 買い側だけで成立するなら、空売りの制度的制約を回避できます。")
     print("     空売り側にしか無いなら、実弾の前に証券会社への照会が必須です。")
 
