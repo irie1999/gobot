@@ -83,7 +83,17 @@ def build_rows(sym: str) -> pd.DataFrame | None:
     })
 
 
-def build_panel(symbols: list[str], workers: int) -> pd.DataFrame:
+def build_panel(symbols: list[str], workers: int,
+                select: str = "rank-first") -> pd.DataFrame:
+    """候補を作る。
+
+    ⛔ 『売買代金の上位50位』をどの母集団で数えるかで件数が数倍変わります。
+      rank-first  : 全銘柄を売買代金で並べて上位50 → そこに条件を当てる (既定)
+      filter-first: 先に前日条件を満たす銘柄だけを取り出し、その中の上位50
+    後者は「その日 前日+1.753% を満たした銘柄」が母集団なので、同じ50でも
+    中身が全く違い、発火は数倍になります。参照値 144件/月 との差はここが
+    いちばん疑わしい。
+    """
     rows = []
     with ThreadPoolExecutor(max_workers=workers) as ex:
         for i, r in enumerate(ex.map(build_rows, symbols), 1):
@@ -94,7 +104,9 @@ def build_panel(symbols: list[str], workers: int) -> pd.DataFrame:
     if not rows:
         raise SystemExit("候補が1件もありません")
     p = pd.concat(rows, ignore_index=True)
-    # その日の売買代金 上位TOPN に絞る
+    if select == "filter-first":
+        # 前日条件 (どちらの符号でも) を満たす銘柄の中で上位TOPN
+        p = p[p["prev_ret"].abs() >= PREV_THR]
     p["rank"] = p.groupby("date")["turnover"].rank(ascending=False,
                                                    method="first")
     p = p[p["rank"] <= TOPN].sort_values(["date", "symbol"])
@@ -294,14 +306,17 @@ def concentration(trades: pd.DataFrame) -> None:
         print("    ⚠ 3件以上の日が少なすぎて判別できません")
         return
     print("\n    (1) その日の**負けの合計**に対する最悪1件の割合 (3件以上の日)")
-    print(f"      {'':>10}{'実測':>9}{'等分なら':>10}")
+    print(f"      {'':>10}{'実測':>9}{'偶然でも':>10}")
     for q in (0.25, 0.50, 0.75, 0.90):
         print(f"      {int(q*100):>3}%点   {multi['worst_share'].quantile(q):>8.1f}%"
               f"{multi['equal_share'].quantile(q):>9.1f}%")
     print(f"      平均      {multi['worst_share'].mean():>8.1f}%"
           f"{multi['equal_share'].mean():>9.1f}%")
-    print("      ★ 実測が『等分なら』と同じ水準 → 全部が同じように負けた = 共変動")
-    print("        実測がそれを大きく上回る → 1〜2銘柄に寄っている = 集中")
+    print("      ★ 『偶然でも』は n 個の独立な損失で最大値が占める期待割合")
+    print("        (指数分布の H_n/n)。⛔ 1/n ではありません。n=5 なら 45.7%、")
+    print("        n=13 なら 24.5% が偶然の水準です。")
+    print("        実測がこれと同水準 → 集中は偶然の範囲 = 共変動")
+    print("        実測が大きく上回る → 1〜2銘柄に本当に寄っている = 集中")
 
     print("\n    (2) その日の建玉のうち **負けた割合** (いちばん素直な判別)")
     for q in (0.25, 0.50, 0.75, 0.90):
@@ -313,7 +328,7 @@ def concentration(trades: pd.DataFrame) -> None:
         print(f"      大負け上位20日に限ると 平均 "
               f"{w['loss_ratio'].mean()*100:.0f}%  "
               f"(最悪1件の割合 平均 {w['worst_share'].mean():.1f}% / "
-              f"等分なら {w['equal_share'].mean():.1f}%)")
+              f"偶然でも {w['equal_share'].mean():.1f}%)")
     print("      ★ 8割以上が負けているなら **共変動**。半分程度なら **集中**。")
 
     print(f"\n    建玉額のハーフィンダール指数  中央 {hhi.median():.3f}"
@@ -375,6 +390,53 @@ def run(sig: pd.DataFrame, n225, args) -> None:
     concentration(base)
 
 
+def combined(panel: pd.DataFrame, scheme: str = "fixed") -> None:
+    """N (空売り) と 鏡像 (買い) を同時に建てた場合。
+
+    ★ 両者の大負け日は「市場が自分と逆に日中動いた日」で、向きが逆です。
+      N の大負け日は日経が日中プラス、鏡像の大負け日は日経が日中マイナス。
+      **同時に建てると市場エクスポージャが相殺されるはず**、という検証。
+    ⚠ これは『両建て』(同一銘柄の両方向) とは別物です。独立な2つの
+      シグナル集合で、βの符号が逆というだけ。過去に潰した系統ではありません。
+    """
+    s_short = signals(panel, "short")
+    s_long = signals(panel, "long")
+    both = pd.concat([s_short, s_long], ignore_index=True)
+    both = both.sort_values(["date", "gap"], key=lambda c: (
+        c if c.name == "date" else -c.abs()))
+    # 予算は両側合わせて 400万。発注順は |ギャップ| 降順で共通
+    t_both = apply_sizing(both, scheme)
+    t_s = apply_sizing(s_short, scheme)
+    t_l = apply_sizing(s_long, scheme)
+    print("\n" + "=" * 78)
+    print("■ 両側を同時に建てた場合 (100株固定, 予算は両側で400万を共有)")
+    print("  ★ N の大負け日は日経が日中プラス、鏡像の大負け日は日中マイナス。")
+    print("    市場エクスポージャの符号が逆なので、合算すると相殺されるはず。")
+    print("  ⚠ 『両建て』(同一銘柄の両方向) とは別物です。")
+    for split, lo, hi in (("TRAIN (〜2020-08)", None, TRAIN_END),
+                          ("TEST (2020-09〜)", TRAIN_END, None),
+                          ("全期間", None, None)):
+        rows = []
+        for name, t in (("N のみ", t_s), ("鏡像のみ", t_l), ("両側", t_both)):
+            x = t
+            if lo is not None:
+                x = x[x["date"] >= lo]
+            if hi is not None:
+                x = x[x["date"] < hi]
+            if len(x) >= 50:
+                rows.append(describe(x, name))
+        if rows:
+            print(f"\n  {split}")
+            print_table(rows)
+    # 同じ日に両側が出ているか
+    d_s, d_l = set(t_s["date"]), set(t_l["date"])
+    print(f"\n  発火日  N {len(d_s):,} 日 / 鏡像 {len(d_l):,} 日 / "
+          f"両方 {len(d_s & d_l):,} 日 ({len(d_s & d_l)/len(d_s | d_l)*100:.0f}%)")
+    print("  ⛔ 両方が同じ日に出るのが稀なら、合算しても相殺は起きません。")
+    print("     その場合『両側』は単に取引機会が増えただけで、σ が下がるのは")
+    print("     日をまたいだ分散にすぎません。月平均/σ の改善幅で判断すること。")
+
+
 def self_test() -> int:
     rng = np.random.default_rng(0)
     dates = pd.bdate_range("2015-01-01", "2024-12-31")
@@ -414,6 +476,12 @@ def main() -> int:
     ap.add_argument("--cache-dir", dest="cache_dir", default=".rsi2_cache")
     ap.add_argument("--limit", type=int, help="先頭N銘柄だけ (デバッグ)")
     ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--select", choices=["rank-first", "filter-first"],
+                    default="rank-first",
+                    help="売買代金 上位50位をどの母集団で数えるか。"
+                         "filter-first は前日条件を満たす銘柄の中で上位50")
+    ap.add_argument("--both", action="store_true",
+                    help="N と鏡像を同時に建てた場合を測る")
     ap.add_argument("--corr", action="store_true",
                     help="セクターの代理として、その日の銘柄どうしの"
                          "過去60日リターン平均相関を出す")
@@ -427,7 +495,7 @@ def main() -> int:
     if args.limit:
         syms = syms[: args.limit]
     print(f"  {len(syms)} 銘柄からパネルを作ります (指数は使いません)")
-    panel = build_panel(syms, args.workers)
+    panel = build_panel(syms, args.workers, args.select)
     print(f"  上位{TOPN}位の候補 {len(panel):,} 行 / "
           f"{panel['date'].nunique():,} 営業日 "
           f"({panel['date'].min():%Y-%m-%d} 〜 {panel['date'].max():%Y-%m-%d})")
@@ -441,6 +509,9 @@ def main() -> int:
     print("     ここが桁で違うなら、成績を論じる前に仕様差を特定すること。")
     if not len(sig):
         return 1
+    if args.both:
+        combined(panel)
+        return 0
     n225 = load_n225()
     if n225 is None:
         print("  ⚠ ^N225 が取れないので N225 列は空になります")
