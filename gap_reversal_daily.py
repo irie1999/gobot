@@ -602,6 +602,26 @@ def build_panel(
         idx["idx_ret"] = idx_df["close"].pct_change()
         idx["idx_gap"] = idx_df["open"] / idx_df["close"].shift(1) - 1.0
 
+    # ⛔ 指数に穴があると、その期間の銘柄行が丸ごとパネルから消えます。
+    #   resid_gap / resid_prev が NaN になり ok が False になるためで、
+    #   **エラーも警告も出ずに1年が消える**。実際に yfinance の ^N225 で
+    #   起きました。年別表から年が丸ごと欠けていたら真っ先にここを疑うこと。
+    if len(idx):
+        v = idx["idx_ret"].notna() & idx["idx_gap"].notna()
+        by_year = v.groupby(idx.index.year).agg(["sum", "size"])
+        thin = by_year[by_year["sum"] < 200]
+        if len(thin):
+            print("  ⛔ 指数の有効行が薄い年があります。"
+                  "この年の銘柄行はパネルから丸ごと消えます:")
+            for y, r in thin.iterrows():
+                print(f"       {y}: 有効 {int(r['sum'])} / 行 {int(r['size'])}")
+            zero_open = int((idx_df["open"].isna() | (idx_df["open"] <= 0)).sum()) \
+                if idx_df is not None else 0
+            print(f"     指数の始値が NaN か 0 の行: {zero_open:,} "
+                  "(yfinance の ^N225 で起こります)")
+            print("     → 指数を別ソースで用意するか --no-index で市場成分の控除を"
+                  "省いてください")
+
     rows: list[pd.DataFrame] = []
     uni_sum: dict = defaultdict(float)
     uni_cnt: dict = defaultdict(int)
@@ -692,6 +712,9 @@ def build_panel(
             {dt: (sorted(h, reverse=True)[n - 1] if len(h) >= n else 0.0)
              for dt, h in top_heap.items()}).sort_index()
 
+    yr = panel["date"].dt.year.value_counts().sort_index()
+    print("  パネルの年別候補行数 (0 や極端に少ない年があればそこで消えています):")
+    print("    " + "  ".join(f"{y}:{c:,}" for y, c in yr.items()))
     print(f"候補 {len(panel):,} 行 / {panel['symbol'].nunique()} 銘柄 / "
           f"{len(mkt):,} 営業日 (取得失敗 {failed})")
     if _INTEGRITY:
@@ -976,11 +999,23 @@ def _year_table(run: pd.DataFrame, col: str, cost_bps: float,
         yrs = sorted(set(panel["date"].dt.year))
         zero = [y for y in yrs if y not in fired]
         if zero:
-            print("    発火0の年:", ", ".join(
-                f"{y} (候補行 {int((panel['date'].dt.year == y).sum()):,})"
-                for y in zero))
-            print("      候補行がゼロでないなら『その年は条件を満たさなかった』"
-                  "だけでデータ欠落ではありません")
+            print("    発火0の年 (候補行 / 閾値までどれくらい近かったか):")
+            for y in zero:
+                pm = panel["date"].dt.year == y
+                n = int(pm.sum())
+                if not n or "gap_z" not in panel.columns:
+                    print(f"      {y}: 候補行 {n:,}"
+                          + ("  ⛔ 候補行ゼロ = データ欠落です" if not n else ""))
+                    continue
+                gz = panel.loc[pm, "gap_z"]
+                cnts = "  ".join(
+                    f"|z|>={k}: {int((gz.abs() >= k).sum()):,}"
+                    for k in (1.5, 2.0, 2.5, 3.0))
+                print(f"      {y}: 候補行 {n:,}  最大|z| {gz.abs().max():.2f}"
+                      f"  {cnts}")
+            print("      2.5 に件数があって 3.0 でゼロ → 惜しかっただけ。")
+            print("      1.5 でもゼロ → その年の行が壊れているか消えています。")
+            print("      候補行そのものがゼロ → ⛔ データ欠落。指数の穴を疑うこと")
     return to_daily(run, col, cost_bps, max_names)
 
 
@@ -1090,9 +1125,13 @@ def nrule_report(panel: pd.DataFrame, mkt: pd.Series, args) -> int:
     print("\n" + "=" * 78)
     print("■ こちらの買い側 (残差3ATR) と N鏡像 (固定%) の重なり")
     print("  同じものなら足し算になりません (置き換えであって追加ではない)")
-    mine = apply_signal(panel, mkt, args.raw,
-                        None if args.prev_thr is None else args.prev_thr,
-                        args.gap_thr if args.gap_thr is not None else 3.0)
+    # ⚠ 見出し (§13) と同じ仕様に揃える。--prev-thr を省いたときに
+    #   「前日条件なし」で走ると件数が倍近くなり、別の集合を比べることになる。
+    pv = 0.0 if getattr(args, "prev_thr", None) is None else args.prev_thr
+    gp = 3.0 if getattr(args, "gap_thr", None) is None else args.gap_thr
+    print(f"  こちら側の仕様: 前日={'なし' if pv is None else pv} / "
+          f"ギャップ={gp} ATR  (§13 の見出しと同じ)")
+    mine = apply_signal(panel, mkt, args.raw, pv, gp)
     mine = mine[mine["side"] > 0]
     mir = sigs.get("long")
     if mir is None or not len(mine) or not len(mir):
@@ -1116,8 +1155,12 @@ def nrule_report(panel: pd.DataFrame, mkt: pd.Series, args) -> int:
             if m.sum():
                 print(f"    {lbl:<14}{sub:<10} {int(m.sum()):>6,}件  "
                       f"1件 {d.loc[m, col].mean()*10000:>7.1f}bp")
+    print(f"    |ギャップ| 中央値   こちら {mine['gap'].abs().median()*100:.2f}% / "
+          f"N鏡像 {mir['gap'].abs().median()*100:.2f}%")
     print("  ★ 重なり率が高ければ同じ現象の別表現です。低ければ別の現象で、")
     print("    そのときだけ足し算の余地があります。")
+    print("  ⚠ ギャップの水準が一桁違うなら、そもそも別の事象です。重なり率が")
+    print("    低いのは当然で、『別の現象だから足せる』の根拠にはなりません。")
     return 0
 
 
