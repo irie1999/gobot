@@ -87,6 +87,7 @@ def build_rows(sym: str) -> pd.DataFrame | None:
         "o2c": d["o2c"].to_numpy(), "atr": d["atr"].to_numpy(),
         "turnover": d["turnover"].to_numpy(),
         "next_open": d["next_open"].to_numpy(),
+        "high": d["high"].to_numpy(), "low": d["low"].to_numpy(),
     })
 
 
@@ -630,6 +631,168 @@ def vol_regression(sig: pd.DataFrame, trades: pd.DataFrame,
     print("        であって高ボラ日のエッジではありません。混同しないこと。")
 
 
+# 東証の呼値 (標準)。bp をティックに直すのに要る。
+# ⛔ 3,000円の境界で 1円 → 5円 と5倍になります。閾値は株価に比例するだけなので、
+#   3,000円超の銘柄では同じ bp が 1/5 のティック数になります。
+_TICK = [(0, 1.0), (3_000, 5.0), (5_000, 10.0), (30_000, 50.0),
+         (50_000, 100.0), (100_000, 1_000.0)]
+
+
+def tick_size(px: float) -> float:
+    t = 1.0
+    for lo, v in _TICK:
+        if px >= lo:
+            t = v
+    return t
+
+
+def with_stop(sig: pd.DataFrame, sm: float) -> pd.DataFrame:
+    """損切りだけを入れる (利確は入れない)。
+
+    ⚠ 日足で **損切りだけ** を測るのは方法論的に妥当です。発動判定は
+      高値/安値、約定価格は損切値なので、日中の順序が分からなくても
+      結果は一意に決まります。
+    ⛔ 利確を併用すると「どちらが先に触れたか」が日足からは復元できません。
+      だからこのスクリプトは利確を実装しません (tm=0.0 の列だけ)。
+    ⚠ 滑りはゼロ、つまり損切値ちょうどで約定する前提です。**上限の見積り**です。
+    """
+    g = sig.copy()
+    g["qty"] = float(LOT)
+    g["notional"] = g["qty"] * g["open"]
+    dist = sm * g["atr"]                     # ATR単位 → 建値比
+    if sm <= 0:
+        g["stop_px"] = np.nan
+        g["hit"] = False
+    elif (g["side"] < 0).all():              # 空売り: 上に抜けたら損切り
+        g["stop_px"] = g["open"] * (1.0 + dist)
+        g["hit"] = g["high"] >= g["stop_px"]
+    else:                                    # 買い: 下に抜けたら損切り
+        g["stop_px"] = g["open"] * (1.0 - dist)
+        g["hit"] = g["low"] <= g["stop_px"]
+    g["exit_px"] = np.where(g["hit"], g["stop_px"], g["close"])
+    gross = g["side"] * (g["exit_px"] - g["open"]) * g["qty"]
+    fee = g["notional"] * (ONEWAY_BPS / 10000.0) * 2
+    g["pnl"] = gross - fee
+    return g
+
+
+def _stop_row(sig: pd.DataFrame, sm: float, base_mean: float) -> dict:
+    g = with_stop(sig, sm)
+    m = float(g["pnl"].mean())
+    hit = float(g["hit"].mean()) if sm > 0 else 0.0
+    eff = m - base_mean
+    # 分岐点: 損切りの買い戻しが損切値よりどれだけ不利に約定したら効果が消えるか。
+    # ⛔ 片道・損切り決済のみ・発動した取引だけに掛かるコストです。
+    hitrows = g[g["hit"]] if sm > 0 else g.iloc[0:0]
+    if len(hitrows) and eff > 0:
+        notion = float((hitrows["stop_px"] * hitrows["qty"]).mean())
+        be = eff / (hit * notion) * 10000.0 if hit > 0 else float("nan")
+    else:
+        be = float("nan")
+    # bp をティックに直す。呼値は株価で変わるので中央値と、3,000円で分けた値
+    def ticks(rows):
+        if not len(rows) or not (be == be):
+            return float("nan")
+        t = rows["open"].map(tick_size)
+        return float((be / 10000.0 * rows["open"] / t).median())
+    lo = hitrows[hitrows["open"] < 3000] if len(hitrows) else hitrows
+    hi = hitrows[hitrows["open"] >= 3000] if len(hitrows) else hitrows
+    return {"sm": sm, "n": len(g), "mean": m, "eff": eff, "hit": hit * 100,
+            "be_bp": be, "tick_all": ticks(hitrows),
+            "tick_lo": ticks(lo), "tick_hi": ticks(hi),
+            "n_lo": len(lo), "n_hi": len(hi)}
+
+
+def _print_stop_table(rows: list) -> None:
+    print(f"    {'損切ATR':>8}{'取引':>8}{'発動率%':>9}{'円/件':>10}"
+          f"{'現行との差':>12}{'分岐点bp':>10}"
+          f"{'ﾃｨｯｸ<3000':>11}{'ﾃｨｯｸ>=3000':>12}")
+    for r in rows:
+        print(f"    {r['sm']:>8.2f}{r['n']:>8,}{r['hit']:>9.1f}"
+              f"{r['mean']:>10,.0f}{r['eff']:>+12,.0f}"
+              f"{r['be_bp']:>10.2f}{r['tick_lo']:>11.2f}{r['tick_hi']:>12.2f}")
+
+
+def stop_grid(panel: pd.DataFrame, side: str, train_from: str,
+              train_end: str) -> None:
+    """① TRAIN でグリッドを延長する。**形を見るためであって、選ぶためではない。**
+
+    ⛔ ここで最良セルを選び直さないこと。見るのは2点だけ:
+      - 山が 0.1 より下にあるか
+      - 0.1 は崖の手前か
+    """
+    sig = signals(panel, side)
+    lo, hi = pd.Timestamp(train_from), pd.Timestamp(train_end)
+    tr = sig[(sig["date"] >= lo) & (sig["date"] < hi)]
+    print(f"\n■ ① TRAIN グリッド延長 ({lo:%Y-%m} 〜 {hi:%Y-%m})  利確なし (tm=0.0)")
+    print(f"  取引 {len(tr):,} 件 / {tr['date'].nunique():,} 日"
+          f" = {len(tr)/max(tr['date'].nunique(),1):.1f} 件/発火日")
+    print("  ⚠ 件数と発動率を必ず別実装と突き合わせること。母集団の差で3回踏んでいます。")
+    if len(tr) < 200:
+        print("  件数が足りません")
+        return
+    base = float(with_stop(tr, 0.0)["pnl"].mean())
+    print(f"  現行 (損切りなし) = {base:,.0f} 円/件")
+    rows = [_stop_row(tr, sm, base) for sm in
+            (0.02, 0.03, 0.05, 0.1, 0.3, 0.5, 1.0, 2.0)]
+    _print_stop_table(rows)
+    best = max(rows, key=lambda r: r["eff"])
+    print(f"\n  ★ 形: 最大は sm={best['sm']:.2f}。")
+    print("     0.1 より下に山があれば、グリッドは端で切れていたことになります。")
+    print("     0.02〜0.05 で急に落ちるなら、0.1 は崖の手前です。")
+    print("  ⛔ ここで最良セルを選び直さないこと。②で見るのは sm=0.1 だけです。")
+    print("  ⛔ 分岐点bp は **片道・損切り決済のみ・発動した取引だけ** に掛かる")
+    print("     コストです。往復ではありません。")
+    print("  ⚠ 3,000円で呼値が 1円 → 5円 と5倍になるので、同じ bp でも")
+    print("     ティック数は 1/5 になります。>=3000 の列を必ず見ること。")
+
+
+def stop_test(panel: pd.DataFrame, side: str, train_from: str,
+              train_end: str) -> None:
+    """② TEST で1回だけ確認する。⛔ 見るのは sm=0.1 のみ。
+
+    事前宣言した合格条件 (3つ全部):
+      (a) TEST の「現行との差」がプラス
+      (b) 分岐点の滑りが 0.08% (8bp) 以上
+      (c) 発動率が TRAIN から ±10ポイント以内
+    1つでも落ちたら棄却。滑りの測定に進みません。
+    """
+    sig = signals(panel, side)
+    lo, hi = pd.Timestamp(train_from), pd.Timestamp(train_end)
+    tr = sig[(sig["date"] >= lo) & (sig["date"] < hi)]
+    te = sig[sig["date"] >= hi]
+    print(f"\n■ ② TEST 確認 ({hi:%Y-%m} 〜)  sm=0.1 / 利確なし のみ")
+    print("  ⛔ 他のセルは見ません。TEST の消費は1回です。")
+    if len(te) < 200 or len(tr) < 200:
+        print("  件数が足りません")
+        return
+    b_tr = float(with_stop(tr, 0.0)["pnl"].mean())
+    b_te = float(with_stop(te, 0.0)["pnl"].mean())
+    r_tr = _stop_row(tr, 0.1, b_tr)
+    r_te = _stop_row(te, 0.1, b_te)
+    print(f"  {'':<8}{'取引':>8}{'発動率%':>9}{'現行':>10}{'損切り後':>10}"
+          f"{'差':>10}{'分岐点bp':>10}")
+    for lbl, r, b in (("TRAIN", r_tr, b_tr), ("TEST", r_te, b_te)):
+        print(f"  {lbl:<8}{r['n']:>8,}{r['hit']:>9.1f}{b:>10,.0f}"
+              f"{r['mean']:>10,.0f}{r['eff']:>+10,.0f}{r['be_bp']:>10.2f}")
+    a = r_te["eff"] > 0
+    b_ = (r_te["be_bp"] == r_te["be_bp"]) and r_te["be_bp"] >= 8.0
+    c = abs(r_te["hit"] - r_tr["hit"]) <= 10.0
+    print("\n  事前宣言した合格条件 (3つ全部):")
+    print(f"    (a) TEST の差がプラス            {r_te['eff']:+,.0f} 円/件"
+          f"   {'✅' if a else '⛔'}")
+    print(f"    (b) 分岐点が 8bp 以上            {r_te['be_bp']:.2f} bp"
+          f"   {'✅' if b_ else '⛔'}")
+    print(f"    (c) 発動率が TRAIN から ±10pt    "
+          f"{r_te['hit']:.1f}% vs {r_tr['hit']:.1f}%"
+          f"   {'✅' if c else '⛔'}")
+    print(f"\n  → {'通過。滑りの測定に進めます。' if (a and b_ and c) else '⛔ 棄却。滑りの測定に進みません。'}")
+    print("  ⚠ +190 の再現は求めていません。TRAIN の最良セルなので縮むのが自然です。")
+    print(f"  ⚠ ティック換算 <3000円 {r_te['tick_lo']:.2f} / "
+          f">=3000円 {r_te['tick_hi']:.2f}  "
+          f"(件数 {r_te['n_lo']:,} / {r_te['n_hi']:,})")
+
+
 def self_test() -> int:
     rng = np.random.default_rng(0)
     dates = pd.bdate_range("2015-01-01", "2024-12-31")
@@ -673,6 +836,12 @@ def main() -> int:
                     default="rank-first",
                     help="売買代金 上位50位をどの母集団で数えるか。"
                          "filter-first は前日条件を満たす銘柄の中で上位50")
+    ap.add_argument("--stop-grid", dest="stop_grid", action="store_true",
+                    help="① TRAIN で損切りのグリッドを延長する (形を見るだけ)")
+    ap.add_argument("--stop-test", dest="stop_test", action="store_true",
+                    help="② TEST で sm=0.1 だけを1回確認する")
+    ap.add_argument("--train-from", dest="train_from", default="2015-02-01",
+                    help="TRAIN の開始日。参照実装と母集団を揃えるため")
     ap.add_argument("--risk", action="store_true",
                     help="サイズを決めるための ES と、ボラ回帰を1本出す")
     ap.add_argument("--both", action="store_true",
@@ -704,6 +873,13 @@ def main() -> int:
     print("     ここが桁で違うなら、成績を論じる前に仕様差を特定すること。")
     if not len(sig):
         return 1
+    if args.stop_grid or args.stop_test:
+        te = f"{TRAIN_END:%Y-%m-%d}"
+        if args.stop_grid:
+            stop_grid(panel, args.side, args.train_from, te)
+        if args.stop_test:
+            stop_test(panel, args.side, args.train_from, te)
+        return 0
     if args.both:
         combined(panel)
         return 0
