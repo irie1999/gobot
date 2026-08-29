@@ -196,6 +196,7 @@ def dump_raw_bars(sig: pd.DataFrame, mdir: Path, interval: str, n: int) -> None:
     """
     top = sig.reindex(sig["gap"].abs().sort_values(ascending=False).index).head(n)
     print("\n" + "=" * 78)
+    print(gd.provenance(f"gap_reversal_intraday.py --dump-bars ({interval})"))
     print(f"生の分足ダンプ (|ギャップ| 上位 {len(top)} 銘柄日 / 無加工)")
     print("=" * 78)
     for _, r in top.iterrows():
@@ -375,6 +376,7 @@ def daily_from_trades(ex: pd.DataFrame, r: pd.Series,
 def report(ex: pd.DataFrame, sig_all: pd.DataFrame, mkt: pd.Series,
            args) -> None:
     print("\n" + "=" * 78)
+    print(gd.provenance(f"gap_reversal_intraday.py ({args.interval})"))
     print("執行可能性を織り込んだ検証  [ホールドアウト: 分足がある期間のみ]")
     print(f"ルールは凍結: 前日={FROZEN_PREV_THR} / ギャップ={FROZEN_GAP_THR} "
           f"/ コスト={args.cost_bps}bp / 足={args.interval}")

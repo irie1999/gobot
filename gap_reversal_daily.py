@@ -743,6 +743,25 @@ def stats(daily: pd.Series) -> dict:
     }
 
 
+def provenance(script: str) -> str:
+    """出所を1行で返す。結果を貼るときは必ずこれを添える。
+
+    別セッションの結果と取り違える事故を防ぐため、レポートの先頭で必ず印字する。
+    誰が / どのコード @ どのコミット / いつ、が分かる形にする。
+    """
+    import subprocess
+    try:
+        h = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                           capture_output=True, text=True, timeout=5).stdout.strip()
+        dirty = subprocess.run(["git", "status", "--porcelain"],
+                               capture_output=True, text=True, timeout=5).stdout.strip()
+        h = f"{h}{'+dirty' if dirty else ''}" if h else "no-git"
+    except Exception:
+        h = "no-git"
+    return (f"出所: {script} @ {h}  /  "
+            f"実行 {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+
+
 def _fmt(label: str, st: dict, width: int = 26) -> str:
     if st.get("n", 0) < 10:
         return f"  {label:<{width}} データ不足 (n={st.get('n', 0)})"
@@ -766,11 +785,16 @@ def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
     sig = apply_signal(panel, mkt, args.raw, prev_thr, gap_thr)
     mode = "生%" if args.raw else "ATR単位"
     print("\n" + "=" * 78)
+    print(provenance("gap_reversal_daily.py"))
     print(f"ギャップ反転 検証レポート  [{mode}]  "
           f"前日={prev_thr}  ギャップ={gap_thr}  コスト={args.cost_bps}bp 往復")
     print(f"期間 {panel['date'].min():%Y-%m-%d} 〜 {panel['date'].max():%Y-%m-%d}"
           f"   シグナル {len(sig):,} 件 "
           f"({len(sig)/max(len(mkt),1):.1f} 件/日)")
+    print(f"母集団 {panel['symbol'].nunique():,} 銘柄 / {len(mkt):,} 営業日 / "
+          f"候補 {len(panel):,} 行  "
+          f"(株価 {MIN_PRICE:,.0f}〜{MAX_PRICE:,.0f}円, "
+          f"20日平均売買代金 {MIN_TURNOVER/1e8:.0f}億円以上)")
     print("=" * 78)
 
     if len(sig) < 50:
@@ -1086,6 +1110,7 @@ def grid_scan(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
             print(f"   {pv:>10.2f}" + row)
 
     print("\n" + "=" * 78)
+    print(provenance("gap_reversal_daily.py --grid"))
     print(f"閾値グリッド  行 = 前日の動き (ATR単位) / 列 = ギャップ (ATR単位)")
     print(f"前日 0.00 = 前日の動きを条件にしない")
     print("=" * 78)
