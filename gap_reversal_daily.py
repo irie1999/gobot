@@ -1410,6 +1410,84 @@ def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
         print("    株価帯で絞らない全プライム銘柄が競合するので、実運用の順位は")
         print("    ここより悪くなります (低位株ほど%で大きく動くため)。")
 
+    # ------------------------------------------------------------------
+    # 【13】順位フィルタ後・持越後の 年別 / 裾
+    #  §3 と §8 は「全シグナル・持ち越し無視」で測っていました。実際に運用
+    #  できるのは §12 の上位N に入り、かつ引けで決済できなかった日は翌朝まで
+    #  持ち越した集合だけです。判定に使う数字はこちらに揃えます。
+    # ------------------------------------------------------------------
+    if _RANK_THR:
+        n0 = 30 if 30 in RANK_LIST else RANK_LIST[-1]
+        dn_thr = sig["date"].map(_RANK_THR["dn"][n0])
+        up_thr = sig["date"].map(_RANK_THR["up"][n0])
+        inn = pd.Series(np.where(sig["side"] > 0, sig["gap"] <= dn_thr,
+                                 sig["gap"] >= up_thr), index=sig.index)
+        hcol = "alpha_hold" if "alpha_hold" in sig.columns else "alpha"
+        run = sig[inn]
+        print(f"\n【13】順位フィルタ後 (N={n0}) ・持ち越し後の 年別と裾")
+        if hcol == "alpha":
+            print("  ⚠ 持ち越し列がありません (§10 で該当が無かったか未実行)。"
+                  "持ち越し無視の数字と一致します。")
+        d_all = to_daily(run, hcol, args.cost_bps, args.max_names)
+        st_all = stats(d_all)
+        print(f"  全体  日次{len(d_all):>5}日  "
+              f"{st_all.get('mean_bp', float('nan')):>7.2f}bp  "
+              f"t={st_all.get('t', float('nan')):>5.2f}")
+
+        print("\n  年別 (この行が判定の対象)")
+        print(f"    {'年':<6}{'日数':>6}{'件数':>7}{'日次bp':>10}{'t':>7}"
+              f"{'勝率':>8}{'累計%':>9}")
+        yrs = sorted(run["date"].dt.year.unique())
+        for y in yrs:
+            g = run[run["date"].dt.year == y]
+            d = to_daily(g, hcol, args.cost_bps, args.max_names)
+            if not len(d):
+                continue
+            mu = float(d.mean())
+            sd = float(d.std(ddof=1)) if len(d) > 1 else 0.0
+            t = mu / (sd / math.sqrt(len(d))) if sd > 0 and len(d) > 1 else float("nan")
+            print(f"    {y:<6}{len(d):>6}{len(g):>7}{mu*10000:>10.1f}{t:>7.2f}"
+                  f"{float((d > 0).mean())*100:>7.0f}%{float(d.sum())*100:>9.2f}")
+
+        # 直近が体系的に落ちているか。3点の単調性ではなく差の検定で見る
+        # (§16.6.35 と同じ理由: 少数点の並びは偶然で単調になる)。
+        if len(d_all) >= 40:
+            half = d_all.index[len(d_all) // 2]
+            old, new_ = d_all[d_all.index < half], d_all[d_all.index >= half]
+            if len(old) > 5 and len(new_) > 5:
+                diff = float(old.mean() - new_.mean())
+                se = math.sqrt(old.var(ddof=1) / len(old)
+                               + new_.var(ddof=1) / len(new_))
+                td = diff / se if se > 0 else float("nan")
+                print(f"\n  前半 ({old.index[0]:%Y-%m} 〜) {old.mean()*10000:>7.1f}bp"
+                      f" / 後半 ({new_.index[0]:%Y-%m} 〜) {new_.mean()*10000:>7.1f}bp"
+                      f"   差 {diff*10000:+.1f}bp (SE {se*10000:.1f}, t={td:.2f})")
+                print("    |t| < 2 なら『直近が弱い』は検出できていません"
+                      " (弱くない、ではなく分からない)")
+
+        # 裾の依存度。順位フィルタ後・持ち越し後で測り直す。
+        print("\n  裾の依存度 (順位フィルタ後・持ち越し後)")
+        if len(d_all) >= 20:
+            tot = float(d_all.sum())
+            srt = d_all.sort_values(ascending=False)
+            for k in (1, 5, 10):
+                if len(srt) > k:
+                    print(f"    上位{k:>2}日の寄与  "
+                          f"{float(srt.head(k).sum())/tot*100 if tot else float('nan'):>6.1f}%")
+            k10 = max(1, int(len(srt) * 0.10))
+            print(f"    上位10%の日 ({k10}日) の寄与  "
+                  f"{float(srt.head(k10).sum())/tot*100 if tot else float('nan'):>6.1f}%")
+            print(f"    日次の中央値  {float(d_all.median())*10000:>7.1f}bp")
+            lo, hi = d_all.quantile(0.01), d_all.quantile(0.99)
+            trm = d_all[(d_all >= lo) & (d_all <= hi)]
+            st_t = stats(trm)
+            print(f"    上下1%除去後  {st_t.get('mean_bp', float('nan')):>7.1f}bp"
+                  f"  t={st_t.get('t', float('nan')):>5.2f}  ({len(trm)}日)")
+            print("    ⛔ 上下1%除去は『1ヶ月まるごと』の依存を検出できません。"
+                  "上の年別と併せて見てください。")
+        else:
+            print("    日数が足りません")
+
     print("\n" + "=" * 78)
     print("判定の目安: 日次t>3 かつ 年別で大半がプラス かつ 単調性あり かつ")
     print("            エッジ/コスト比>3 のとき初めて分足での執行検証に進む価値がある。")
@@ -1557,6 +1635,10 @@ def self_test() -> int:
             "prev_z": rp / atr, "gap": gap, "resid_gap": rg, "gap_z": rg / atr,
             "atr": atr, "o2c": o2c, "ibs_prev": 0.5, "turnover": 1e9,
             "open": 2000.0, "is_earn": -1,
+            "idx_gap": idx["idx_gap"].to_numpy(), "beta": 1.0,
+            # 翌日は独立なランダム。持ち越し評価 (§10) の配管を通すため
+            "next_open": 2000.0 * (1.0 + o2c) * (1.0 + rng.normal(0, 0.008, n)),
+            "next_close": 2000.0 * (1.0 + o2c) * (1.0 + rng.normal(0, 0.015, n)),
         })
         keep = (np.abs(df["prev_z"]) >= 0.9) | (np.abs(df["gap_z"]) >= 0.3)
         rows.append(df[keep])
@@ -1565,6 +1647,18 @@ def self_test() -> int:
 
     panel = pd.concat(rows, ignore_index=True).sort_values(["date", "symbol"])
     mkt = pd.Series({d: uni_s[d] / uni_c[d] for d in uni_c}).sort_index()
+
+    # 順位の閾値表 (§11-§13 を合成データでも通すため)
+    global _RANK_THR, _TOPN_THR
+    _RANK_THR = {"dn": {}, "up": {}}
+    for nn in RANK_LIST:
+        _RANK_THR["dn"][nn] = panel.groupby("date")["gap"].apply(
+            lambda g, nn=nn: (g.nsmallest(nn).iloc[-1] if len(g) >= nn else 1e9))
+        _RANK_THR["up"][nn] = panel.groupby("date")["gap"].apply(
+            lambda g, nn=nn: (g.nlargest(nn).iloc[-1] if len(g) >= nn else -1e9))
+    _TOPN_THR = {nn: panel.groupby("date")["turnover"].apply(
+        lambda g, nn=nn: (g.nlargest(nn).iloc[-1] if len(g) >= nn else 0.0))
+        for nn in TOPN_LIST}
 
     args = argparse.Namespace(raw=False, prev_thr=1.0, gap_thr=0.5, cost_bps=0.0,
                               max_names=13, capital=4_000_000, side="both",
