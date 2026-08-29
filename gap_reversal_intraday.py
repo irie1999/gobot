@@ -284,6 +284,15 @@ def report(ex: pd.DataFrame, sig_all: pd.DataFrame, mkt: pd.Series,
     print(gd._fmt("分足の板寄せ価格 (執行不能)",
                   gd.stats(daily_from_trades(ex, r_auc)), width=30))
     print("  ↑ ここまでは条件判定に使う価格。↓ ここからが実際に入れる価格。")
+    # ⛔ 執行価格が板寄せ価格と一致していないかを検査する。
+    # 分足の参照に失敗して公式始値に落ちる実装事故が起きやすく、そうなると
+    # 「劣化ゼロ」という結果が出るが、それは執行不能な価格を測り直しただけ。
+    ident = (ex["entry_fc"] == ex["auction"]).mean()
+    id_open = (ex["entry_fc"] == ex["open_day"]).mean()
+    if max(ident, id_open) > 0.05:
+        print(f"  ⚠ 執行価格の {max(ident, id_open)*100:.1f}% が板寄せ価格と完全一致しています。")
+        print("     分足の参照に失敗して始値へフォールバックしている可能性が高く、")
+        print("     この場合『劣化ゼロ』は執行可能性の証拠になりません。")
     r_fc = exec_returns(ex, "fc", args.cost_bps)
     first = gd.stats(daily_from_trades(ex, r_fc))
     step_lbl = "1分" if args.interval == "1m" else "5分"
