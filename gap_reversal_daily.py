@@ -557,6 +557,7 @@ def build_symbol_rows(
         "turnover": cand["turnover"].to_numpy(),
         "open": cand["open"].to_numpy(),
         "next_open": cand["next_open"].to_numpy(),
+        "idx_gap": cand["idx_gap"].to_numpy(),
         "is_earn": earn_flag,
     })
     return out, uni, rank_pool
@@ -1330,6 +1331,47 @@ def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
             print(f"    {n:>5}{k:>12,}{k/len(sig)*100:>9.1f}"
                   f"{(bp_in/tot_bp*100 if tot_bp else float('nan')):>9.1f}"
                   f"{m_in:>9.1f}{m_out:>13.1f}")
+        # 漏れる帯の性質。生の騰落率で並べたときに落ちるのは
+        #   (a) 市場全体が暴落した日 (数百銘柄が大きく下げるので上位30に入らない)
+        #   (b) 低ボラ銘柄 (小さいギャップでも 3ATR に達する)
+        # のどちらか。両者は対策が全く違うので分けて見る。
+        n0 = 30 if 30 in RANK_LIST else RANK_LIST[-1]
+        dn_thr = sig["date"].map(_RANK_THR["dn"][n0])
+        up_thr = sig["date"].map(_RANK_THR["up"][n0])
+        inn = pd.Series(np.where(sig["side"] > 0, sig["gap"] <= dn_thr,
+                                 sig["gap"] >= up_thr), index=sig.index)
+        per_day = sig.groupby("date")["symbol"].transform("size")
+        prof = sig.assign(_in=inn, _n=per_day)
+        print(f"\n  N={n0} で漏れる帯の性質 (対策が違うので分けて見る)")
+        print(f"    {'':<10}{'件数':>7}{'1件bp':>9}{'|指数ギャップ|%':>16}"
+              f"{'ATR%':>8}{'|ギャップ|%':>12}{'同日の発火数':>14}")
+        for lbl, m in (("拾える", prof["_in"]), ("漏れる", ~prof["_in"])):
+            g = prof[m]
+            if not len(g):
+                continue
+            print(f"    {lbl:<10}{len(g):>7,}{g['alpha'].mean()*10000:>9.1f}"
+                  f"{g['idx_gap'].abs().mean()*100:>16.2f}"
+                  f"{g['atr'].mean()*100:>8.2f}"
+                  f"{g['gap'].abs().mean()*100:>12.2f}"
+                  f"{g['_n'].mean():>14.1f}")
+        print("    指数ギャップが大きい / 同日の発火数が多い → 暴落日で漏れている")
+        print("      → 指数が大きく動いた日は ranking が使えないと分かるので、")
+        print("        その日だけ別経路 (全銘柄スキャン等) を用意すれば足ります")
+        print("    ATR が小さい → 低ボラ銘柄が漏れている")
+        print("      → 生の騰落率では原理的に拾えないので、閾値の設計から見直しが要ります")
+
+        # 漏れが特定の日に集中しているか
+        miss_by_day = prof[~prof["_in"]].groupby("date").size().sort_values(
+            ascending=False)
+        if len(miss_by_day):
+            tot_miss = int(miss_by_day.sum())
+            top5 = int(miss_by_day.head(5).sum())
+            print(f"\n    漏れ {tot_miss} 件のうち上位5日で {top5} 件 "
+                  f"({top5/tot_miss*100:.0f}%)")
+            for d, k in miss_by_day.head(5).items():
+                ig = float(sig.loc[sig["date"] == d, "idx_gap"].iloc[0]) * 100
+                print(f"      {d:%Y-%m-%d}  {k:>3}件  指数ギャップ {ig:+.2f}%")
+
         print("  判定: N=30 で 95%以上 → ranking で足りる (事前選択の問題が消える)")
         print("        70〜95% → 漏れる帯の性質を見る / 70%未満 → 適時開示へ")
         print("  ⚠ 母集団はこのキャッシュの銘柄のみです。実際の /ranking は")
