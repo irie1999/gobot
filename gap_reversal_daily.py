@@ -823,13 +823,18 @@ def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
     _BOUNCE = bounce_slopes(panel)
 
     sig = apply_signal(panel, mkt, args.raw, prev_thr, gap_thr)
+    side_lbl = ""
+    if getattr(args, "side", "both") != "both":
+        want = 1.0 if args.side == "long" else -1.0
+        sig = sig[sig["side"] == want]
+        side_lbl = ("  [買い側のみ]" if want > 0 else "  [空売り側のみ]")
     mode = "生%" if args.raw else "ATR単位"
     print("\n" + "=" * 78)
     print(provenance("gap_reversal_daily.py"))
     pl = "なし(同符号も要求しない)" if prev_thr is None else (
         f"{prev_thr} (0.0 は『同符号であること』の要求)" if prev_thr == 0.0
         else f"{prev_thr}")
-    print(f"ギャップ反転 検証レポート  [{mode}]  "
+    print(f"ギャップ反転 検証レポート  [{mode}]{side_lbl}  "
           f"前日={pl}  ギャップ={gap_thr}  コスト={args.cost_bps}bp 往復")
     print(f"期間 {panel['date'].min():%Y-%m-%d} 〜 {panel['date'].max():%Y-%m-%d}"
           f"   シグナル {len(sig):,} 件 "
@@ -1100,9 +1105,15 @@ def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
     print("  ⚠ 連続ストップ時の値幅拡大は考慮していないため、過小評価の側に振れます。")
     if bad.any():
         st_ok = stats(to_daily(sig[~bad], "alpha", args.cost_bps, args.max_names))
+        st_bad = stats(to_daily(sig[bad], "alpha", args.cost_bps, args.max_names))
         print(_fmt("  該当を除いた成績", st_ok, width=26))
-        print(f"  (該当 {int(bad.sum())} 件を除外。成績が大きく変わるなら、"
-              f"その分の損益は決済できたか次第です)")
+        print(_fmt("  該当のみの成績", st_bad, width=26))
+        print(f"  ⛔ 『除外すると良くなる』は良い知らせではありません。"
+              f"該当 {int(bad.sum())} 件は")
+        print("     既に大負けしている日で、**どの日がそうなるかは事前に分かりません**。")
+        print("     除外は運用できない操作です。意味はむしろ逆で、この頻度で")
+        print("     『引けで決済できないかもしれない』場面が来るということです。")
+        print("     決済できなければ翌日に持ち越して損失が拡大しうる (未モデル化)。")
 
     print("\n" + "=" * 78)
     print("判定の目安: 日次t>3 かつ 年別で大半がプラス かつ 単調性あり かつ")
@@ -1312,6 +1323,8 @@ def main() -> int:
                     help="前日の動きの閾値 (ATR単位)。'none' で条件を課さない。"
                          "0.0 は『同符号であること』を要求する点に注意")
     ap.add_argument("--gap-thr", dest="gap_thr", type=float)
+    ap.add_argument("--side", choices=["both", "long", "short"], default="both",
+                    help="買い側(long)/空売り側(short)だけに絞って全検定を通す")
     ap.add_argument("--cost-bps", dest="cost_bps", type=float, default=COST_BPS)
     ap.add_argument("--max-names", dest="max_names", type=int, default=13,
                     help="1日に建てられる最大銘柄数 (資金制約)")
