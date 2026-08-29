@@ -64,6 +64,12 @@ MIN_TURNOVER  = 3e8     # 20日平均売買代金の下限 (円)。執行可能�
 _BOUNCE: tuple = (np.array([0.0, np.inf]), np.array([0.0]),
                   np.array([0]))   # bounce_slopes() が実行時に設定
 
+# 前夜に監視できる枠の検査。板の購読上限は50銘柄、前夜に寄指を置く方式なら
+# 予算で決まる (建玉30万・資金400万なら13件)。
+TOPN_LIST = [13, 25, 50, 100, 200]
+TOPN_MAX = 200
+_TOPN_THR: dict = {}
+
 COST_BPS      = 30.0    # 往復コスト (bp)。呼値+板寄せ+引け成行の想定
 TRADING_DAYS  = 245
 
@@ -501,7 +507,8 @@ def build_symbol_rows(
         return pd.DataFrame(), pd.DataFrame()
 
     # 日次ユニバース集計 (α のベースライン)。フィルタ前の広い母集団を使う
-    uni = pd.DataFrame({"date": j.index, "o2c": j["o2c"].to_numpy()})
+    uni = pd.DataFrame({"date": j.index, "o2c": j["o2c"].to_numpy(),
+                        "turnover": j["turnover"].to_numpy()})
 
     j["prev_z"] = j["resid_prev"] / j["atr"]
     j["gap_z"] = j["resid_gap"] / j["atr"]
@@ -564,6 +571,10 @@ def build_panel(
     rows: list[pd.DataFrame] = []
     uni_sum: dict = defaultdict(float)
     uni_cnt: dict = defaultdict(int)
+    # 日ごとの売買代金 上位 TOPN_MAX 位を保持する (前夜に監視できる枠の検査用)。
+    # 全銘柄日を保持するとメモリが持たないので、日ごとに小さなヒープで持つ。
+    import heapq
+    top_heap: dict = defaultdict(list)
     done = failed = 0
 
     def work(sym: str):
@@ -591,6 +602,15 @@ def build_panel(
                         uni_sum[dt] += float(v)
                     for dt, v in g.count().items():
                         uni_cnt[dt] += int(v)
+                    for dt, tv in zip(uni["date"].to_numpy(),
+                                      uni["turnover"].to_numpy()):
+                        if not np.isfinite(tv):
+                            continue
+                        h = top_heap[dt]
+                        if len(h) < TOPN_MAX:
+                            heapq.heappush(h, float(tv))
+                        elif tv > h[0]:
+                            heapq.heapreplace(h, float(tv))
                 if len(cand):
                     rows.append(cand)
             if done % 200 == 0:
@@ -603,6 +623,14 @@ def build_panel(
         {d: uni_sum[d] / uni_cnt[d] for d in uni_cnt if uni_cnt[d] >= 20}
     ).sort_index()
     mkt.name = "mkt_o2c"
+    # 日ごとの「上位N位の売買代金」を閾値表にする
+    global _TOPN_THR
+    _TOPN_THR = {}
+    for n in TOPN_LIST:
+        _TOPN_THR[n] = pd.Series(
+            {dt: (sorted(h, reverse=True)[n - 1] if len(h) >= n else 0.0)
+             for dt, h in top_heap.items()}).sort_index()
+
     print(f"候補 {len(panel):,} 行 / {panel['symbol'].nunique()} 銘柄 / "
           f"{len(mkt):,} 営業日 (取得失敗 {failed})")
     if _INTEGRITY:
@@ -1160,6 +1188,50 @@ def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
         print("     除外は運用できない操作です。意味はむしろ逆で、この頻度で")
         print("     『引けで決済できないかもしれない』場面が来るということです。")
         print("     決済できなければ翌日に持ち越して損失が拡大しうる (未モデル化)。")
+
+    # ── §11 前夜の監視枠でどれだけ拾えるか ───────────────────────
+    print("\n【11】前夜の売買代金 上位N位に入っていた割合 (監視枠の検査)")
+    print("  どの銘柄が翌朝ギャップするかは前夜には分かりません。板の購読上限は")
+    print("  50銘柄、前夜に寄指を置く方式なら予算で決まります (建玉30万・資金")
+    print("  400万で13件)。件数だけでなく **利益の何%を拾えるか** も見ます。")
+    if not _TOPN_THR:
+        print("  (閾値表が未計算です)")
+    else:
+        tot_bp = float((sig["alpha"] * 10000).sum())
+        print(f"    {'N':>5}{'カバー件数':>12}{'件数%':>9}"
+              f"{'利益%':>9}{'1件bp':>9}{'漏れの1件bp':>13}")
+        for n in TOPN_LIST:
+            thr = sig["date"].map(_TOPN_THR[n])
+            inn = sig["turnover"] >= thr
+            k = int(inn.sum())
+            if k == 0:
+                print(f"    {n:>5}{0:>12}{0.0:>9.1f}{0.0:>9.1f}")
+                continue
+            bp_in = float((sig.loc[inn, "alpha"] * 10000).sum())
+            m_in = float(sig.loc[inn, "alpha"].mean() * 10000)
+            m_out = (float(sig.loc[~inn, "alpha"].mean() * 10000)
+                     if (~inn).any() else float("nan"))
+            print(f"    {n:>5}{k:>12,}{k/len(sig)*100:>9.1f}"
+                  f"{(bp_in/tot_bp*100 if tot_bp else float('nan')):>9.1f}"
+                  f"{m_in:>9.1f}{m_out:>13.1f}")
+        print("  『件数%』と『利益%』が乖離するなら、売買代金の大きい銘柄ほど")
+        print("  ギャップが小さいということです。半分拾っても利益は3割、が起こります。")
+
+    # headroom (トリガーと値幅制限の余裕) の5分位。除外する前に測る。
+    head = (lim - sig["gap"].abs() * px_prev) / px_prev * 100
+    try:
+        hq = pd.qcut(head, 5, duplicates="drop")
+        print("\n  値幅制限までの余裕 (headroom) 別  ← 除外の前に測る")
+        print(f"    {'headroom%':<22}{'件数':>7}{'グロスbp':>10}"
+              f"{'決済できない%':>14}")
+        for b, g in sig.assign(_h=head, _bad=bad).groupby(hq, observed=True):
+            print(f"    {str(b):<22}{len(g):>7,}"
+                  f"{g['alpha'].mean()*10000:>10.1f}"
+                  f"{g['_bad'].mean()*100:>14.1f}")
+        print("  headroom が小さいほど決済できない割合が高いなら除外の根拠。")
+        print("  ただし bp も高いならトレードオフです。単純除外は損かもしれません。")
+    except Exception as e:
+        print(f"\n  headroom 別の集計に失敗: {e}")
 
     print("\n" + "=" * 78)
     print("判定の目安: 日次t>3 かつ 年別で大半がプラス かつ 単調性あり かつ")
