@@ -226,8 +226,14 @@ def main() -> int:
                 rec = fetch_board(base, token, sym, exch)
                 append(path, rec)
                 b = rec.get("body") or {}
-                print(f"  {rec['req_ts']}  board {sym}  ok={rec.get('ok')}  "
-                      f"初約定 {b.get('OpeningPriceTime')}  "
+                # ⛔ 判定に使うのは公式の OpeningPriceTime 同士の差ではなく
+                #   **こちらが始値を初めて受信した時刻 (resp_ts)** です。
+                #   API の配信遅延とこちらの処理時間を落とさないため。
+                #       resp_ts + 計算・発注時間 + 安全余裕
+                #         < 対象銘柄の板寄せ成立時刻
+                print(f"  board {sym}  ok={rec.get('ok')}  "
+                      f"受信 {rec.get('resp_ts')}  "
+                      f"初約定(公式) {b.get('OpeningPriceTime')}  "
                       f"始値 {b.get('OpeningPrice')}  現値 {b.get('CurrentPrice')}")
                 time.sleep(1.0)
         for typ, div in PLAN:
