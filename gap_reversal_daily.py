@@ -497,6 +497,7 @@ def build_symbol_rows(
 
     # 有効行
     j["next_open"] = j["open"].shift(-1)     # 持ち越し評価にだけ使う (先読み)
+    j["next_close"] = j["close"].shift(-1)   # 同上 (D+2 も張り付いたかの判定)
 
     # 騰落率ランキング用の母集団。kabu の /ranking は価格帯で絞らないので、
     # ここも価格帯フィルタを掛ける前の生ギャップを使う。
@@ -558,6 +559,8 @@ def build_symbol_rows(
         "open": cand["open"].to_numpy(),
         "next_open": cand["next_open"].to_numpy(),
         "idx_gap": cand["idx_gap"].to_numpy(),
+        "beta": cand["beta"].to_numpy(),
+        "next_close": cand["next_close"].to_numpy(),
         "is_earn": earn_flag,
     })
     return out, uni, rank_pool
@@ -1292,11 +1295,20 @@ def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
                   f"   差 {d.mean():>+8.1f}bp (中央 {d.median():+.1f})")
             print(f"    悪化した件数 {int((d < 0).sum())} / {len(d)} "
                   f"({(d < 0).mean()*100:.0f}%)")
-            sig2 = sig.copy()
-            sig2.loc[bb.index, "alpha"] = (sig2.loc[bb.index, "alpha"]
-                                           + (r_hold - bb["ret"]))
+            if "next_close" in bb.columns:
+                c_d = bb["open"] * (1.0 + bb["o2c"])          # D の終値
+                dn1 = c_d - c_d.map(tse_price_limit)          # D+1 のストップ安
+                n2 = int(((bb["next_close"] - dn1).abs() <= 0.01).sum())
+                print(f"    D+2 も張り付き (D+1 もストップ安引け): "
+                      f"{n2} / {len(bb)} 件")
+                print("      → -355.7bp は下限です" if n2
+                      else "      → ゼロ。D+1 の始値で決済できた前提で妥当です")
+
+            sig["alpha_hold"] = sig["alpha"]
+            sig.loc[bb.index, "alpha_hold"] = (sig.loc[bb.index, "alpha"]
+                                               + (r_hold - bb["ret"]))
             print(_fmt("    持ち越しを織り込んだ全体",
-                       stats(to_daily(sig2, "alpha", args.cost_bps,
+                       stats(to_daily(sig, "alpha_hold", args.cost_bps,
                                       args.max_names)), width=24))
             print("    ⛔ next_open は先読みです。持ち越しの評価にだけ使います。")
         else:
@@ -1313,7 +1325,8 @@ def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
     else:
         tot_bp = float((sig["alpha"] * 10000).sum())
         print(f"    {'N':>5}{'カバー件数':>12}{'件数%':>9}{'利益%':>9}"
-              f"{'1件bp':>9}{'漏れの1件bp':>13}")
+              f"{'1件bp':>9}{'漏れの1件bp':>13}"
+              f"{'日次bp':>10}{'t':>7}{'持越後bp':>10}{'t':>7}")
         for n in RANK_LIST:
             dn_thr = sig["date"].map(_RANK_THR["dn"][n])
             up_thr = sig["date"].map(_RANK_THR["up"][n])
@@ -1328,9 +1341,22 @@ def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
             m_in = float(sig.loc[inn, "alpha"].mean() * 10000)
             m_out = (float(sig.loc[~inn, "alpha"].mean() * 10000)
                      if (~inn).any() else float("nan"))
+            st_in = stats(to_daily(sig[inn], "alpha", args.cost_bps,
+                                   args.max_names))
+            hcol = "alpha_hold" if "alpha_hold" in sig.columns else "alpha"
+            st_h = stats(to_daily(sig[inn], hcol, args.cost_bps, args.max_names))
             print(f"    {n:>5}{k:>12,}{k/len(sig)*100:>9.1f}"
                   f"{(bp_in/tot_bp*100 if tot_bp else float('nan')):>9.1f}"
-                  f"{m_in:>9.1f}{m_out:>13.1f}")
+                  f"{m_in:>9.1f}{m_out:>13.1f}"
+                  f"{st_in.get('mean_bp', float('nan')):>10.1f}"
+                  f"{st_in.get('t', float('nan')):>7.2f}"
+                  f"{st_h.get('mean_bp', float('nan')):>10.1f}"
+                  f"{st_h.get('t', float('nan')):>7.2f}")
+        print("\n  ★ 判定に使うのは右端の2列 (持ち越し込み) です。")
+        print("     t >= 3.5  → 暴落日を捨てたまま成立。執行の検証へ")
+        print("     t 3.0-3.5 → 成立するが余裕なし。暴落日を拾えるかが効く")
+        print("     t <  3.0  → 上位30では成立しない。閾値の設計から見直し")
+
         # 漏れる帯の性質。生の騰落率で並べたときに落ちるのは
         #   (a) 市場全体が暴落した日 (数百銘柄が大きく下げるので上位30に入らない)
         #   (b) 低ボラ銘柄 (小さいギャップでも 3ATR に達する)
@@ -1344,16 +1370,22 @@ def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
         prof = sig.assign(_in=inn, _n=per_day)
         print(f"\n  N={n0} で漏れる帯の性質 (対策が違うので分けて見る)")
         print(f"    {'':<10}{'件数':>7}{'1件bp':>9}{'|指数ギャップ|%':>16}"
-              f"{'ATR%':>8}{'|ギャップ|%':>12}{'同日の発火数':>14}")
+              f"{'β':>7}{'ATR%':>8}{'|ギャップ|%':>12}{'同日の発火数':>14}")
         for lbl, m in (("拾える", prof["_in"]), ("漏れる", ~prof["_in"])):
             g = prof[m]
             if not len(g):
                 continue
             print(f"    {lbl:<10}{len(g):>7,}{g['alpha'].mean()*10000:>9.1f}"
                   f"{g['idx_gap'].abs().mean()*100:>16.2f}"
+                  f"{g['beta'].mean():>7.2f}"
                   f"{g['atr'].mean()*100:>8.2f}"
                   f"{g['gap'].abs().mean()*100:>12.2f}"
                   f"{g['_n'].mean():>14.1f}")
+        print("    ★ 暴落日は生ギャップ順位の上位が体系的に『発火しない銘柄』で")
+        print("      埋まります。指数 -6.5% / ATR 3-4% の日なら、高β(1.5)は -15%で")
+        print("      寄っても残差 -5.25% で発火せず順位は上位、低β(0.5)は -13%で")
+        print("      残差 -9.75% で発火するのに順位は50位以下。順位と発火が逆相関。")
+        print("    → **漏れた側の β が拾えた側より低ければ、この機構で確定**です。")
         print("    指数ギャップが大きい / 同日の発火数が多い → 暴落日で漏れている")
         print("      → 指数が大きく動いた日は ranking が使えないと分かるので、")
         print("        その日だけ別経路 (全銘柄スキャン等) を用意すれば足ります")
