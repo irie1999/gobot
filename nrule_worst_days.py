@@ -288,7 +288,12 @@ def concentration(trades: pd.DataFrame) -> None:
             "worst_share": (float(neg.min() / neg.sum() * 100)
                             if len(neg) and float(neg.sum()) != 0
                             else float("nan")),
-            "equal_share": 100.0 / len(neg) if len(neg) else float("nan"),
+            # ⛔ 帰無仮説は「等分 = 1/n」ではありません。n 個の独立な損失の
+            #   最大値は、偶然でも平均を大きく超えます。指数分布なら
+            #   E[max/合計] = H_n / n (H_n は調和数)。これが正しい基準線。
+            #   1/n と比べると、何を測っても『集中』に見えてしまいます。
+            "equal_share": (100.0 * sum(1.0 / k for k in range(1, len(neg) + 1))
+                            / len(neg)) if len(neg) else float("nan"),
         })
 
     per = g.groupby("date")[["pnl"]].apply(
@@ -432,6 +437,15 @@ def combined(panel: pd.DataFrame, scheme: str = "fixed") -> None:
     d_s, d_l = set(t_s["date"]), set(t_l["date"])
     print(f"\n  発火日  N {len(d_s):,} 日 / 鏡像 {len(d_l):,} 日 / "
           f"両方 {len(d_s & d_l):,} 日 ({len(d_s & d_l)/len(d_s | d_l)*100:.0f}%)")
+    # ★ 相殺が起きたなら **最悪の日が改善する** はずです。ここが判定。
+    for name, t in (("N のみ", t_s), ("鏡像のみ", t_l), ("両側", t_both)):
+        d = t.groupby("date")["pnl"].sum()
+        print(f"    {name:<8} 最悪の日 {d.min():>12,.0f}  "
+              f"(その日: {d.idxmin():%Y-%m-%d})")
+    print("    ⛔ 『両側』の最悪の日が片側の最悪の日と同じ値なら、その日は")
+    print("       片側しか建っていません = **相殺は起きていません**。")
+    print("       月平均/σ が改善しても、それは日をまたいだ分散にすぎず、")
+    print("       裾のリスクは1円も減っていません。")
     print("  ⛔ 両方が同じ日に出るのが稀なら、合算しても相殺は起きません。")
     print("     その場合『両側』は単に取引機会が増えただけで、σ が下がるのは")
     print("     日をまたいだ分散にすぎません。月平均/σ の改善幅で判断すること。")
