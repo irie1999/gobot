@@ -64,6 +64,7 @@ def build_rows(sym: str) -> pd.DataFrame | None:
     d["o2c"] = d["close"] / d["open"] - 1.0
     d["atr"] = G._atr_pct(d, ATR_N)
     d["turnover"] = (d["close"] * d["volume"]).rolling(20).mean()
+    d["next_open"] = d["open"].shift(-1)   # 強制持ち越しの評価にだけ使う
     sane = ((d["gap"].abs() <= MAX_MOVE) & (d["o2c"].abs() <= MAX_MOVE)
             & (d["ret"].abs() <= MAX_MOVE))
     keep = (sane & d["prev_close"].between(MIN_PRICE, MAX_PRICE)
@@ -80,6 +81,7 @@ def build_rows(sym: str) -> pd.DataFrame | None:
         "prev_ret": d["prev_ret"].to_numpy(), "gap": d["gap"].to_numpy(),
         "o2c": d["o2c"].to_numpy(), "atr": d["atr"].to_numpy(),
         "turnover": d["turnover"].to_numpy(),
+        "next_open": d["next_open"].to_numpy(),
     })
 
 
@@ -451,6 +453,152 @@ def combined(panel: pd.DataFrame, scheme: str = "fixed") -> None:
     print("     日をまたいだ分散にすぎません。月平均/σ の改善幅で判断すること。")
 
 
+def _es(x: np.ndarray, q: float) -> float:
+    """下位 q の Expected Shortfall (平均損失)。VaR ではなく『その先の平均』。"""
+    if not len(x):
+        return float("nan")
+    thr = np.quantile(x, q)
+    tail = x[x <= thr]
+    return float(tail.mean()) if len(tail) else float("nan")
+
+
+def _block_boot(daily: pd.Series, q: float, n_boot: int = 2000,
+                block: int = 5, seed: int = 0) -> tuple[float, float]:
+    """日ブロックのブートストラップで ES の信頼区間を出す。
+
+    ⛔ 観測された最悪の1日は将来の上限ではありません。**ES の信頼上限**で
+      決めること。日次損益は日をまたいで相関するのでブロックで抜きます。
+    """
+    rng = np.random.default_rng(seed)
+    x = daily.to_numpy()
+    n = len(x)
+    if n < 60:
+        return (float("nan"), float("nan"))
+    nb = max(1, n // block)
+    out = np.empty(n_boot)
+    for i in range(n_boot):
+        st = rng.integers(0, max(1, n - block), size=nb)
+        idx = (st[:, None] + np.arange(block)[None, :]).ravel()
+        out[i] = _es(x[np.clip(idx, 0, n - 1)], q)
+    return (float(np.quantile(out, 0.05)), float(np.quantile(out, 0.95)))
+
+
+def forced_carry(trades: pd.DataFrame) -> pd.Series:
+    """引けで決済できなかった建玉を翌営業日の始値まで持った場合の日次損益。
+
+    N は空売りなので、終値がストップ高だと買い戻せません。
+    ⚠ 持ち越しは日中の値幅制限の外に出るので **別のテール**です。
+      含む版と除く版を必ず並べること。
+    """
+    px_prev = trades["prev_close"]
+    lim = px_prev.map(G.tse_price_limit)
+    up, dn = px_prev + lim, px_prev - lim
+    stuck = np.where(trades["side"] < 0,
+                     (trades["close"] - up).abs() <= 0.01,
+                     (trades["close"] - dn).abs() <= 0.01)
+    stuck = pd.Series(stuck, index=trades.index) & trades["next_open"].notna()
+    t = trades.copy()
+    if stuck.any():
+        b = t[stuck]
+        gross = b["side"] * (b["next_open"] - b["open"]) * b["qty"]
+        fee = b["notional"] * (ONEWAY_BPS / 10000.0) * 2
+        t.loc[stuck, "pnl"] = gross - fee
+    t.attrs["stuck"] = int(stuck.sum())
+    return t
+
+
+def risk_report(trades: pd.DataFrame) -> None:
+    """サイズを決めるための数字。⛔ 観測最悪値では決めないこと。"""
+    carried = forced_carry(trades)
+    n_stuck = carried.attrs.get("stuck", 0)
+    print("\n" + "=" * 78)
+    print("■ サイズを決めるための数字 (100株固定・予算400万)")
+    print("  ⛔ 観測された最悪の1日は将来の上限ではありません。")
+    print("     決めるのは **ES (下位xx%の平均損失) の信頼上限** です。")
+    print(f"  強制持ち越し (引けがストップ値で決済できない) {n_stuck} 件")
+    print("  ⚠ 持ち越しは日中の値幅制限の外に出るので **別のテール**です。")
+
+    for label, t in (("持ち越しを除く", trades), ("持ち越しを含む", carried)):
+        d = t.groupby("date")["pnl"].sum().sort_index()
+        x = d.to_numpy()
+        mu = float(d.mean())
+        print(f"\n  【{label}】 {len(d):,} 日 / 平均日次 {mu:,.0f} 円")
+        print(f"      {'':<14}{'ES':>12}{'90%区間 下':>14}{'90%区間 上':>14}"
+              f"{'平均/|ES|':>12}")
+        for q, name in ((0.01, "下位1%"), (0.05, "下位5%")):
+            es = _es(x, q)
+            lo, hi = _block_boot(d, q)
+            # ⛔ 上限として使うのは「より悪い方」= 区間の下端 (損失が大きい側)
+            print(f"      {name:<14}{es:>12,.0f}{lo:>14,.0f}{hi:>14,.0f}"
+                  f"{(mu/abs(es) if es else float('nan')):>12.3f}")
+        srt = np.sort(x)
+        print(f"      最悪5日の平均  {srt[:5].mean():>12,.0f}"
+              f"   最悪10日の平均 {srt[:10].mean():>12,.0f}")
+        print(f"      観測最悪の1日  {srt[0]:>12,.0f}"
+              "   ← ⛔ これで決めないこと")
+    print("\n  ★ 予算の決め方: 許容できる1日の損失 ÷ |下位1% ES の信頼下端|")
+    print("     を現行の400万に掛ける。ESの下端 (悪い側) を使うのは、")
+    print("     点推定で決めると半分の確率で外れるからです。")
+
+
+def vol_regression(sig: pd.DataFrame, trades: pd.DataFrame,
+                   panel: pd.DataFrame) -> None:
+    """ボラ回帰 — 1本だけやって判定し、ダメなら打ち切る。
+
+    仮説: 寄り前に分かる材料で予想ポートフォリオσを作り、σが高い日は
+    建玉を落とせば 平均損益÷ES が改善する。
+
+    ⛔ 判定は2つだけ:
+      (a) |日次損益| を予測ボラで回帰 → R²  (予測できているか)
+      (b) 日次損益の**平均**が予測ボラに **比例するか / フラットか**
+          比例 → サイズ変更は中立。打ち切り
+          フラット → 平均÷ES が改善する。そのときだけ次へ
+    """
+    print("\n" + "=" * 78)
+    print("■ ボラ回帰 (1本だけ。フラットでなければ打ち切り)")
+    # 寄り前に確定する材料だけを使う
+    pre = panel[panel["prev_ret"].abs() >= PREV_THR]
+    day = pre.groupby("date").agg(n_pre=("symbol", "size"),
+                                  atr_mean=("atr", "mean"))
+    # ポートフォリオσの素朴な予測: 平均ATR × sqrt(候補件数)
+    day["pred_vol"] = day["atr_mean"] * np.sqrt(day["n_pre"])
+    d = trades.groupby("date")["pnl"].sum().rename("pnl")
+    j = pd.concat([d, day], axis=1, join="inner").dropna()
+    if len(j) < 100:
+        print("  日数が足りません")
+        return
+    print(f"  {len(j):,} 日  (予測ボラ = 前夜の候補件数と平均ATRだけで作る)")
+
+    print("\n  (a) |日次損益| ~ 予測ボラ の回帰")
+    for col in ("pred_vol", "atr_mean", "n_pre"):
+        xx = j[col].to_numpy()
+        yy = j["pnl"].abs().to_numpy()
+        r = np.corrcoef(xx, yy)[0, 1]
+        print(f"      {col:<12} R² = {r*r:>6.3f}  (相関 {r:+.3f})")
+    print("      ★ R² が 0.1 も無ければ、そもそもボラを予測できていません。")
+
+    print("\n  (b) 予測ボラの5分位別  ← ここが判定")
+    j["q"] = pd.qcut(j["pred_vol"], 5, labels=False, duplicates="drop")
+    print(f"      {'分位':<6}{'日数':>6}{'平均日次':>12}{'日次σ':>12}"
+          f"{'平均/σ':>10}{'下位5%ES':>12}{'平均/|ES|':>11}")
+    for q, g in j.groupby("q"):
+        x = g["pnl"].to_numpy()
+        mu, sd = x.mean(), x.std(ddof=1)
+        es = _es(x, 0.05)
+        print(f"      Q{int(q)+1:<5}{len(g):>6}{mu:>12,.0f}{sd:>12,.0f}"
+              f"{(mu/sd if sd else float('nan')):>10.3f}{es:>12,.0f}"
+              f"{(mu/abs(es) if es else float('nan')):>11.3f}")
+    lo = j[j["q"] == j["q"].min()]["pnl"]
+    hi = j[j["q"] == j["q"].max()]["pnl"]
+    rat = (hi.mean() / lo.mean()) if lo.mean() else float("nan")
+    vr = (hi.std(ddof=1) / lo.std(ddof=1)) if lo.std(ddof=1) else float("nan")
+    print(f"\n      Q5/Q1  平均 {rat:.2f}倍 / σ {vr:.2f}倍")
+    print("      ★ 平均が σ と同じ比率で増えている (比例) → サイズ変更は中立。")
+    print("        **打ち切り**です。深追いしないこと。")
+    print("        平均がフラット (比 1.0 近辺) でσだけ増えている → 高ボラ日を")
+    print("        小さくすれば 平均/|ES| が改善します。そのときだけ次へ。")
+
+
 def self_test() -> int:
     rng = np.random.default_rng(0)
     dates = pd.bdate_range("2015-01-01", "2024-12-31")
@@ -494,6 +642,8 @@ def main() -> int:
                     default="rank-first",
                     help="売買代金 上位50位をどの母集団で数えるか。"
                          "filter-first は前日条件を満たす銘柄の中で上位50")
+    ap.add_argument("--risk", action="store_true",
+                    help="サイズを決めるための ES と、ボラ回帰を1本出す")
     ap.add_argument("--both", action="store_true",
                     help="N と鏡像を同時に建てた場合を測る")
     ap.add_argument("--corr", action="store_true",
@@ -525,6 +675,11 @@ def main() -> int:
         return 1
     if args.both:
         combined(panel)
+        return 0
+    if args.risk:
+        t = apply_sizing(sig, "fixed")
+        risk_report(t)
+        vol_regression(sig, t, panel)
         return 0
     n225 = load_n225()
     if n225 is None:
