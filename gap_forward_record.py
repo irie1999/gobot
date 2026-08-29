@@ -84,9 +84,26 @@ def build_candidates(cache_dir: str, index_symbol: str,
 
     # 除外理由を数える。出力が少ないときに推測しないで済むように。
     drop = {k: 0 for k in ("短すぎ", "β算出不可", "ATR異常", "価格帯外",
-                           "売買代金不足", "前日リターン欠損", "古いキャッシュ")}
-    last_dates = []
+                           "売買代金不足", "前日リターン欠損", "古いキャッシュ",
+                           "トリガーが値幅制限の外")}
     idx_last = idx_df.index[-1]
+    # 最新の営業日を先に確定させる。これより古い最終バーの銘柄は使えない。
+    last_dates = []
+    for sym in syms:
+        d = gd.fetch_daily(sym)
+        if d is not None and len(d):
+            last_dates.append(d.index[-1])
+    if not last_dates:
+        raise SystemExit("日足が1銘柄も読めません")
+    newest = max(last_dates)
+    if idx_last < newest:
+        raise SystemExit(
+            f"⛔ 指数 {index_symbol} の最終バーが {idx_last:%Y-%m-%d} で、"
+            f"銘柄の最新 {newest:%Y-%m-%d} より古いです。\n"
+            f"   その日の指数リターンが無いと prev_z が市場調整なしで計算され、"
+            f"eligible_side が誤ります。\n"
+            f"   指数のキャッシュを更新してから再実行してください "
+            f"(.rsi2_cache/^N225.pkl を削除して取り直す)。")
 
     rows = []
     for sym in syms:
@@ -94,7 +111,11 @@ def build_candidates(cache_dir: str, index_symbol: str,
         if df is None or len(df) < BETA_WINDOW + ATR_PERIOD + 5:
             drop["短すぎ"] += 1
             continue
-        last_dates.append(df.index[-1])
+        if df.index[-1] != newest:
+            # 最終バーが古い = キャッシュ更新漏れ。prev_close が過去の値なので
+            # 翌朝のトリガー価格として使えない。
+            drop["古いキャッシュ"] += 1
+            continue
         c = df["close"]
         ret = c.pct_change()
         # β: 指数と日付が揃う行だけを使う。rolling は窓内に NaN が1つでも
@@ -132,6 +153,15 @@ def build_candidates(cache_dir: str, index_symbol: str,
         prev_z = resid_prev / atr
         up_ok = prev_z >= PREV_THR
         dn_ok = prev_z <= -PREV_THR
+
+        # ③ トリガー価格が値幅制限の外なら、その銘柄は構造的に発火しない。
+        #    3×ATR が制限値幅を超える高ボラ銘柄が該当する。
+        #    板の購読枠 (同時50銘柄) を無駄にしないよう外す。
+        lim = gd.tse_price_limit(prev_close)
+        need = GAP_THR * atr * prev_close
+        if need > lim:
+            drop["トリガーが値幅制限の外"] += 1
+            continue
         rows.append({
             "asof": df.index[-1].strftime("%Y-%m-%d"),
             "symbol": sym,
@@ -145,27 +175,20 @@ def build_candidates(cache_dir: str, index_symbol: str,
             "trigger_up_at_idx0": round(prev_close * (1 + GAP_THR * atr), 2),
             "trigger_dn_at_idx0": round(prev_close * (1 - GAP_THR * atr), 2),
             "idx_adj_per_1pct": round(prev_close * beta * 0.01, 4),
+            "price_limit_yen": lim,
+            "limit_headroom_pct": round((lim - need) / prev_close * 100, 2),
         })
 
     print(f"\n候補の絞り込み: {len(syms):,} 銘柄 → {len(rows):,} 銘柄")
     for k, v in drop.items():
         if v:
             print(f"    除外 {k:<16} {v:>6,}")
-    if last_dates:
-        ld = pd.Series(last_dates)
-        newest = ld.max()
-        stale = int((ld < newest).sum())
-        print(f"    最終バー: 最新 {newest:%Y-%m-%d} / "
-              f"それより古い銘柄 {stale:,} 件")
-        if stale > len(ld) * 0.1:
-            print("    ⚠ 最終バーの日付が揃っていません。キャッシュの更新漏れです。")
-    print(f"    指数 {index_symbol} の最終バー: {idx_last:%Y-%m-%d}")
+    print(f"    基準日 (最新の最終バー): {newest:%Y-%m-%d}   "
+          f"指数 {index_symbol}: {idx_last:%Y-%m-%d}")
     if rows:
         a = pd.Series([r["asof"] for r in rows])
-        if a.nunique() > 1:
-            print(f"    ⚠ 候補の asof が {a.nunique()} 種類あります: "
-                  f"{sorted(a.unique())[:5]}")
-            print("       同じ日のデータで揃っていないと、翌朝の候補になりません。")
+        assert a.nunique() == 1, f"asof が揃っていません: {sorted(a.unique())}"
+        print(f"    候補の asof は {a.iloc[0]} で揃っています")
 
     out = pd.DataFrame(rows)
     return out.sort_values("turnover20_oku", ascending=False).reset_index(drop=True)
