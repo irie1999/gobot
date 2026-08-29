@@ -153,11 +153,15 @@ def simulate_one(bars: pd.DataFrame, daily_close: float, lags: list[int],
     exit_p = float(bars["close"].iloc[-1])
 
     fv = float(bars["volume"].iloc[0])
+    # 日中に約定が1本しかない = ストップで張り付き、引けの板寄せだけで成立。
+    # 始値=終値なので、始値で建てて引けで閉じることが原理的にできない。
+    single = len(bars) == 1
     out: dict = {
         "contaminated": False,
         "first_bar_time": first_t,
         "exit_p": exit_p,
         "n_bars": len(bars),
+        "single_print": single,
         # 板寄せの約定価格。条件判定に使う価格なので、これでは建てられない
         "auction": float(bars["open"].iloc[0]),
         # 板寄せ後、実際に入れる最速の価格
@@ -224,24 +228,68 @@ def dump_raw_bars(sig: pd.DataFrame, mdir: Path, interval: str, n: int) -> None:
     print("=" * 78)
 
 
-def phantom_diagnosis(ex: pd.DataFrame) -> None:
-    """幻バーを踏んでいないかの検査。自分のスクリプトにも同じ罠がある。"""
+def phantom_diagnosis(ex: pd.DataFrame) -> pd.DataFrame:
+    """先頭バーの素性を検査し、執行可能な部分集合を返す。
+
+    - 幻バー (出来高0のプレースホルダ) を掴んでいないか
+    - 寄りの遅れが実在するか。**自分の生バーから測る**。他人の delay 列は使わない
+    - 単一プリント日 (ストップ張り付き) を分離する。日中の取引が存在しないので
+      始値で建てて引けで閉じることが原理的にできない
+    """
     if ex.empty or "first_vol" not in ex:
-        return
+        return ex
+    print("\n【0】先頭バーの検査")
     v = ex["first_vol"]
     zero = (v.fillna(0) <= 0).mean()
-    print("\n【0】先頭バーの検査 (幻バーを踏んでいないか)")
-    print(f"  先頭バーの出来高が 0 または欠損: {zero*100:.1f}%")
-    tt = ex["first_bar_time"].dt.strftime("%H:%M").value_counts().head(6)
-    print(f"  先頭バーの時刻 (上位): {dict(tt)}")
     same = (ex["auction"] == ex["open_day"]).mean()
-    print(f"  先頭バーの始値が日足始値と一致: {same*100:.1f}%")
+    print(f"  先頭バーの出来高が 0 または欠損 : {zero*100:>5.1f}%")
+    print(f"  先頭バーの始値が日足始値と一致  : {same*100:>5.1f}%")
     if zero > 0.05:
         print("  ⚠ 出来高0の先頭バーがあります。板寄せ前の気配プレースホルダを")
         print("    掴んでいる可能性があり、そのバーの終値は約定価格ではありません。")
     if same < 0.90:
-        print("  ⚠ 先頭バーの始値が日足始値と合いません。分足と日足で")
-        print("    調整基準がずれている可能性があります (分割の未調整など)。")
+        print("  ⚠ 先頭バーの始値が日足始値と合いません (分割の未調整など)。")
+
+    # 単一プリント日
+    sp = ex["single_print"] if "single_print" in ex else pd.Series(False, index=ex.index)
+    print(f"\n  日中の約定が1本だけ (ストップ張り付き) : {int(sp.sum()):,} / "
+          f"{len(ex):,} 件 ({sp.mean()*100:.1f}%)")
+    if sp.any():
+        g = ex[sp]
+        print(f"    そのうち 始値=終値 : {int((g['auction'] == g['exit_p']).sum()):,} 件")
+        print(f"    平均 |ギャップ| : {g['gap'].abs().mean()*100:.1f}% "
+              f"(全体 {ex['gap'].abs().mean()*100:.1f}%)")
+        print("    → 日中の取引が存在しないので執行不能。以降の集計から除きます。")
+
+    # 寄り時刻 (09:00 からの遅れ) を生バーから測る
+    dly = ((ex["first_bar_time"] - ex["first_bar_time"].dt.normalize()
+            - pd.Timedelta(hours=9)).dt.total_seconds() / 60).clip(lower=0)
+    ex = ex.assign(delay_min=dly)
+    live = ex[~sp]
+    print(f"\n  寄りの遅れ (生バーの先頭時刻から。単一プリント日を除く {len(live):,} 件)")
+    if len(live) >= 20:
+        q = live["delay_min"].quantile([0, .25, .5, .75, .9, 1.0])
+        print(f"    最小 {q[0]:.0f}分 / 25% {q[.25]:.0f} / 中央 {q[.5]:.0f} / "
+              f"75% {q[.75]:.0f} / 90% {q[.9]:.0f} / 最大 {q[1.0]:.0f}")
+        print(f"    09:00 ちょうどに寄った: {int((live['delay_min'] <= 0).sum()):,} 件 "
+              f"({(live['delay_min'] <= 0).mean()*100:.1f}%)")
+        try:
+            qq = pd.qcut(live["gap"].abs(), 5, duplicates="drop")
+            tab = live.groupby(qq, observed=True).apply(
+                lambda x: pd.Series({
+                    "件数": len(x),
+                    "中央gap%": x["gap"].abs().median() * 100,
+                    "遅れ0の件数": int((x["delay_min"] <= 0).sum()),
+                    "中央の遅れ分": x["delay_min"].median()}),
+                include_groups=False)
+            print("\n    ギャップ分位 × 寄りの遅れ (中間分位だけ 0 件なら処理の産物)")
+            print("      " + tab.to_string().replace("\n", "\n      "))
+            c = np.corrcoef(live["gap"].abs(), live["delay_min"])[0, 1]
+            print(f"      corr(|ギャップ|, 遅れ) = {c:+.3f}  "
+                  f"(特別気配が理由なら正のはず)")
+        except Exception as e:
+            print(f"    分位別の集計に失敗: {e}")
+    return ex[~sp].copy()
 
 
 def build_exec_table(sig: pd.DataFrame, mdir: Path, interval: str,
@@ -334,7 +382,10 @@ def report(ex: pd.DataFrame, sig_all: pd.DataFrame, mkt: pd.Series,
     if ex.empty:
         print("分足と突き合わせられたシグナルがありません。")
         return
-    phantom_diagnosis(ex)
+    ex = phantom_diagnosis(ex)
+    if ex.empty:
+        print("執行可能な銘柄日が残りませんでした。")
+        return
     print(f"期間 {ex['date'].min():%Y-%m-%d} 〜 {ex['date'].max():%Y-%m-%d}   "
           f"シグナル {len(ex):,} 件 / {ex['date'].nunique():,} 日")
 
