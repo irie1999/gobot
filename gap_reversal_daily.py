@@ -929,6 +929,38 @@ def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
     else:
         print("    (月数が少ないか総和が非正のため省略)")
 
+    # ── §3c 期間3分割 (サバイバーシップの検査) ───────────────────
+    print("\n  期間分割 (サバイバーシップの検査)")
+    print("  買い側は『下げたものを買う』ので、下げ続けて上場廃止になった銘柄が")
+    print("  抜けている影響を最も強く受けます。古い期間ほど強く単調に減衰するなら")
+    print("  サバイバーシップが効いています。フラットならバイアスは小さい。")
+    bnds = [pd.Timestamp(x) for x in args.split_dates]
+    edges = [sig["date"].min()] + bnds + [sig["date"].max() + pd.Timedelta(days=1)]
+    print(f"    {'期間':<22}{'件数':>7}{'グロス':>10}{'コスト後':>10}"
+          f"{'日次bp':>9}{'日次t':>8}")
+    prev_gross = None
+    monotone_down = True
+    for i in range(len(edges) - 1):
+        lo, hi = edges[i], edges[i + 1]
+        g = sig[(sig["date"] >= lo) & (sig["date"] < hi)]
+        if len(g) < 10:
+            print(f"    {lo:%Y-%m}〜{hi:%Y-%m}     件数不足 ({len(g)})")
+            prev_gross = None
+            continue
+        gross = g["alpha"].mean() * 10000
+        net = gross - args.cost_bps
+        st = stats(to_daily(g, "alpha", args.cost_bps, args.max_names))
+        print(f"    {lo:%Y-%m}〜{hi:%Y-%m}      {len(g):>6,}"
+              f"{gross:>10.1f}{net:>10.1f}"
+              f"{st.get('mean_bp', float('nan')):>9.1f}{st.get('t', float('nan')):>8.2f}")
+        if prev_gross is not None and gross > prev_gross:
+            monotone_down = False
+        prev_gross = gross
+    if monotone_down and prev_gross is not None:
+        print("    ⚠ グロスが単調に減衰しています。サバイバーシップの疑いがあります。")
+    else:
+        print("    → 単調減衰ではありません。サバイバーシップの影響は小さいと見られます。")
+
     # ── §4 ギャップ幅の単調性 ─────────────────────────────────────
     print("\n【4】ギャップ幅(ATR単位)の分位別 α  ← 単調に増えなければノイズ")
     if prev_thr is None:
@@ -1272,7 +1304,8 @@ def self_test() -> int:
     mkt = pd.Series({d: uni_s[d] / uni_c[d] for d in uni_c}).sort_index()
 
     args = argparse.Namespace(raw=False, prev_thr=1.0, gap_thr=0.5, cost_bps=0.0,
-                              max_names=13, capital=4_000_000)
+                              max_names=13, capital=4_000_000, side="both",
+                              split_dates=["2019-01-01", "2022-01-01"])
     report(panel, mkt, args)
 
     sig = apply_signal(panel, mkt, False, 1.0, 0.5)
@@ -1323,6 +1356,9 @@ def main() -> int:
                     help="前日の動きの閾値 (ATR単位)。'none' で条件を課さない。"
                          "0.0 は『同符号であること』を要求する点に注意")
     ap.add_argument("--gap-thr", dest="gap_thr", type=float)
+    ap.add_argument("--split-dates", dest="split_dates", nargs="*",
+                    default=["2013-01-01", "2020-01-01"],
+                    help="期間分割の境界 (既定 2007-2012 / 2013-2019 / 2020-)")
     ap.add_argument("--side", choices=["both", "long", "short"], default="both",
                     help="買い側(long)/空売り側(short)だけに絞って全検定を通す")
     ap.add_argument("--cost-bps", dest="cost_bps", type=float, default=COST_BPS)
