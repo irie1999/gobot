@@ -697,7 +697,14 @@ def _stop_row(sig: pd.DataFrame, sm: float, base_mean: float) -> dict:
         return float((be / 10000.0 * rows["open"] / t).median())
     lo = hitrows[hitrows["open"] < 3000] if len(hitrows) else hitrows
     hi = hitrows[hitrows["open"] >= 3000] if len(hitrows) else hitrows
+    # ⛔ 実装間で比較すべきはこれ。円/件の差もベースラインも母集団に依存するが、
+    #   Δ は「発動したトレードを引けまで持つ vs 損切値で切る」の差なので、
+    #   件数にも建値分布にもほぼ依存しない。
+    #     Δ = −(現行との差) ÷ 発動率
+    #   Δ > 0 なら持つ方が良い (損切りは害)、Δ < 0 なら切る方が良い。
+    delta = (-eff / hit) if hit > 0 else float("nan")
     return {"sm": sm, "n": len(g), "mean": m, "eff": eff, "hit": hit * 100,
+            "delta": delta,
             "be_bp": be, "tick_all": ticks(hitrows),
             "tick_lo": ticks(lo), "tick_hi": ticks(hi),
             "n_lo": len(lo), "n_hi": len(hi)}
@@ -705,11 +712,11 @@ def _stop_row(sig: pd.DataFrame, sm: float, base_mean: float) -> dict:
 
 def _print_stop_table(rows: list) -> None:
     print(f"    {'損切ATR':>8}{'取引':>8}{'発動率%':>9}{'円/件':>10}"
-          f"{'現行との差':>12}{'分岐点bp':>10}"
+          f"{'現行との差':>12}{'Δ 持つ-切る':>13}{'分岐点bp':>10}"
           f"{'ﾃｨｯｸ<3000':>11}{'ﾃｨｯｸ>=3000':>12}")
     for r in rows:
         print(f"    {r['sm']:>8.2f}{r['n']:>8,}{r['hit']:>9.1f}"
-              f"{r['mean']:>10,.0f}{r['eff']:>+12,.0f}"
+              f"{r['mean']:>10,.0f}{r['eff']:>+12,.0f}{r['delta']:>+13,.0f}"
               f"{r['be_bp']:>10.2f}{r['tick_lo']:>11.2f}{r['tick_hi']:>12.2f}")
 
 
@@ -745,6 +752,14 @@ def stop_grid(panel: pd.DataFrame, side: str, train_from: str,
     print("     コストです。往復ではありません。")
     print("  ⚠ 3,000円で呼値が 1円 → 5円 と5倍になるので、同じ bp でも")
     print("     ティック数は 1/5 になります。>=3000 の列を必ず見ること。")
+    print("  ★ 別実装と突き合わせるのは **Δ と 発動率** だけ。円/件の差も")
+    print("    ベースラインも母集団に依存するので、比べると必ずズレます。")
+    print("  ⛔ そして突き合わせる前に、相手の母集団の **取引件数** を聞くこと。")
+    print("     2026-08-30 に、17倍の母集団で測られた表を N の数字として")
+    print("     3往復議論しました。件数を1回聞けば済んでいました。")
+    print("  ⛔ sm <= 0.2 (建値の0.5%未満) は、履歴データでは発動集合を")
+    print("     解像できません。実際の逆指値は1ティックの上振れでも発動します。")
+    print("     日足の高値でも5分足の高値でも足りません。参考値として扱うこと。")
 
 
 def stop_test(panel: pd.DataFrame, side: str, train_from: str,
