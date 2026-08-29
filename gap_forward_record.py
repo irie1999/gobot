@@ -60,6 +60,31 @@ ATR_PERIOD = gd.ATR_PERIOD
 # ══════════════════════════════════════════════════════════════════
 # 1. 前夜: 候補とトリガー価格
 # ══════════════════════════════════════════════════════════════════
+def fetch_index(index_symbol: str, need_date=None) -> pd.DataFrame | None:
+    """指数の日足。キャッシュに無い/古い場合は yfinance から取り直す。
+
+    gd.load_cache_dir が _LOCAL を設定した後は fetch_daily がローカルしか
+    見ないので、指数だけ一時的に _LOCAL を外して取得する。
+    """
+    df = gd.fetch_daily(index_symbol)
+    fresh = df is not None and (need_date is None or df.index[-1] >= need_date)
+    if fresh:
+        return df
+    saved = gd._LOCAL
+    try:
+        gd._LOCAL = None                      # yfinance / .gapmr_cache 経路を使う
+        got = gd.fetch_daily(index_symbol)
+    finally:
+        gd._LOCAL = saved
+    if got is None:
+        return df                             # 取れなければ元のまま返す
+    if isinstance(gd._LOCAL, dict):
+        gd._LOCAL[index_symbol] = got         # 以降の参照でも使えるようにする
+    print(f"  指数 {index_symbol} を yfinance から取得しました "
+          f"(最終バー {got.index[-1]:%Y-%m-%d})")
+    return got
+
+
 def build_candidates(cache_dir: str, index_symbol: str,
                      limit: int | None, workers: int) -> pd.DataFrame:
     """各銘柄の最新営業日までの情報から、翌朝の候補を作る。
@@ -77,17 +102,7 @@ def build_candidates(cache_dir: str, index_symbol: str,
         raise SystemExit("日足キャッシュが見つかりません")
     if limit:
         syms = syms[:limit]
-    idx_df = gd.fetch_daily(index_symbol)
-    if idx_df is None:
-        raise SystemExit(f"{index_symbol} が見つかりません")
-    idx_ret = idx_df["close"].pct_change()
-
-    # 除外理由を数える。出力が少ないときに推測しないで済むように。
-    drop = {k: 0 for k in ("短すぎ", "β算出不可", "ATR異常", "価格帯外",
-                           "売買代金不足", "前日リターン欠損", "古いキャッシュ",
-                           "トリガーが値幅制限の外")}
-    idx_last = idx_df.index[-1]
-    # 最新の営業日を先に確定させる。これより古い最終バーの銘柄は使えない。
+    # 銘柄側の最新営業日を先に出し、その日まで来ている指数を要求する
     last_dates = []
     for sym in syms:
         d = gd.fetch_daily(sym)
@@ -96,14 +111,28 @@ def build_candidates(cache_dir: str, index_symbol: str,
     if not last_dates:
         raise SystemExit("日足が1銘柄も読めません")
     newest = max(last_dates)
+
+    idx_df = fetch_index(index_symbol, need_date=newest)
+    if idx_df is None:
+        raise SystemExit(
+            f"⛔ 指数 {index_symbol} を取得できません。\n"
+            f"   .rsi2_cache/ に置くか、ネットワークから取得できる状態に"
+            f"してから再実行してください。")
+    idx_ret = idx_df["close"].pct_change()
+
+    # 除外理由を数える。出力が少ないときに推測しないで済むように。
+    drop = {k: 0 for k in ("短すぎ", "β算出不可", "ATR異常", "価格帯外",
+                           "売買代金不足", "前日リターン欠損", "古いキャッシュ",
+                           "トリガーが値幅制限の外")}
+    idx_last = idx_df.index[-1]
     if idx_last < newest:
         raise SystemExit(
             f"⛔ 指数 {index_symbol} の最終バーが {idx_last:%Y-%m-%d} で、"
             f"銘柄の最新 {newest:%Y-%m-%d} より古いです。\n"
             f"   その日の指数リターンが無いと prev_z が市場調整なしで計算され、"
             f"eligible_side が誤ります。\n"
-            f"   指数のキャッシュを更新してから再実行してください "
-            f"(.rsi2_cache/^N225.pkl を削除して取り直す)。")
+            f"   yfinance からの取得も試みましたが最新になりませんでした。"
+            f"市場休場日でないか確認してください。")
 
     rows = []
     for sym in syms:
@@ -208,7 +237,7 @@ def reconcile(cand: pd.DataFrame, quotes: pd.DataFrame,
               cache_dir: str, index_symbol: str) -> pd.DataFrame:
     """気配からの推定と、実際の始値からの値を突き合わせる。"""
     gd.load_cache_dir(cache_dir, index_symbol)
-    idx_df = gd.fetch_daily(index_symbol)
+    idx_df = fetch_index(index_symbol)
     q = quotes.copy()
     q["date"] = pd.to_datetime(q["date"])
     m = q.merge(cand, on="symbol", how="inner", suffixes=("", "_c"))
