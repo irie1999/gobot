@@ -43,6 +43,18 @@ MAX_MOVE = 0.30           # 値幅制限より緩い上限。超えるのはデ�
 ATR_N = 20
 TRAIN_END = pd.Timestamp("2020-09-01")   # TRAIN 〜2020-08 / TEST 2020-09〜
 
+# ★★ N の母集団の基準値。**数字を引用するときは必ずここと照合する。**
+#   ⛔ これと桁が合わない件数の表は N ではありません。
+#   実例: --sweep-barrier の 167,880銘柄日 (watch50 も ret1 も未適用) を
+#         N の数字として3往復議論しました。両方の件数が同じ文書に載っていて、
+#         3人とも割り算をしませんでした。**だから機械に割らせます。**
+REF = {
+    "period": ("2015-02", "2026-08"),
+    "trades": 20_729, "fire_days": 2_613,
+    "train": 9_666, "test": 11_063,
+    "price": 2_652,       # 1件あたり建値。呼値は <3000 で1円 / 3000-5000 で5円
+}
+
 _RET: dict[str, pd.Series] = {}          # 相関の代理計算用
 
 
@@ -352,6 +364,36 @@ def concentration(trades: pd.DataFrame) -> None:
     print("\n    ⛔ 共変動なら、ヘッジ (コスト負け) も予測 (不可能) も潰れている")
     print("       以上、残るのはサイズを下げることだけです。")
     print("       それは発見ではなく決断で、検証で出せる答えではありません。")
+
+
+def _ref_check(sig: pd.DataFrame) -> None:
+    """★ N の基準値と照合する。**割り算は機械にやらせる。**
+
+    2026-08-30: 17倍の母集団で測られた表を N の数字として3往復議論しました。
+    両方の件数は同じ文書に載っていたのに、誰も比を取りませんでした。
+    """
+    lo = pd.Timestamp(REF["period"][0] + "-01")
+    w = sig[sig["date"] >= lo]
+    print(f"\n  ★ N の基準値との照合 ({REF['period'][0]} 〜 {REF['period'][1]})")
+    rows = [
+        ("全期間 取引", len(w), REF["trades"]),
+        ("全期間 発火日", w["date"].nunique(), REF["fire_days"]),
+        ("TRAIN 取引", int((w["date"] < TRAIN_END).sum()), REF["train"]),
+        ("TEST 取引", int((w["date"] >= TRAIN_END).sum()), REF["test"]),
+    ]
+    print(f"    {'':<16}{'こちら':>10}{'基準値':>10}{'比':>8}")
+    worst = 1.0
+    for lbl, mine, ref in rows:
+        r = mine / ref if ref else float("nan")
+        worst = max(worst, r, 1 / r if r else 1.0)
+        print(f"    {lbl:<16}{mine:>10,}{ref:>10,}{r:>8.2f}")
+    print(f"    1件あたり建値      {w['open'].mean():>10,.0f}"
+          f"{REF['price']:>10,}{w['open'].mean()/REF['price']:>8.2f}")
+    if worst >= 1.5:
+        print(f"    ⛔ 最大 {worst:.2f}倍 ずれています。**成績を論じる前に")
+        print("       仕様差を特定すること。** 桁で違う表は N ではありません")
+    else:
+        print("    ✅ 桁は合っています")
 
 
 def load_n225() -> pd.DataFrame | None:
@@ -884,8 +926,7 @@ def main() -> int:
           f"ギャップ {GAP_THR*100:.2f}% / 売買代金 上位{TOPN}位")
     print(f"  発火 {len(sig):,} 件 / {sig['date'].nunique():,} 日 "
           f"= {len(sig)/nd*20.7:.0f} 件/月 (20.7営業日/月)")
-    print("  ⛔ 参照値は 144件/月、別の独立実装は 150〜190件/月。")
-    print("     ここが桁で違うなら、成績を論じる前に仕様差を特定すること。")
+    _ref_check(sig)
     if not len(sig):
         return 1
     if args.stop_grid or args.stop_test:
