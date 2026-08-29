@@ -86,7 +86,8 @@ def fetch_index(index_symbol: str, need_date=None) -> pd.DataFrame | None:
 
 
 def build_candidates(cache_dir: str, index_symbol: str,
-                     limit: int | None, workers: int) -> pd.DataFrame:
+                     limit: int | None, workers: int,
+                     strict_index: bool = False) -> pd.DataFrame:
     """各銘柄の最新営業日までの情報から、翌朝の候補を作る。
 
     トリガー価格は指数ギャップに依存するので、係数の形で持たせる。
@@ -125,14 +126,39 @@ def build_candidates(cache_dir: str, index_symbol: str,
                            "売買代金不足", "前日リターン欠損", "古いキャッシュ",
                            "トリガーが値幅制限の外")}
     idx_last = idx_df.index[-1]
+    proxy_note = ""
     if idx_last < newest:
-        raise SystemExit(
-            f"⛔ 指数 {index_symbol} の最終バーが {idx_last:%Y-%m-%d} で、"
-            f"銘柄の最新 {newest:%Y-%m-%d} より古いです。\n"
-            f"   その日の指数リターンが無いと prev_z が市場調整なしで計算され、"
-            f"eligible_side が誤ります。\n"
-            f"   yfinance からの取得も試みましたが最新になりませんでした。"
-            f"市場休場日でないか確認してください。")
+        if strict_index:
+            raise SystemExit(
+                f"⛔ 指数 {index_symbol} の最終バーが {idx_last:%Y-%m-%d} で、"
+                f"銘柄の最新 {newest:%Y-%m-%d} より古いです (--strict-index)。")
+        # 指数が1日遅れることは yfinance では珍しくない。市場調整なしで
+        # prev_z を出すのは危険なので、欠けた日だけユニバースの等加重平均
+        # リターンで代用する。何をしたかは必ず表示する。
+        rr = []
+        for sym in syms:
+            d = gd.fetch_daily(sym)
+            if d is None or newest not in d.index:
+                continue
+            r = d["close"].pct_change().get(newest, np.nan)
+            if np.isfinite(r) and abs(r) <= 0.30:
+                rr.append(float(r))
+        need_n = max(30, int(len(syms) * 0.5))
+        if len(rr) < need_n:
+            raise SystemExit(
+                f"⛔ 指数 {index_symbol} が {idx_last:%Y-%m-%d} までしか無く、"
+                f"代用に使える銘柄も {len(rr)} 件 (必要 {need_n} 件) しか"
+                f"ありません。")
+        proxy = float(np.mean(rr))
+        idx_ret = pd.concat([idx_ret, pd.Series({newest: proxy})]).sort_index()
+        proxy_note = (
+            f"  ⚠ 指数 {index_symbol} は {idx_last:%Y-%m-%d} までしかないので、"
+            f"{newest:%Y-%m-%d} の指数リターンを\n"
+            f"     ユニバース等加重平均 {proxy*100:+.2f}% ({len(rr):,}銘柄) で"
+            f"代用しました。日経平均は株価加重なので厳密には一致しません。\n"
+            f"     ニュースの日経平均の騰落率と大きく食い違うなら、"
+            f"--strict-index で止めて指数を取り直してください。")
+        print(proxy_note)
 
     rows = []
     for sym in syms:
@@ -478,6 +504,8 @@ def main() -> int:
     ap.add_argument("--index-symbol", dest="index_symbol", default=gd.INDEX_SYM)
     ap.add_argument("--quotes", help="朝の気配CSV")
     ap.add_argument("--candidates", help="前夜の候補CSV (既定は最新)")
+    ap.add_argument("--strict-index", dest="strict_index", action="store_true",
+                    help="指数が最新でなければ代用せず止まる")
     ap.add_argument("--limit", type=int)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--self-test", dest="self_test", action="store_true")
@@ -492,7 +520,8 @@ def main() -> int:
 
     if args.mode == "prepare":
         cand = build_candidates(args.cache_dir, args.index_symbol,
-                                args.limit, args.workers)
+                                args.limit, args.workers,
+                                strict_index=args.strict_index)
         asof = cand["asof"].iloc[0] if len(cand) else datetime.now().strftime("%Y-%m-%d")
         p = OUT_DIR / f"candidates_{asof}.csv"
         cand.to_csv(p, index=False)
