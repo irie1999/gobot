@@ -179,6 +179,71 @@ def simulate_one(bars: pd.DataFrame, daily_close: float, lags: list[int],
     return out
 
 
+def dump_raw_bars(sig: pd.DataFrame, mdir: Path, interval: str, n: int) -> None:
+    """ギャップの大きい銘柄日について、生の分足を無加工で表示する。
+
+    幻バー (出来高0 / OHLC同値) の除去も、時刻の丸めも一切しない。
+    「寄りが遅れている」のが実在なのか処理の産物なのかは、これを見れば分かる。
+
+      - 09:00 から出来高 0 のバーが並び、途中から出来高が付く
+          → 気配のプレースホルダ。除去すると『遅延』に見える
+      - 09:00 台にバーが存在せず、途中から始まる
+          → 板寄せが実際に遅れて成立している (実在)
+    """
+    top = sig.reindex(sig["gap"].abs().sort_values(ascending=False).index).head(n)
+    print("\n" + "=" * 78)
+    print(f"生の分足ダンプ (|ギャップ| 上位 {len(top)} 銘柄日 / 無加工)")
+    print("=" * 78)
+    for _, r in top.iterrows():
+        mdf = load_minute(r["symbol"], mdir, interval)
+        if mdf is None:
+            print(f"\n{r['symbol']} {r['date']:%Y-%m-%d}: 分足ファイルなし")
+            continue
+        bars = day_bars(mdf, r["date"])
+        print(f"\n{r['symbol']}  {r['date']:%Y-%m-%d}  "
+              f"残差ギャップ {r['gap']*100:+.2f}%  "
+              f"日足 始値 {r['open_day']:,.1f} / 終値 {r['close_day']:,.1f}")
+        if bars.empty:
+            print("  当日のバーなし")
+            continue
+        print(f"  バー総数 {len(bars)}  先頭 {bars.index[0]:%H:%M}  "
+              f"末尾 {bars.index[-1]:%H:%M}")
+        print(f"    {'時刻':<8}{'始値':>10}{'高値':>10}{'安値':>10}"
+              f"{'終値':>10}{'出来高':>12}   印")
+        for t, b in bars.head(10).iterrows():
+            mark = []
+            if not (b["volume"] > 0):
+                mark.append("出来高0")
+            if b["open"] == b["high"] == b["low"] == b["close"]:
+                mark.append("OHLC同値")
+            if b["open"] == r["open_day"]:
+                mark.append("始値=日足始値")
+            print(f"    {t:%H:%M}   {b['open']:>10,.1f}{b['high']:>10,.1f}"
+                  f"{b['low']:>10,.1f}{b['close']:>10,.1f}{b['volume']:>12,.0f}"
+                  f"   {' '.join(mark)}")
+    print("=" * 78)
+
+
+def phantom_diagnosis(ex: pd.DataFrame) -> None:
+    """幻バーを踏んでいないかの検査。自分のスクリプトにも同じ罠がある。"""
+    if ex.empty or "first_vol" not in ex:
+        return
+    v = ex["first_vol"]
+    zero = (v.fillna(0) <= 0).mean()
+    print("\n【0】先頭バーの検査 (幻バーを踏んでいないか)")
+    print(f"  先頭バーの出来高が 0 または欠損: {zero*100:.1f}%")
+    tt = ex["first_bar_time"].dt.strftime("%H:%M").value_counts().head(6)
+    print(f"  先頭バーの時刻 (上位): {dict(tt)}")
+    same = (ex["auction"] == ex["open_day"]).mean()
+    print(f"  先頭バーの始値が日足始値と一致: {same*100:.1f}%")
+    if zero > 0.05:
+        print("  ⚠ 出来高0の先頭バーがあります。板寄せ前の気配プレースホルダを")
+        print("    掴んでいる可能性があり、そのバーの終値は約定価格ではありません。")
+    if same < 0.90:
+        print("  ⚠ 先頭バーの始値が日足始値と合いません。分足と日足で")
+        print("    調整基準がずれている可能性があります (分割の未調整など)。")
+
+
 def build_exec_table(sig: pd.DataFrame, mdir: Path, interval: str,
                      lags: list[int], workers: int) -> pd.DataFrame:
     """シグナル1件ごとに、分足から見た執行価格を付ける。"""
@@ -269,6 +334,7 @@ def report(ex: pd.DataFrame, sig_all: pd.DataFrame, mkt: pd.Series,
     if ex.empty:
         print("分足と突き合わせられたシグナルがありません。")
         return
+    phantom_diagnosis(ex)
     print(f"期間 {ex['date'].min():%Y-%m-%d} 〜 {ex['date'].max():%Y-%m-%d}   "
           f"シグナル {len(ex):,} 件 / {ex['date'].nunique():,} 日")
 
@@ -424,6 +490,8 @@ def main() -> int:
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--limit", type=int)
     ap.add_argument("--no-index", dest="no_index", action="store_true")
+    ap.add_argument("--dump-bars", dest="dump_bars", type=int, default=0,
+                    help="ギャップ上位N銘柄日の生の分足を無加工で表示する")
     ap.add_argument("--self-test", dest="self_test", action="store_true")
     args = ap.parse_args()
     args.lags = [int(x) for x in str(args.lags).replace(",", " ").split()]
@@ -477,6 +545,10 @@ def main() -> int:
         for r in sig.itertuples()
     ]
     sig = sig[sig["close_day"].notna()]
+
+    if args.dump_bars:
+        dump_raw_bars(sig, mdir, args.interval, args.dump_bars)
+        return 0
 
     ex = build_exec_table(sig, mdir, args.interval, args.lags, args.workers)
     report(ex, sig, mkt, args)
