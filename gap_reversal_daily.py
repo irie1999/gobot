@@ -1354,6 +1354,35 @@ def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
     print(_fmt("α (始値ノイズも控除)", stats(d_ax)))
 
     edges, slopes, counts = _BOUNCE
+    # ── 指数の効き ────────────────────────────────────────
+    #  ⛔ 残差化が弱まると resid_gap が生ギャップに近づき、
+    #    (1) 生の騰落率ランキングでのカバー率が上がり
+    #    (2) 市場調整の効果が減って α が下がる
+    #    という **表と裏** が同時に起きます。カバー率の改善を成果として
+    #    報告する前に、この2つが同じ変更から出ていないかを必ず見ること。
+    print("\n  指数の効き (残差化がどれだけ効いているか)")
+    cg = float(panel["resid_gap"].corr(panel["gap"]))
+    rr = float(panel["resid_gap"].std() / panel["gap"].std())
+    print(f"    corr(残差ギャップ, 生ギャップ) = {cg:.4f}"
+          "   1.0 に近いほど残差化が効いていない")
+    print(f"    std比 残差/生               = {rr:.4f}"
+          "   1.0 に近いほど市場成分を引けていない")
+    print(f"    |指数ギャップ| の中央値        = "
+          f"{panel['idx_gap'].abs().median()*100:.3f}%  "
+          f"/ 99%点 {panel['idx_gap'].abs().quantile(0.99)*100:.2f}%")
+    # 発火が集中する日。暴落日の発火が消えていないかの確認。
+    fd = sig.groupby("date").agg(
+        n=("symbol", "size"), bp=("alpha", "mean"),
+        ig=("idx_gap", "first")).sort_values("n", ascending=False)
+    print("    発火が多い日 上位10 (暴落日の発火が消えていないかの確認)")
+    print(f"      {'日付':<12}{'発火':>5}{'指数ギャップ%':>14}{'1件bp':>10}")
+    for d, r in fd.head(10).iterrows():
+        print(f"      {d:%Y-%m-%d}  {int(r['n']):>5}{r['ig']*100:>14.2f}"
+              f"{r['bp']*10000:>10.1f}")
+    print("    ★ 指数の定義を変えて総発火件数が減り、かつ暴落日の発火が")
+    print("      消えているなら、カバー率の改善は『最も稼いでいた取引を")
+    print("      取らなくなった』ことの言い換えです。改善ではありません。")
+
     print("\n  o2c ~ gap の回帰傾き (|ギャップ| の帯域別)")
     print("  始値は gap の分子かつ o2c の分母なので、始値の測定ノイズだけで")
     print("  両者は機械的に負相関します。ただしノイズが効くのは小さいギャップの")
