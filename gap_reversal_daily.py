@@ -109,6 +109,19 @@ _INTEGRITY_ROWS: list[dict] = []
 _INTEGRITY_LOCK = threading.Lock()
 _AUDIT_CAP = 400
 
+# 年 × 除外理由 の件数。年が丸ごと消えたときに「どの条件が食べたか」を出す。
+# ⛔ 指数に穴があると resid_gap / beta が NaN になり、エラーも警告も出さずに
+#   その期間の銘柄行が全部落ちます。実際に 2017-07〜2019-07 で起きました。
+_DROP: dict = defaultdict(lambda: defaultdict(int))
+_DROP_LOCK = threading.Lock()
+
+
+def _note_drop(year_counts: dict) -> None:
+    with _DROP_LOCK:
+        for y, d in year_counts.items():
+            for k, v in d.items():
+                _DROP[y][k] += v
+
 
 def _note_bad(kind: str, n: int, rows: pd.DataFrame | None = None) -> None:
     if n <= 0:
@@ -515,12 +528,33 @@ def build_symbol_rows(
     rk = j.loc[j["gap"].notna() & (j["gap"].abs() <= MAX_GAP), "gap"]
     rank_pool = pd.DataFrame({"date": rk.index, "gap": rk.to_numpy()})
 
+    price_ok = j["close"].shift(1).between(MIN_PRICE, MAX_PRICE)
     ok = (
         j["atr"].notna() & j["beta"].notna() & j["o2c"].notna()
         & j["resid_gap"].notna() & j["resid_prev"].notna()
-        & j["close"].shift(1).between(MIN_PRICE, MAX_PRICE)
-        & (j["atr"] > 0)
+        & price_ok & (j["atr"] > 0)
     )
+    # どの条件が行を落としたかを年別に数える (先に評価した条件を優先)
+    yrs_all = pd.Series(j.index.year, index=j.index)
+    reasons = [
+        ("株価帯", ~price_ok),
+        ("ATR", j["atr"].isna() | (j["atr"] <= 0)),
+        ("β (指数の穴)", j["beta"].isna()),
+        ("残差ギャップ (指数の穴)", j["resid_gap"].isna()),
+        ("残差 前日 (指数の穴)", j["resid_prev"].isna()),
+        ("o2c", j["o2c"].isna()),
+    ]
+    yc: dict = defaultdict(lambda: defaultdict(int))
+    taken = pd.Series(False, index=j.index)
+    for label, m in reasons:
+        m = m & ~taken
+        taken = taken | m
+        if m.any():
+            for y, c in yrs_all[m].value_counts().items():
+                yc[int(y)][label] += int(c)
+    for y, c in yrs_all[ok].value_counts().items():
+        yc[int(y)]["残った"] += int(c)
+    _note_drop(yc)
     # 値幅制限を超えるギャップ / 日中リターンは起こり得ない = データ破損
     sane = (j["gap"].abs() <= MAX_GAP) & (j["o2c"].abs() <= MAX_GAP) \
         & (j["ret"].abs() <= MAX_GAP)
@@ -582,10 +616,63 @@ def build_symbol_rows(
     return out, uni, rank_pool
 
 
+def universe_index(symbols: list[str], workers: int) -> pd.DataFrame:
+    """ユニバース自身から市場ファクターを作る (等加重)。
+
+    なぜ必要か: yfinance の ^N225 には穴があり、そこで beta と resid_gap が
+    NaN になって **銘柄行が丸ごと消えます**。実測で 2017-07〜2019-07 の
+    約2年が標本から抜けていました。ユニバースから作れば構造上穴が空きません。
+
+    ⚠ 日経平均は株価加重、これは等加重なので厳密には別物です。β の水準が
+      変わるので、^N225 で出した数字と直接は比較できません。ただし
+      「市場成分を控除する」目的にはこちらの方が素直です (母集団と同じ銘柄)。
+    """
+    r_sum: dict = defaultdict(float)
+    r_cnt: dict = defaultdict(int)
+    g_sum: dict = defaultdict(float)
+    g_cnt: dict = defaultdict(int)
+    lock = threading.Lock()
+
+    def one(sym: str) -> None:
+        df = fetch_daily(sym)
+        if df is None or len(df) < 250:
+            return
+        ret = df["close"].pct_change()
+        gap = df["open"] / df["close"].shift(1) - 1.0
+        # 破損行は市場ファクターを歪めるので落とす
+        m = (ret.abs() <= MAX_GAP) & (gap.abs() <= MAX_GAP)
+        ret, gap = ret[m], gap[m]
+        with lock:
+            for dt, v in ret.dropna().items():
+                r_sum[dt] += float(v); r_cnt[dt] += 1
+            for dt, v in gap.dropna().items():
+                g_sum[dt] += float(v); g_cnt[dt] += 1
+
+    print("  ユニバースから市場ファクターを作ります (等加重) ...")
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        list(ex.map(one, symbols))
+    # 20銘柄未満の日は信頼できないので落とす
+    idx = pd.DataFrame({
+        "idx_ret": pd.Series({d: r_sum[d] / r_cnt[d]
+                              for d in r_cnt if r_cnt[d] >= 20}),
+        "idx_gap": pd.Series({d: g_sum[d] / g_cnt[d]
+                              for d in g_cnt if g_cnt[d] >= 20}),
+    }).sort_index().dropna()
+    print(f"    {len(idx):,} 営業日 "
+          f"({idx.index.min():%Y-%m-%d} 〜 {idx.index.max():%Y-%m-%d})")
+    return idx
+
+
 def build_panel(
     symbols: list[str], workers: int, use_earnings: bool, min_prev_atr: float,
-    no_index: bool = False,
+    no_index: bool = False, index_from_universe: bool = False,
 ) -> tuple[pd.DataFrame, pd.Series]:
+    if index_from_universe:
+        idx = universe_index(symbols, workers)
+        idx_df = None
+        no_index = False
+        return _build_panel_with(symbols, workers, use_earnings, min_prev_atr,
+                                 idx, idx_df)
     idx_df = None if no_index else fetch_daily(INDEX_SYM)
     if idx_df is None:
         if not no_index:
@@ -622,6 +709,11 @@ def build_panel(
             print("     → 指数を別ソースで用意するか --no-index で市場成分の控除を"
                   "省いてください")
 
+    return _build_panel_with(symbols, workers, use_earnings, min_prev_atr,
+                             idx, idx_df)
+
+
+def _build_panel_with(symbols, workers, use_earnings, min_prev_atr, idx, idx_df):
     rows: list[pd.DataFrame] = []
     uni_sum: dict = defaultdict(float)
     uni_cnt: dict = defaultdict(int)
@@ -715,6 +807,22 @@ def build_panel(
     yr = panel["date"].dt.year.value_counts().sort_index()
     print("  パネルの年別候補行数 (0 や極端に少ない年があればそこで消えています):")
     print("    " + "  ".join(f"{y}:{c:,}" for y, c in yr.items()))
+    if _DROP:
+        # 残った行が極端に少ない年について、どの条件が食べたかを出す。
+        # ⛔ 「指数の穴」が並ぶ年は、市場成分の控除ができずに消えた年です。
+        tot = {y: sum(d.values()) for y, d in _DROP.items()}
+        med = float(np.median([d.get("残った", 0) for d in _DROP.values()]) or 1)
+        thin = sorted(y for y, d in _DROP.items()
+                      if d.get("残った", 0) < med * 0.6)
+        if thin:
+            print("  年別の除外理由 (残った行が中央値の6割未満の年):")
+            for y in thin:
+                d = _DROP[y]
+                parts = "  ".join(f"{k} {v:,}" for k, v in
+                                  sorted(d.items(), key=lambda kv: -kv[1]))
+                print(f"    {y}: 全 {tot[y]:,} 行 →  {parts}")
+            print("    ⛔ 『指数の穴』が並ぶ年は、市場成分を控除できずに消えた年です。")
+            print("       指数を差し替えるか --index-from-universe を使ってください。")
     print(f"候補 {len(panel):,} 行 / {panel['symbol'].nunique()} 銘柄 / "
           f"{len(mkt):,} 営業日 (取得失敗 {failed})")
     if _INTEGRITY:
@@ -1971,6 +2079,10 @@ def main() -> int:
     ap.add_argument("--capital", type=float, default=4_000_000)
     ap.add_argument("--earnings", action="store_true", help="決算日を取得して分離")
     ap.add_argument("--csv", help="候補パネルを CSV に書き出す")
+    ap.add_argument("--index-from-universe", dest="index_from_universe",
+                    action="store_true",
+                    help="市場ファクターをユニバース自身から等加重で作る。"
+                         "指数の穴で年が丸ごと消えるのを防ぐ")
     ap.add_argument("--nrule", action="store_true",
                     help="N ルール (固定パーセント・売買代金上位50) を"
                          "同じエンジンで測り、こちらの買い側との重なりも出す")
@@ -1996,7 +2108,8 @@ def main() -> int:
     elif not args.no_cache:
         syms, has_index = load_cache_dir(args.cache_dir, INDEX_SYM,
                                          want_index=not args.no_index)
-        if syms and not has_index and not args.no_index:
+        if syms and not has_index and not args.no_index \
+                and not args.index_from_universe:
             # 指数だけ yfinance から取りに行く (_LOCAL に無ければ fetch_daily が
             # None を返すので、ここで明示的に取得して _LOCAL に載せる)
             saved = _LOCAL
@@ -2023,7 +2136,8 @@ def main() -> int:
         globals()["_NRULE"] = True
     keep_thr = 0.9 if args.grid else min_prev * (1.0 if args.raw else 0.9)
     panel, mkt = build_panel(syms, args.workers, args.earnings, keep_thr,
-                             no_index=args.no_index)
+                             no_index=args.no_index,
+                             index_from_universe=args.index_from_universe)
     if args.csv:
         panel.to_csv(args.csv, index=False)
         print(f"パネルを {args.csv} に保存")
