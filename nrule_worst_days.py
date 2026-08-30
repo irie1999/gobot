@@ -108,6 +108,10 @@ def build_rows(sym: str) -> pd.DataFrame | None:
     #   (2026-08-29 に検査で発見。§11「前夜の売買代金」が実際には
     #    当日の出来高を見ていました)
     d["turnover"] = (d["close"] * d["volume"]).rolling(20).mean().shift(1)
+    # ⛔ 当日を含む版。**使ってはいけません。** 先読みの大きさを測るためだけに
+    #   持ちます。ギャップする銘柄は当日の出来高が跳ねるので、当日を含めると
+    #   「翌日ギャップするか」の予測が機械的に当たって見えます。
+    d["turnover_lookahead"] = (d["close"] * d["volume"]).rolling(20).mean()
     d["next_open"] = d["open"].shift(-1)   # 強制持ち越しの評価にだけ使う
     # ⛔ 採否の条件を「建てる前に分かる量」と「出口の量」に分ける。
     #   出口 (o2c) を採否に使うと、結果に相関した選別になります。
@@ -133,6 +137,7 @@ def build_rows(sym: str) -> pd.DataFrame | None:
         "prev_ret": d["prev_ret"].to_numpy(), "gap": d["gap"].to_numpy(),
         "o2c": d["o2c"].to_numpy(), "atr": d["atr"].to_numpy(),
         "turnover": d["turnover"].to_numpy(),
+        "turnover_lookahead": d["turnover_lookahead"].to_numpy(),
         "next_open": d["next_open"].to_numpy(),
         "high": d["high"].to_numpy(), "low": d["low"].to_numpy(),
     })
@@ -175,6 +180,9 @@ def build_panel(symbols: list[str], workers: int,
     print("     **結果に相関した選別**です。1,000円の株の値幅制限は ±300円 = ±30%")
     print("     なので、ストップ安の日が『破損』として消えている可能性があります。")
     print("     ⚠ 建てる前に分かる量 (ギャップ・前日リターン) での除外とは別物です。")
+    if select == "no-cut":
+        # 上位N で切らない。捕捉率の測定用 (母集団そのものが要るため)
+        return p.sort_values(["date", "symbol"])
     if select == "filter-first":
         # 前日条件 (どちらの符号でも) を満たす銘柄の中で上位TOPN
         p = p[p["prev_ret"].abs() >= PREV_THR]
@@ -913,6 +921,73 @@ def stop_test(panel: pd.DataFrame, side: str, train_from: str,
           f"(件数 {r_te['n_lo']:,} / {r_te['n_hi']:,})")
 
 
+def capture_report(panel_all: pd.DataFrame, side: str, watch: int = TOPN) -> None:
+    """★ 「166件の候補のうち、翌朝ギャップする銘柄を前夜に当てられるか」
+
+    ⛔ これは §18.13 等で7回否定した「どれが儲かるか」とは別の問いです。
+      こちらは **「どれがギャップするか」**。測っていません。
+
+    指標は **捕捉率** = 上位 watch 件が、実際の合格者の何%を含むか。
+
+    ⛔⛔ そして基準値そのものを疑ってください。売買代金20日平均に **当日を
+      含めていると、捕捉率は機械的に上がります** — ギャップする銘柄は当日の
+      出来高が跳ねるからです。それは前夜には使えない情報です。
+      ここでは正しい版 (shift(1)) と 当日込みの版を並べて、
+      **先読みが基準値をどれだけ膨らませていたか**を出します。
+    """
+    p = panel_all
+    if side == "short":
+        cand = p[p["prev_ret"] >= PREV_THR].copy()
+        cand["pass"] = cand["gap"] >= GAP_THR
+    else:
+        cand = p[p["prev_ret"] <= -PREV_THR].copy()
+        cand["pass"] = cand["gap"] <= -GAP_THR
+    nd = cand["date"].nunique()
+    print(f"\n■ 前夜の監視枠 (上位{watch}件) の捕捉率  side={side}")
+    print(f"  候補 {len(cand):,} 件 / {nd:,} 日 = "
+          f"{len(cand)/max(nd,1):.0f} 件/日")
+    print(f"  実際の合格者 {int(cand['pass'].sum()):,} 件 = "
+          f"{cand['pass'].sum()/max(nd,1):.1f} 件/日")
+    if not len(cand) or not cand["pass"].any():
+        print("  件数が足りません")
+        return
+
+    def cap(col: str, asc: bool = False) -> tuple:
+        c = cand[cand[col].notna()].copy()
+        r = c.groupby("date")[col].rank(ascending=asc, method="first")
+        inn = r <= watch
+        tot = int(c["pass"].sum())
+        got = int((c["pass"] & inn).sum())
+        return got / tot * 100 if tot else float("nan"), got, tot
+
+    rows = [
+        ("売買代金20日 (前日まで) ★現行", "turnover", False),
+        ("⛔ 同 当日込み (先読み)", "turnover_lookahead", False),
+        ("前日リターンの大きさ", "prev_ret", False),
+        ("ATR%", "atr", False),
+        ("建値 (安い順)", "open", True),
+        ("建値 (高い順)", "open", False),
+    ]
+    print(f"\n  {'並べ方':<28}{'捕捉率':>9}{'捕捉':>9}{'合格者':>9}")
+    for lbl, col, asc in rows:
+        if col not in cand.columns:
+            continue
+        v, got, tot = cap(col, asc)
+        print(f"  {lbl:<28}{v:>8.1f}%{got:>9,}{tot:>9,}")
+    # 帰無較正: 日ごとにランダムに50件選んだらどれだけ捕捉できるか
+    rng = np.random.default_rng(0)
+    cand["_r"] = rng.random(len(cand))
+    v, got, tot = cap("_r")
+    print(f"  {'(帰無) ランダム50件':<28}{v:>8.1f}%{got:>9,}{tot:>9,}")
+    print("\n  ★ 読み方:")
+    print("    ・**当日込みの行が現行を大きく上回るなら、基準値61.3%は")
+    print("      先読みで膨らんでいます。** 前夜に使える版で測り直すこと")
+    print("    ・ランダムとの差が小さい変数は、当てられていません")
+    print("    ⚠ 捕捉率が上がっても損益が上がるとは限りません。予算は")
+    print("      13〜17銘柄しか入らないので、捕捉した先の |ギャップ| 順が効きます。")
+    print("      **必ず予算シミュまで通すこと** (§18.10 の教訓)")
+
+
 def _smoke_build_panel() -> None:
     """⛔ build_panel を実際に通す。
 
@@ -995,6 +1070,10 @@ def main() -> int:
                     help="② TEST で sm=0.1 だけを1回確認する")
     ap.add_argument("--train-from", dest="train_from", default="2015-02-01",
                     help="TRAIN の開始日。参照実装と母集団を揃えるため")
+    ap.add_argument("--capture", action="store_true",
+                    help="前夜の監視枠 (上位50) が、翌朝ギャップする銘柄を"
+                         "どれだけ捕捉できるかを測る。⛔ 当日込みの売買代金と"
+                         "並べて、基準値が先読みで膨らんでいないかも見る")
     ap.add_argument("--risk", action="store_true",
                     help="サイズを決めるための ES と、ボラ回帰を1本出す")
     ap.add_argument("--both", action="store_true",
@@ -1012,6 +1091,12 @@ def main() -> int:
     if args.limit:
         syms = syms[: args.limit]
     print(f"  {len(syms)} 銘柄からパネルを作ります (指数は使いません)")
+    if args.capture:
+        # ⛔ 捕捉率は「上位50で切る前」の候補全部が要ります。
+        #   build_panel は上位50に切るので、切らない版を作ります。
+        panel_all = build_panel(syms, args.workers, "no-cut")
+        capture_report(panel_all, args.side)
+        return 0
     panel = build_panel(syms, args.workers, args.select)
     print(f"  上位{TOPN}位の候補 {len(panel):,} 行 / "
           f"{panel['date'].nunique():,} 営業日 "
