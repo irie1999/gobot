@@ -631,7 +631,8 @@ def build_symbol_rows(
     return out, uni, rank_pool
 
 
-def universe_index(symbols: list[str], workers: int) -> pd.DataFrame:
+def universe_index(symbols: list[str], workers: int,
+                   top_n: int | None = None) -> pd.DataFrame:
     """ユニバース自身から市場ファクターを作る (等加重)。
 
     なぜ必要か: yfinance の ^N225 には穴があり、そこで beta と resid_gap が
@@ -641,12 +642,29 @@ def universe_index(symbols: list[str], workers: int) -> pd.DataFrame:
     ⚠ 日経平均は株価加重、これは等加重なので厳密には別物です。β の水準が
       変わるので、^N225 で出した数字と直接は比較できません。ただし
       「市場成分を控除する」目的にはこちらの方が素直です (母集団と同じ銘柄)。
+
+    ★ top_n を指定すると、**前日までの売買代金で上位 N 銘柄だけ**で作ります。
+
+    なぜこれが要るか: 全銘柄の等加重指数は 09:00 に確定しません (最後の1銘柄が
+    寄るまで決まらない)。⛔ しかし ^N225 と等加重は 2023-2025 で結論が2倍
+    食い違っており、原因が **加重の違い** なのか **^N225 のデータ品質** なのかが
+    未決でした。流動性上位だけで作った等加重指数は:
+
+      - 大型株なので **09:00 に寄る** (⚠ 未検証。分足で確認できる)
+      - ^N225 に近い母集団だが **等加重**
+      → ^N225 に近い数字が出れば「加重の違いではなくデータ品質」
+      → 全銘柄等加重に近ければ「加重の違い」
+
+    そして **ETF を待たずに執行可能な指数の候補**にもなります。
+    銘柄の選択は前日までの売買代金なので、前夜に確定します。
     """
     r_sum: dict = defaultdict(float)
     r_cnt: dict = defaultdict(int)
     g_sum: dict = defaultdict(float)
     g_cnt: dict = defaultdict(int)
+    heaps: dict = defaultdict(list)      # top_n 用: (前日までの売買代金, ret, gap)
     lock = threading.Lock()
+    import heapq
 
     def one(sym: str) -> None:
         df = fetch_daily(sym)
@@ -656,6 +674,22 @@ def universe_index(symbols: list[str], workers: int) -> pd.DataFrame:
         gap = df["open"] / df["close"].shift(1) - 1.0
         # 破損行は市場ファクターを歪めるので落とす
         m = (ret.abs() <= MAX_GAP) & (gap.abs() <= MAX_GAP)
+        if top_n:
+            # ⛔ 選択に使う売買代金は **前日まで** (shift(1))。当日を含めると
+            #   前夜に選べない銘柄が混ざります (§16.15.8 と同じ罠)。
+            tv = (df["close"] * df["volume"]).rolling(20).mean().shift(1)
+            ok = m & ret.notna() & gap.notna() & tv.notna()
+            rows = [(float(tv[d]), float(ret[d]), float(gap[d]))
+                    for d in df.index[ok]]
+            dates = list(df.index[ok])
+            with lock:
+                for d, row in zip(dates, rows):
+                    h = heaps[d]
+                    if len(h) < top_n:
+                        heapq.heappush(h, row)
+                    elif row[0] > h[0][0]:
+                        heapq.heapreplace(h, row)
+            return
         ret, gap = ret[m], gap[m]
         with lock:
             for dt, v in ret.dropna().items():
@@ -663,9 +697,15 @@ def universe_index(symbols: list[str], workers: int) -> pd.DataFrame:
             for dt, v in gap.dropna().items():
                 g_sum[dt] += float(v); g_cnt[dt] += 1
 
-    print("  ユニバースから市場ファクターを作ります (等加重) ...")
+    tag = f"売買代金 上位{top_n}" if top_n else "全銘柄"
+    print(f"  ユニバースから市場ファクターを作ります (等加重 / {tag}) ...")
     with ThreadPoolExecutor(max_workers=workers) as ex:
         list(ex.map(one, symbols))
+    if top_n:
+        for d, h in heaps.items():
+            if len(h) >= max(20, top_n // 2):
+                r_sum[d] = sum(x[1] for x in h); r_cnt[d] = len(h)
+                g_sum[d] = sum(x[2] for x in h); g_cnt[d] = len(h)
     # 20銘柄未満の日は信頼できないので落とす
     idx = pd.DataFrame({
         "idx_ret": pd.Series({d: r_sum[d] / r_cnt[d]
@@ -681,9 +721,10 @@ def universe_index(symbols: list[str], workers: int) -> pd.DataFrame:
 def build_panel(
     symbols: list[str], workers: int, use_earnings: bool, min_prev_atr: float,
     no_index: bool = False, index_from_universe: bool = False,
+    index_top_n: int | None = None,
 ) -> tuple[pd.DataFrame, pd.Series]:
-    if index_from_universe:
-        idx = universe_index(symbols, workers)
+    if index_from_universe or index_top_n:
+        idx = universe_index(symbols, workers, index_top_n)
         idx_df = None
         no_index = False
         return _build_panel_with(symbols, workers, use_earnings, min_prev_atr,
@@ -2318,6 +2359,12 @@ def main() -> int:
     ap.add_argument("--capital", type=float, default=4_000_000)
     ap.add_argument("--earnings", action="store_true", help="決算日を取得して分離")
     ap.add_argument("--csv", help="候補パネルを CSV に書き出す")
+    ap.add_argument("--index-top-n", dest="index_top_n", type=int,
+                    help="市場ファクターを **前日までの売買代金 上位N銘柄** の"
+                         "等加重で作る。⛔ 全銘柄の等加重は 09:00 に確定しないが、"
+                         "流動性上位なら 09:00 に寄る見込み (未検証)。"
+                         "^N225 との2倍の食い違いが加重由来かデータ品質由来かの"
+                         "切り分けにもなる")
     ap.add_argument("--index-from-universe", dest="index_from_universe",
                     action="store_true",
                     help="市場ファクターをユニバース自身から等加重で作る。"
@@ -2355,7 +2402,7 @@ def main() -> int:
         syms, has_index = load_cache_dir(args.cache_dir, INDEX_SYM,
                                          want_index=not args.no_index)
         if syms and not has_index and not args.no_index \
-                and not args.index_from_universe:
+                and not args.index_from_universe and not args.index_top_n:
             # 指数だけ yfinance から取りに行く (_LOCAL に無ければ fetch_daily が
             # None を返すので、ここで明示的に取得して _LOCAL に載せる)
             saved = _LOCAL
@@ -2383,7 +2430,8 @@ def main() -> int:
     keep_thr = 0.9 if args.grid else min_prev * (1.0 if args.raw else 0.9)
     panel, mkt = build_panel(syms, args.workers, args.earnings, keep_thr,
                              no_index=args.no_index,
-                             index_from_universe=args.index_from_universe)
+                             index_from_universe=args.index_from_universe,
+                             index_top_n=args.index_top_n)
     if args.start:
         lo = pd.Timestamp(args.start)
         n0 = len(panel)
