@@ -1019,6 +1019,35 @@ def tse_price_limit(base: float) -> float:
     return float(w)
 
 
+def provenance_fields(script: str) -> dict:
+    """記録ファイルに1行ぶん埋め込む出所。
+
+    ⛔ **場所より出所です。** 2026-08-31 に「swingtrade が書いた記録を
+    gobot-lss が採点して、たまたま列が合った」形になりました。次は合いません。
+    書いた側の commit / ブランチ / スクリプト名 / CWD を記録に残せば、
+    採点する側が不一致を検出できます。
+    """
+    import subprocess
+
+    def _git(*a: str) -> str:
+        try:
+            return subprocess.run(["git", *a], capture_output=True, text=True,
+                                  timeout=5).stdout.strip()
+        except Exception:
+            return ""
+    commit = _git("rev-parse", "--short", "HEAD") or "no-git"
+    if _git("status", "--porcelain"):
+        commit += "+dirty"          # ⛔ この記録は再現できません
+    return {
+        "src_script": script,
+        "src_commit": commit,
+        "src_branch": _git("rev-parse", "--abbrev-ref", "HEAD") or "no-git",
+        "src_cwd": str(Path.cwd()),
+        "src_written_at": datetime.now().astimezone().isoformat(
+            timespec="seconds"),
+    }
+
+
 def provenance(script: str) -> str:
     """出所を1行で返す。結果を貼るときは必ずこれを添える。
 

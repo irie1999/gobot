@@ -162,10 +162,20 @@ def fetch_ranking(base_url: str, token: str, typ: str, div: str,
     return rec
 
 
+_SRC: dict = {}
+
+
 def append(path: Path, rec: dict) -> None:
+    """1行追記する。⛔ **出所を必ず埋める。** 場所より出所です。"""
+    if not _SRC:
+        try:
+            import gap_reversal_daily as _g
+            _SRC.update(_g.provenance_fields("kabu_ranking_log.py"))
+        except Exception:
+            _SRC["src_script"] = "kabu_ranking_log.py"
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        f.write(json.dumps({**rec, **_SRC}, ensure_ascii=False) + "\n")
 
 
 def register(base_url: str, token: str, symbols: list) -> dict:

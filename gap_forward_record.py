@@ -56,6 +56,21 @@ import gap_reversal_daily as gd
 # 正しく採点できたのは偶然でした。**実行のたびに絶対パスを印字**します。
 # 出力先を固定したいなら環境変数 FORWARD_RECORDS_DIR を使ってください。
 OUT_DIR = Path(os.environ.get("FORWARD_RECORDS_DIR", "forward_records"))
+
+
+def _stamp(df: "pd.DataFrame", script: str = "gap_forward_record.py"):
+    """⛔ 記録に **書いた側の commit / ブランチ / CWD** を埋める。
+
+    場所が分かれていても出所が確定し、採点する側が不一致を検出できます。
+    2026-08-31 に「swingtrade が書いた記録を gobot-lss が採点して、
+    たまたま列が合った」形になりました。次は合いません。
+    """
+    try:
+        for k, v in gd.provenance_fields(script).items():
+            df[k] = v
+    except Exception:
+        df["src_script"] = script
+    return df
 GAP_THR = 3.0          # ATR単位。gap_reversal_intraday の FROZEN_GAP_THR と揃える
 PREV_THR = 0.0         # 0.0 = 前日の動きと同符号であることを要求 (大きさは問わない)
 BETA_WINDOW = gd.BETA_WINDOW
@@ -400,7 +415,10 @@ def live_template(path: Path) -> None:
     if path.exists():
         print(f"{path} は既にあります。上書きしません。")
         return
-    pd.DataFrame(columns=LIVE_COLS).to_csv(path, index=False)
+    # ⛔ 雛形にも出所の列を作る。手で埋める記録でも、どのコードが作った
+    #   雛形かが分からないと、採点側が列の不一致に気づけません。
+    df = pd.DataFrame(columns=LIVE_COLS)
+    _stamp(df).to_csv(path, index=False)
     print(f"実弾記録の雛形を作りました: {path}")
     print("  列: " + ", ".join(LIVE_COLS))
 
@@ -532,7 +550,7 @@ def main() -> int:
                                 strict_index=args.strict_index)
         asof = cand["asof"].iloc[0] if len(cand) else datetime.now().strftime("%Y-%m-%d")
         p = OUT_DIR / f"candidates_{asof}.csv"
-        cand.to_csv(p, index=False)
+        _stamp(cand).to_csv(p, index=False)
         print(f"\n候補 {len(cand):,} 銘柄 → {p}")
         vc = cand["eligible_side"].value_counts().to_dict()
         print(f"  発火しうる側の内訳: {vc}")
@@ -567,7 +585,7 @@ def main() -> int:
         q = pd.read_csv(args.quotes)
         ev = reconcile(cand, q, args.cache_dir, args.index_symbol)
         p = OUT_DIR / f"eval_{pd.Timestamp(ev['date'].max()):%Y-%m-%d}.csv"
-        ev.to_csv(p, index=False)
+        _stamp(ev).to_csv(p, index=False)
         print(f"突合 {len(ev):,} 行 → {p}")
         report(ev)
         return 0
