@@ -41,7 +41,11 @@ from pathlib import Path
 
 import requests
 
-OUT_DIR = Path("forward_records")
+# ⛔ CWD 相対です。**別のワークツリーで実行すると別の場所に書かれます。**
+# 2026-08-31: 記録が swingtrade、採点が gobot-lss という形になり、結果的に
+# 正しく採点できたのは偶然でした。**実行のたびに絶対パスを印字**します。
+# 出力先を固定したいなら環境変数 FORWARD_RECORDS_DIR を使ってください。
+OUT_DIR = Path(os.environ.get("FORWARD_RECORDS_DIR", "forward_records"))
 PROD_URL = "http://localhost:18080"
 DEMO_URL = "http://localhost:18081"
 
@@ -263,7 +267,9 @@ def main() -> int:
 
     base = args.base_url or (DEMO_URL if args.demo else PROD_URL)
     path = OUT_DIR / f"ranking_{dt.date.today():%Y-%m-%d}.jsonl"
-    print(f"接続先 {base}  → {path}")
+    print(f"接続先 {base}  → {path.resolve()}")
+    print(f"  ⛔ 出力先は CWD 相対です。いまの CWD: {Path.cwd()}")
+    print("     別のワークツリーで実行すると別の場所に書かれます。")
     print("⛔ このスクリプトは記録だけです。発注は一切しません。")
 
     try:

@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -50,7 +51,11 @@ import pandas as pd
 
 import gap_reversal_daily as gd
 
-OUT_DIR = Path("forward_records")
+# ⛔ CWD 相対です。**別のワークツリーで実行すると別の場所に書かれます。**
+# 2026-08-31: 記録が swingtrade、採点が gobot-lss という形になり、結果的に
+# 正しく採点できたのは偶然でした。**実行のたびに絶対パスを印字**します。
+# 出力先を固定したいなら環境変数 FORWARD_RECORDS_DIR を使ってください。
+OUT_DIR = Path(os.environ.get("FORWARD_RECORDS_DIR", "forward_records"))
 GAP_THR = 3.0          # ATR単位。gap_reversal_intraday の FROZEN_GAP_THR と揃える
 PREV_THR = 0.0         # 0.0 = 前日の動きと同符号であることを要求 (大きさは問わない)
 BETA_WINDOW = gd.BETA_WINDOW
@@ -517,6 +522,9 @@ def main() -> int:
         ap.print_help()
         return 1
     OUT_DIR.mkdir(exist_ok=True)
+    print(f"出力先 {OUT_DIR.resolve()}")
+    print(f"  ⛔ CWD 相対です。いまの CWD: {Path.cwd()}")
+    print("     記録と採点を別のワークツリーでやると散らばります。")
 
     if args.mode == "prepare":
         cand = build_candidates(args.cache_dir, args.index_symbol,
