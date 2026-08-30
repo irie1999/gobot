@@ -271,8 +271,15 @@ def main() -> int:
     ap.add_argument("--spacing", type=float, default=2.0,
                     help="呼び出しの間隔(秒)。429 を避けるため既定2秒")
     ap.add_argument("--etf", action="store_true",
-                    help="ranking の合間に ETF (1321/1306) の板を読み、"
-                         "OpeningPriceTime (初約定時刻) を記録する")
+                    help="ETF (1321/1306) の板を細かく読み、初約定時刻を測る")
+    ap.add_argument("--etf-interval", dest="etf_interval", type=float,
+                    default=5.0,
+                    help="ETF の板を読む間隔(秒)。⛔ **これが測定の時間分解能** "
+                         "です。判定は秒〜十数秒の争いなので、分単位では"
+                         "答えが出ません (既定5秒)")
+    ap.add_argument("--etf-minutes", dest="etf_minutes", type=float,
+                    default=8.0,
+                    help="ETF を細かく読み続ける分数 (既定8分)")
     args = ap.parse_args()
 
     base = args.base_url or (DEMO_URL if args.demo else PROD_URL)
@@ -297,27 +304,53 @@ def main() -> int:
         append(path, rec)
         print(f"  ETF 登録 {len(ETF_SYMBOLS)} 件  ok={rec.get('ok')} "
               f"(登録上限は50件。ここでは2件だけ使います)")
+        n_poll = int(args.etf_minutes * 60 / max(args.etf_interval, 0.5))
+        rate = len(ETF_SYMBOLS) / max(args.etf_interval, 0.5)
+        print(f"  ⛔ **この観測の時間分解能は {args.etf_interval:.0f} 秒です。**")
+        print("     判定式は「ETF始値の受信時刻 + 計算・発注時間 + 安全余裕")
+        print("     < 対象銘柄の板寄せ成立時刻」で、争点は秒〜十数秒です。")
+        print("     ⛔ 分解能より細かい差は測れません。分単位の間隔では")
+        print("        答えが出ないので、既定を5秒にしています。")
+        print(f"     予定: {args.etf_minutes:.0f}分 × {n_poll} 回 = "
+              f"{n_poll * len(ETF_SYMBOLS)} リクエスト "
+              f"({rate:.1f} 件/秒)")
+        print(f"     ⚠ 場中の実測は 1.4件/秒 (§18.44)。{rate:.1f} 件/秒 が"
+              "それを超えるなら間隔を広げてください。")
+        if rate > 1.4:
+            print("     ⛔⛔ 超えています。--etf-interval を大きくすること。")
         print("  ⛔ ETF も板寄せです。特別気配で寄らないことがあります。")
         print("     必要条件: ETFの初約定時刻 + 計算・発注時間 < 対象銘柄の板寄せ成立時刻")
+
+    # ⛔ ETF は「初約定時刻」を測るので、**細かく・短時間だけ**読みます。
+    #   ranking の間隔 (--interval) とは別物です。
+    if args.etf:
+        t_end = time.monotonic() + args.etf_minutes * 60
+        opened: set = set()
+        while time.monotonic() < t_end:
+            for sym, exch in ETF_SYMBOLS:
+                rec = fetch_board(base, token, sym, exch)
+                append(path, rec)
+                if rec.get("fatal") == "rate_limit":
+                    print("  ⛔ 429。ETF の観測をここで停止します。")
+                    return 1
+                b = rec.get("body") or {}
+                op = b.get("OpeningPrice")
+                if op and sym not in opened:
+                    opened.add(sym)
+                    print(f"  ★ {sym} 初約定を受信  受信時刻 {rec.get('resp_ts')}"
+                          f"  始値 {op}  公式 {b.get('OpeningPriceTime')}")
+                time.sleep(max(args.etf_interval / len(ETF_SYMBOLS), 0.2))
+            if len(opened) == len(ETF_SYMBOLS):
+                print("  ★ 両方の ETF が寄りました。細かい観測を終了します。")
+                break
+        print(f"  ETF 観測 終了 (寄った: {len(opened)}/{len(ETF_SYMBOLS)})")
+        if len(opened) < len(ETF_SYMBOLS):
+            print("  ⛔ 寄らなかった ETF があります。**ETF も板寄せ**なので、")
+            print("     これ自体が「ETF は 09:00 に確定しない」の証拠です。")
 
     for i in range(args.repeat):
         if i:
             time.sleep(args.interval)
-        if args.etf:
-            for sym, exch in ETF_SYMBOLS:
-                rec = fetch_board(base, token, sym, exch)
-                append(path, rec)
-                b = rec.get("body") or {}
-                # ⛔ 判定に使うのは公式の OpeningPriceTime 同士の差ではなく
-                #   **こちらが始値を初めて受信した時刻 (resp_ts)** です。
-                #   API の配信遅延とこちらの処理時間を落とさないため。
-                #       resp_ts + 計算・発注時間 + 安全余裕
-                #         < 対象銘柄の板寄せ成立時刻
-                print(f"  board {sym}  ok={rec.get('ok')}  "
-                      f"受信 {rec.get('resp_ts')}  "
-                      f"初約定(公式) {b.get('OpeningPriceTime')}  "
-                      f"始値 {b.get('OpeningPrice')}  現値 {b.get('CurrentPrice')}")
-                time.sleep(args.spacing)
         for typ, div in PLAN:
             rec = fetch_ranking(base, token, typ, div)
             append(path, rec)
