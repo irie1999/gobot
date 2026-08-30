@@ -207,12 +207,22 @@ def register(base_url: str, token: str, symbols: list) -> dict:
     return rec
 
 
+BOARD_TIMEOUT = 2.0
+# ⛔ 15秒ではなく2秒。理由:
+#   t=2  リクエスト送出 / t=5 ETF が寄る / t=17 タイムアウト / t=17 次が成功
+#   → 初約定の検知が最大15秒遅れます。**争点と同じ桁**なので判定になりません。
+#   5秒間隔で2秒タイムアウトなら、空振りしても検知誤差は <=5秒 に収まります。
+# ⚠ 平日の寄り前は気配が普通に返るので (§18.35b で 08:10〜08:55 に 694件 実測)、
+#   そもそも空振りしない見込みです。日曜のタイムアウトは板が無いのではなく
+#   **kabu にセッションが無い**ためでした。それでも2秒にするコストはゼロです。
+
+
 def fetch_board(base_url: str, token: str, sym: str, exch: int) -> dict:
     """1銘柄の板。**見るのは OpeningPriceTime (初約定時刻) です。**"""
     rec = {"req_ts": _now(), "kind": "board", "symbol": sym, "exchange": exch}
     try:
         r = requests.get(f"{base_url}/kabusapi/board/{sym}@{exch}",
-                         headers={"X-API-KEY": token}, timeout=15)
+                         headers={"X-API-KEY": token}, timeout=BOARD_TIMEOUT)
         rec["resp_ts"] = _now()
         rec["status"] = r.status_code
         rec["ok"] = r.status_code == 200
@@ -314,10 +324,12 @@ def main() -> int:
         print(f"     予定: {args.etf_minutes:.0f}分 × {n_poll} 回 = "
               f"{n_poll * len(ETF_SYMBOLS)} リクエスト "
               f"({rate:.1f} 件/秒)")
-        print(f"     ⚠ 場中の実測は 1.4件/秒 (§18.44)。{rate:.1f} 件/秒 が"
-              "それを超えるなら間隔を広げてください。")
-        if rate > 1.4:
-            print("     ⛔⛔ 超えています。--etf-interval を大きくすること。")
+        print(f"     ⚠ これは **リクエスト/秒** です。§18.44 の 1.4 は")
+        print("        **銘柄/秒** (50銘柄を登録して読む上限) で別の量です。")
+        print("        比べるべきは 429 の閾値で、workers=2 で 6.5件/秒でも")
+        print(f"        429 は軽微だった実測から、{rate:.1f} req/秒 は十分低い。")
+        if rate > 2.0:
+            print("     ⛔ 2 req/秒 を超えています。--etf-interval を大きく。")
         print("  ⛔ ETF も板寄せです。特別気配で寄らないことがあります。")
         print("     必要条件: ETFの初約定時刻 + 計算・発注時間 < 対象銘柄の板寄せ成立時刻")
 
