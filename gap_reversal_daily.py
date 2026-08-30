@@ -2322,6 +2322,11 @@ def main() -> int:
                     action="store_true",
                     help="市場ファクターをユニバース自身から等加重で作る。"
                          "指数の穴で年が丸ごと消えるのを防ぐ")
+    ap.add_argument("--start", dest="start",
+                    help="パネルをこの日付以降に切る (YYYY-MM-DD)。"
+                         "⛔ 指数の定義を変えると開始日が動くので、比較は"
+                         "必ず期間を揃えること (--no-index は 2003-08〜、"
+                         "^N225 は 2007-07〜、等加重は 2007-03〜)")
     ap.add_argument("--shuffle-test", dest="shuffle_test", action="store_true",
                     help="出口 (o2c) が採否に入っていないことをシャッフルで検査")
     ap.add_argument("--nrule", action="store_true",
@@ -2379,6 +2384,23 @@ def main() -> int:
     panel, mkt = build_panel(syms, args.workers, args.earnings, keep_thr,
                              no_index=args.no_index,
                              index_from_universe=args.index_from_universe)
+    if args.start:
+        lo = pd.Timestamp(args.start)
+        n0 = len(panel)
+        panel = panel[panel["date"] >= lo]
+        mkt = mkt[mkt.index >= lo]
+        print(f"  --start {lo:%Y-%m-%d}: 候補 {n0:,} → {len(panel):,} 行 "
+              f"({panel['date'].min():%Y-%m-%d} 〜)")
+        print("  ⛔ 期間を揃えた比較のためです。揃えずに指数定義の違いを"
+              "論じないこと。")
+        if _RANK_THR:                       # 順位の閾値表も同じ期間に切る
+            for side in ("dn", "up"):
+                for k in list(_RANK_THR[side]):
+                    t = _RANK_THR[side][k]
+                    _RANK_THR[side][k] = t[t.index >= lo]
+        for k in list(_TOPN_THR):
+            t = _TOPN_THR[k]
+            _TOPN_THR[k] = t[t.index >= lo]
     if args.csv:
         panel.to_csv(args.csv, index=False)
         print(f"パネルを {args.csv} に保存")
