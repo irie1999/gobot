@@ -561,12 +561,20 @@ def build_symbol_rows(
         yc[int(y)]["残った"] += int(c)
     _note_drop(yc)
     # 値幅制限を超えるギャップ / 日中リターンは起こり得ない = データ破損
-    sane = (j["gap"].abs() <= MAX_GAP) & (j["o2c"].abs() <= MAX_GAP) \
-        & (j["ret"].abs() <= MAX_GAP)
-    bad = j[ok & ~sane]
+    # ⛔ ただし条件を「建てる前に分かる量」と「出口の量」に分けること。
+    #   o2c は 始値→終値 = **損益そのもの**なので、採否に使うと結果に相関した
+    #   選別になります。しかも 1,000円の株の値幅制限は ±300円 = ±30% なので、
+    #   |o2c| > 30% は破損とは限らず、**ストップ安の日が消えます**。
+    #   それは §10 で「決済できない恐れ」として数えた日そのものです。
+    sane_pre = (j["gap"].abs() <= MAX_GAP) & (j["ret"].abs() <= MAX_GAP)
+    sane_out = j["o2c"].abs() <= MAX_GAP          # ⛔ 出口を読む
+    bad = j[ok & ~(sane_pre & sane_out)]
     if len(bad):
         _note_bad("gap", len(bad), bad.assign(symbol=symbol))
-    j = j[ok & sane]
+    n_out = int((ok & sane_pre & ~sane_out).sum())
+    if n_out:
+        _note_bad("出口(o2c)で除外", n_out)
+    j = j[ok & sane_pre & sane_out]
     if j.empty:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
@@ -1311,6 +1319,61 @@ def nrule_report(panel: pd.DataFrame, mkt: pd.Series, args) -> int:
     print("  ⚠ ギャップの水準が一桁違うなら、そもそも別の事象です。重なり率が")
     print("    低いのは当然で、『別の現象だから足せる』の根拠にはなりません。")
     return 0
+
+
+def shuffle_test(panel: pd.DataFrame, mkt: pd.Series, args) -> int:
+    """⛔ 出口 (o2c) を採否に使っていないことを、実装に依存せず証明する。
+
+    アサーションは「今のコードが読んでいない」ことしか保証しません。
+    シャッフルは **選ばれた (date, symbol) の集合が変わらないこと** を
+    1回の実行で示すので、条件が増えても効き続けます。
+
+    ⚠ 比べるのは pnl ではなく **選ばれた集合**です。pnl を比べると
+      「シャッフルしたので当然変わる」で終わります。
+    ⚠ o2c が NaN の行は元から除外されているので、**NaN でない行の中で**
+      シャッフルします (でないと偽陽性で検査が外れます)。
+    """
+    print(provenance("gap_reversal_daily.py"))
+    print("\n■ シャッフル検査 — 出口 (o2c) が採否に入っていないか")
+    pv = 0.0 if getattr(args, "prev_thr", None) is None else args.prev_thr
+    gp = 3.0 if getattr(args, "gap_thr", None) is None else args.gap_thr
+
+    def selected(p: pd.DataFrame) -> set:
+        sg = apply_signal(p, mkt, args.raw, pv, gp)
+        if args.side == "long":
+            sg = sg[sg["side"] > 0]
+        elif args.side == "short":
+            sg = sg[sg["side"] < 0]
+        sel = set(zip(sg["date"], sg["symbol"]))
+        if _RANK_THR:                       # §12 の順位フィルタも通す
+            n0 = 30 if 30 in RANK_LIST else RANK_LIST[-1]
+            dn = sg["date"].map(_RANK_THR["dn"][n0])
+            up = sg["date"].map(_RANK_THR["up"][n0])
+            inn = pd.Series(np.where(sg["side"] > 0, sg["gap"] <= dn,
+                                     sg["gap"] >= up), index=sg.index)
+            sel = set(zip(sg.loc[inn, "date"], sg.loc[inn, "symbol"]))
+        return sel
+
+    base = selected(panel)
+    rng = np.random.default_rng(0)
+    ok = True
+    for trial in range(3):
+        p2 = panel.copy()
+        m = p2["o2c"].notna()
+        v = p2.loc[m, "o2c"].to_numpy().copy()
+        rng.shuffle(v)
+        p2.loc[m, "o2c"] = v
+        s2 = selected(p2)
+        same = s2 == base
+        ok = ok and same
+        print(f"    試行{trial+1}  選ばれた件数 {len(base):,} → {len(s2):,}"
+              f"   差 {len(base ^ s2):,}   {'✅ 一致' if same else '⛔ 変化'}")
+    print(f"\n  → {'✅ 出口は採否に入っていません' if ok else '⛔ 出口が採否に入っています'}")
+    print("  ⚠ これはパネル構築 **後** の検査です。パネルを作る段階の除外条件")
+    print("    (build_symbol_rows の sane) は別で、そちらは件数を印字しています。")
+    print("    『データ破損として除外』の内訳に『出口(o2c)で除外』が出ていれば、")
+    print("    そこは結果に相関した選別です。")
+    return 0 if ok else 1
 
 
 def report(panel: pd.DataFrame, mkt: pd.Series, args) -> None:
@@ -2227,6 +2290,8 @@ def main() -> int:
                     action="store_true",
                     help="市場ファクターをユニバース自身から等加重で作る。"
                          "指数の穴で年が丸ごと消えるのを防ぐ")
+    ap.add_argument("--shuffle-test", dest="shuffle_test", action="store_true",
+                    help="出口 (o2c) が採否に入っていないことをシャッフルで検査")
     ap.add_argument("--nrule", action="store_true",
                     help="N ルール (固定パーセント・売買代金上位50) を"
                          "同じエンジンで測り、こちらの買い側との重なりも出す")
@@ -2287,6 +2352,8 @@ def main() -> int:
         print(f"パネルを {args.csv} に保存")
     if args.audit:
         audit_report()
+    if args.shuffle_test:
+        return shuffle_test(panel, mkt, args)
     if args.grid:
         grid_scan(panel, mkt, args)
     elif args.nrule:
