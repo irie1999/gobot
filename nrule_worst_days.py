@@ -124,6 +124,17 @@ def build_panel(symbols: list[str], workers: int,
     if not rows:
         raise SystemExit("候補が1件もありません")
     p = pd.concat(rows, ignore_index=True)
+    # ★ 母集団の指紋。**2回走らせてこの3つが一致するかで、銘柄が run-to-run で
+    #   落ちていないかが分かります。**目視で表を見比べる必要はありません。
+    #   (§18.33 で 5分足の並列読込が SystemError で落ち、E/H が ±7〜8% ブレた形)
+    print(f"  ★ 母集団の指紋 (2回走らせて一致するか): "
+          f"銘柄 {p['symbol'].nunique():,} / 銘柄日数 {len(p):,} / "
+          f"終値合計 {p['close'].sum():.0f}")
+    if _DROPS:
+        print("    落ちた銘柄の内訳: " + " / ".join(
+            f"{k} {v}" for k, v in sorted(_DROPS.items(), key=lambda kv: -kv[1])))
+    else:
+        print("    落ちた銘柄: なし")
     if select == "filter-first":
         # 前日条件 (どちらの符号でも) を満たす銘柄の中で上位TOPN
         p = p[p["prev_ret"].abs() >= PREV_THR]
