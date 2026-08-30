@@ -499,8 +499,15 @@ class KabuClient:
           "ALL"=全市場 / "T"=東証全体 / "TP"=プライム / "TS"=スタンダード
           / "TG"=グロース / "M"=名証 など
 
-        返り値: Ranking 配列 (通常 最大30件)。各要素は No/Symbol/SymbolName/
-        CurrentPrice/ChangeRatio(騰落率) 等を含む。
+        返り値: Ranking 配列。**実測 50件が上限** (2026-08-30 / 本番で確認)。
+        ⛔ 以前ここに「通常 最大30件」と書いてあったが **未確認の仕様説明**で、
+           実測は 50件。Count / Limit / Size / Page / Offset のどれを渡しても
+           50 のまま = 固定上限。この docstring を根拠に 30 と記録した箇所が
+           他にもあれば直すこと。
+        各要素は No/Symbol/SymbolName/CurrentPrice/ChangeRatio(騰落率) 等。
+        ⚠ **始値(OpeningPrice)を持つとは限らない**。N の判定条件は
+           「始値 >= 前日終値 +100bp」なので、/ranking だけでは判定できず
+           /board の OpeningPrice が要る。/ranking は **候補の絞り込み**用。
         """
         url = f"{self.base_url}/kabusapi/ranking"
         data = self._get_json(url, params={"Type": ranking_type,
