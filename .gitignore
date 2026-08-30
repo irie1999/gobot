@@ -8,3 +8,4 @@ candidates_*.csv
 report_combined_*.html
 result_summary_*.txt
 forward_records/
+.kabu_token

@@ -6,12 +6,21 @@
 Day 1 は ranking だけを回します。/board は混ぜません:
 銘柄登録は50件上限で、登録直後の初回読み取りに 40〜140 秒かかり、
 過去に同じ朝で 429 が積み上がって発注が危うくなった実例があります。
-kabu の有効トークンは1つなので、他プロセスと同時に走らせないこと。
+⛔ **トークンの衝突は「2プロセス」ではなく「2回の /token 呼び出し」が原因です。**
+kabu は /token を POST するたびに前のトークンを無効にします。逆に言えば
+**同じトークンなら2プロセスが同時に使えます**。同じ朝に `.\norder` と
+併走させるなら `--token` か `.kabu_token` を使ってください
+(このスクリプトはトークンを渡されれば /token を叩きません)。
+
+⚠ ただし **429 (レート制限) は共有されます。** 呼び出しは4本だけ、既定2秒間隔。
+429 を受けたら **リトライせず即停止**します (積むと `.\norder` のポーリングを
+巻き添えにするため)。
 
 記録は "1"x"TP" / "2"x"TP" / "1"x"ALL" / "2"x"ALL" の4本。
 ALL は2回分の追加コストしかなく、**後から絶対に取れません**。
 
     python kabu_ranking_log.py                 # 4本を1回記録して終了
+    python kabu_ranking_log.py --token XXXX    # 既存トークンを使う (併走可)
     python kabu_ranking_log.py --demo          # デモ (18081)
     python kabu_ranking_log.py --probe         # 件数指定/ページングの引数を探る
     python kabu_ranking_log.py --repeat 3 --interval 60
@@ -60,6 +69,43 @@ def _now() -> str:
     return dt.datetime.now().astimezone().isoformat(timespec="milliseconds")
 
 
+TOKEN_FILE = Path(".kabu_token")
+
+
+def resolve_token(base_url: str, token: str | None,
+                  token_file: str | None) -> str:
+    """トークンを決める。⛔ **可能な限り /token を叩かない。**
+
+    衝突の正体は「2つのプロセス」ではなく「**2回の /token 呼び出し**」です。
+    kabu は /token を POST するたびに前のトークンを無効にするので、同じ朝に
+    `.\\norder` と ranking を走らせると片方が死にます。
+    **同じトークンなら2プロセスが同時に使えます。**
+
+    優先順:
+      1. --token
+      2. --token-file (既定 .kabu_token)
+      3. 環境変数 KABU_API_TOKEN
+      4. ⛔ ここで初めて /token を POST する (他プロセスのトークンを無効にする)
+    """
+    if token:
+        print("  トークン: --token で受け取りました (/token は叩きません)")
+        return token
+    f = Path(token_file) if token_file else TOKEN_FILE
+    if f.is_file():
+        t = f.read_text(encoding="utf-8").strip()
+        if t:
+            print(f"  トークン: {f} から読みました (/token は叩きません)")
+            return t
+    t = os.environ.get("KABU_API_TOKEN")
+    if t:
+        print("  トークン: 環境変数 KABU_API_TOKEN から (/token は叩きません)")
+        return t
+    print("  ⛔ トークンが渡されなかったので /token を POST します。")
+    print("     **他プロセスのトークンが無効になります。** 同じ朝に併走させるなら")
+    print("     --token か .kabu_token を使ってください。")
+    return get_token(base_url)
+
+
 def get_token(base_url: str) -> str:
     pw = os.environ.get("KABU_API_PASSWORD_PROD") or os.environ.get(
         "KABU_API_PASSWORD")
@@ -95,6 +141,10 @@ def fetch_ranking(base_url: str, token: str, typ: str, div: str,
             rec["body"] = r.json()          # 生 JSON をそのまま。列は作らない
         except ValueError:
             rec["body"] = {"_text": r.text[:2000]}
+        if r.status_code == 429:
+            # ⛔ リトライしない。429 を積むと .\\norder のポーリングを巻き添えに
+            #   します (§18.48 ⑩ で気配ログの429が09:00の発注を危うくした)。
+            rec["fatal"] = "rate_limit"
     except Exception as e:                   # タイムアウト・接続断も記録する
         rec["resp_ts"] = _now()
         rec["ok"] = False
@@ -177,7 +227,10 @@ def probe(base_url: str, token: str, path: Path) -> None:
         n = len(rec.get("body", {}).get("Ranking", []) or [])
         mark = "★ 効いています" if n != n0 and rec.get("ok") else ""
         print(f"  {str(extra):<20} {n:>3} 件 (status {rec.get('status')}) {mark}")
-        time.sleep(1.0)
+        if rec.get("fatal") == "rate_limit":
+            print("  ⛔ 429。ここで停止します。")
+            return
+        time.sleep(2.0)
     print("  ★ どれも件数が変わらなければ、上位30件が固定の上限です。")
 
 
@@ -190,6 +243,12 @@ def main() -> int:
     ap.add_argument("--interval", type=float, default=60.0, help="間隔 (秒)")
     ap.add_argument("--probe", action="store_true",
                     help="件数指定/ページングの引数があるかを試す")
+    ap.add_argument("--token", help="既存のトークンを使う (/token を叩かない)。"
+                                    "同じ朝に .\\norder と併走するときに必須")
+    ap.add_argument("--token-file", dest="token_file",
+                    help=f"トークンを読むファイル (既定 {TOKEN_FILE})")
+    ap.add_argument("--spacing", type=float, default=2.0,
+                    help="呼び出しの間隔(秒)。429 を避けるため既定2秒")
     ap.add_argument("--etf", action="store_true",
                     help="ranking の合間に ETF (1321/1306) の板を読み、"
                          "OpeningPriceTime (初約定時刻) を記録する")
@@ -201,7 +260,7 @@ def main() -> int:
     print("⛔ このスクリプトは記録だけです。発注は一切しません。")
 
     try:
-        token = get_token(base)
+        token = resolve_token(base, args.token, args.token_file)
     except requests.exceptions.ConnectionError:
         print("接続エラー: kabuステーションが起動しているか確認してください。")
         return 1
@@ -235,10 +294,14 @@ def main() -> int:
                       f"受信 {rec.get('resp_ts')}  "
                       f"初約定(公式) {b.get('OpeningPriceTime')}  "
                       f"始値 {b.get('OpeningPrice')}  現値 {b.get('CurrentPrice')}")
-                time.sleep(1.0)
+                time.sleep(args.spacing)
         for typ, div in PLAN:
             rec = fetch_ranking(base, token, typ, div)
             append(path, rec)
+            if rec.get("fatal") == "rate_limit":
+                print("  ⛔ 429 (レート制限)。**ここで停止します。**")
+                print("     リトライすると .\\norder のポーリングを巻き添えにします。")
+                return 1
             body = rec.get("body") or {}
             rows = body.get("Ranking") or []
             head = ""
@@ -248,7 +311,7 @@ def main() -> int:
                         f"{r0.get('ChangeRatio')}")
             print(f"  {rec['req_ts']}  Type={typ} {div:<3} "
                   f"ok={rec.get('ok')} {len(rows):>3}件  {head}")
-            time.sleep(1.0)
+            time.sleep(args.spacing)
     print(f"\n記録しました: {path}")
     return 0
 
