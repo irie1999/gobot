@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import math
 import sys
+import threading
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
@@ -58,9 +59,34 @@ REF = {
 _RET: dict[str, pd.Series] = {}          # 相関の代理計算用
 
 
+# 銘柄が丸ごと落ちた理由の内訳。⛔ 例外を握り潰すと、実行のたびに母集団が
+# 変わるのに気づけません。検出は「同じデータで2回走らせて指紋が一致するか」。
+_DROPS: dict = defaultdict(int)
+_OUT_DROPS = [0]          # ⛔ 出口 (o2c) を読んで落とした行数
+_DROP_LOCK = threading.Lock()
+
+
+def _drop(reason: str) -> None:
+    with _DROP_LOCK:
+        _DROPS[reason] += 1
+
+
+def _drop_row(n: int) -> None:
+    with _DROP_LOCK:
+        _OUT_DROPS[0] += n
+
+
 def build_rows(sym: str) -> pd.DataFrame | None:
-    df = G.fetch_daily(sym)
-    if df is None or len(df) < 250:
+    try:
+        df = G.fetch_daily(sym)
+    except Exception as e:                      # ⛔ pass にしない。数える
+        _drop(f"例外 {type(e).__name__}")
+        return None
+    if df is None:
+        _drop("読めず")
+        return None
+    if len(df) < 250:
+        _drop("本数不足 (<250)")
         return None
     d = df.copy()
     ok = ((d["high"] >= d["low"])
@@ -68,6 +94,7 @@ def build_rows(sym: str) -> pd.DataFrame | None:
           & d["close"].between(d["low"], d["high"]))
     d = d[ok]
     if len(d) < 250:
+        _drop("OHLC整合後に本数不足")
         return None
     d["ret"] = d["close"].pct_change()
     d["prev_ret"] = d["ret"].shift(1)
@@ -82,13 +109,21 @@ def build_rows(sym: str) -> pd.DataFrame | None:
     #    当日の出来高を見ていました)
     d["turnover"] = (d["close"] * d["volume"]).rolling(20).mean().shift(1)
     d["next_open"] = d["open"].shift(-1)   # 強制持ち越しの評価にだけ使う
-    sane = ((d["gap"].abs() <= MAX_MOVE) & (d["o2c"].abs() <= MAX_MOVE)
-            & (d["ret"].abs() <= MAX_MOVE))
-    keep = (sane & d["prev_close"].between(MIN_PRICE, MAX_PRICE)
+    # ⛔ 採否の条件を「建てる前に分かる量」と「出口の量」に分ける。
+    #   出口 (o2c) を採否に使うと、結果に相関した選別になります。
+    #   **自分のコードをシャッフル検査に当てて見つけました (2026-08-30)。**
+    sane_pre = (d["gap"].abs() <= MAX_MOVE) & (d["ret"].abs() <= MAX_MOVE)
+    sane_out = d["o2c"].abs() <= MAX_MOVE          # ⛔ 出口を読む
+    _n = int((sane_pre & ~sane_out).sum())
+    if _n:
+        _drop_row(_n)
+    keep = (sane_pre & sane_out
+            & d["prev_close"].between(MIN_PRICE, MAX_PRICE)
             & d["turnover"].notna() & d["atr"].notna() & (d["atr"] > 0)
             & d["prev_ret"].notna())
     d = d[keep]
     if d.empty:
+        _drop("フィルタ後ゼロ (株価帯/流動性/ATR)")
         return None
     _RET[sym] = df["close"].pct_change()
     return pd.DataFrame({
@@ -135,6 +170,11 @@ def build_panel(symbols: list[str], workers: int,
             f"{k} {v}" for k, v in sorted(_DROPS.items(), key=lambda kv: -kv[1])))
     else:
         print("    落ちた銘柄: なし")
+    print(f"  ⛔ 出口 (o2c) を読んで落とした行: {_OUT_DROPS[0]:,}")
+    print("     |日中変化| > 30% をデータ破損として落としていますが、これは")
+    print("     **結果に相関した選別**です。1,000円の株の値幅制限は ±300円 = ±30%")
+    print("     なので、ストップ安の日が『破損』として消えている可能性があります。")
+    print("     ⚠ 建てる前に分かる量 (ギャップ・前日リターン) での除外とは別物です。")
     if select == "filter-first":
         # 前日条件 (どちらの符号でも) を満たす銘柄の中で上位TOPN
         p = p[p["prev_ret"].abs() >= PREV_THR]
@@ -873,7 +913,40 @@ def stop_test(panel: pd.DataFrame, side: str, train_from: str,
           f"(件数 {r_te['n_lo']:,} / {r_te['n_hi']:,})")
 
 
+def _smoke_build_panel() -> None:
+    """⛔ build_panel を実際に通す。
+
+    2026-08-30: `_DROPS` を参照する行だけを入れて定義を入れ忘れ、
+    **壊れたまま push しました。** self-test は build_panel を通らないので
+    素通りしました。**通らない経路は壊れていても気づけません。**
+    """
+    import tempfile, pickle, pathlib
+    rng = np.random.default_rng(0)
+    dates = pd.bdate_range("2014-01-01", "2026-08-28")
+    with tempfile.TemporaryDirectory() as td:
+        for k in range(6):
+            n = len(dates)
+            ret = rng.normal(0, 0.02, n)
+            px = 2500 * np.exp(np.cumsum(ret))
+            df = pd.DataFrame({
+                "open": px * (1 + rng.normal(0, 0.01, n)), "close": px,
+                "high": px * 1.02, "low": px * 0.98,
+                "volume": np.full(n, 1e6),
+            }, index=dates)
+            df["high"] = df[["open", "close", "high"]].max(axis=1)
+            df["low"] = df[["open", "close", "low"]].min(axis=1)
+            with open(pathlib.Path(td) / f"T{k:04d}_T.pkl", "wb") as f:
+                pickle.dump(df, f)
+        syms, _ = G.load_cache_dir(td, "^N225", want_index=False)
+        panel = build_panel(syms, 2)
+    assert len(panel), "パネルが空です"
+    for c in ("open", "close", "high", "low", "atr", "turnover", "next_open"):
+        assert c in panel.columns, c
+    print(f"SMOKE build_panel: {len(panel):,} 行 / {panel['symbol'].nunique()} 銘柄  PASS")
+
+
 def self_test() -> int:
+    _smoke_build_panel()
     rng = np.random.default_rng(0)
     dates = pd.bdate_range("2015-01-01", "2024-12-31")
     rows = []
