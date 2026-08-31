@@ -746,29 +746,38 @@ if args.execute and args.n_mode:
     print(f"[N] 発注記録は **{_N_LEDGER.name}** に書きます"
           f"(ordered_signals_lss.csv には書かない = watcher の視界に入れない)")
 
-    # ⛔⛔ 起動時チェック(2026-08-31 レビュー2巡目③)。
-    #   前回の実行が MOC 設置の前に落ちていると、**無防備な建玉**が残る。
-    #   N には watcher が無いので、誰も気づかない。台帳に ordered があって
-    #   settled が無い行を見つけたら、**新規発注の前に**必ず止める。
+    # ⛔⛔ 起動時チェック(レビュー2巡目③ / 4巡目③で強化)。
+    #   前回が MOC 設置の前に落ちていると **無防備な建玉**が残る。N には
+    #   watcher が無いので誰も気づかない。**新規発注の前に**必ず止める。
+    #   ⛔ status=="ordered" だけでは足りない。いちばん危ない停止位置は
+    #     「pending を書いた → 送信した → 応答を受ける前に落ちた」で、
+    #     台帳には pending しか残らない。注文は通っているかもしれない。
+    #   → 銘柄ごとに **最後の状態**を見て、failed / settled まで進んで
+    #     いないものは全部 未完了として扱う。
     try:
         if _N_LEDGER.exists():
             _rows_l = list(_csv.DictReader(
                 open(_N_LEDGER, encoding="utf-8-sig")))
-            _open_l = [r for r in _rows_l
-                       if str(r.get("status", "")) == "ordered"]
-            _done_l = {str(r.get("order_id", "")) for r in _rows_l
-                       if str(r.get("status", "")) == "settled"}
-            _stuck = [r for r in _open_l
-                      if str(r.get("order_id", "")) not in _done_l]
+            _last_l: dict = {}
+            for _r_l in _rows_l:
+                _k_l = (str(_r_l.get("date", "")), str(_r_l.get("symbol", "")),
+                        str(_r_l.get("order_id", "")))
+                _last_l[_k_l] = _r_l          # 同じ注文の最後の行が残る
+            _stuck = [v for v in _last_l.values()
+                      if str(v.get("status", "")) not in ("failed", "settled")]
             if _stuck:
                 print("\n⛔⛔ **前回の実行が決済設置まで終わっていません**\n"
-                      f"   {_N_LEDGER.name} に settled の無い注文が "
-                      f"{len(_stuck)}件 あります:", flush=True)
+                      f"   {_N_LEDGER.name} に failed / settled まで進んで"
+                      f"いない注文が {len(_stuck)}件 あります:", flush=True)
                 for _r_l in _stuck[-10:]:
                     print(f"     {_r_l.get('date')} {_r_l.get('symbol')} "
-                          f"{_r_l.get('qty')}株 order_id={_r_l.get('order_id')}",
+                          f"{_r_l.get('qty')}株 status={_r_l.get('status')} "
+                          f"order_id={_r_l.get('order_id') or '(不明)'}",
                           flush=True)
                 print("\n   ⛔ **無防備な建玉が残っている可能性があります**。\n"
+                      "      ⚠ とくに status=pending は『送信したが応答を受け\n"
+                      "        取る前に落ちた』かもしれず、注文が通っている\n"
+                      "        可能性があります。\n"
                       "      kabu ステーションで売建を確認し、引け成行が無い\n"
                       "      ものは手動で出してから、もう一度実行してください。\n"
                       "      確認済みなら --n-ignore-stuck を付けて起動します。",
@@ -780,8 +789,13 @@ if args.execute and args.n_mode:
     except SystemExit:
         raise
     except Exception as _se:
-        print(f"  ⚠ 台帳の起動時チェックに失敗({_se})。続行しますが、"
-              f"前回の残りがないか手動で確認してください", flush=True)
+        # ⛔ 復旧ガードが読めないまま実発注に進むのは逆向き(レビュー4巡目③)。
+        print(f"\n⛔⛔ 台帳({_N_LEDGER.name})を読めません: {_se}\n"
+              f"   前回の未決済が残っているか判断できないので **中止します**。\n"
+              f"   kabu ステーションで売建を確認してから、必要なら\n"
+              f"   --n-ignore-stuck を付けて起動してください。", flush=True)
+        if not args.n_ignore_stuck:
+            sys.exit(2)
 elif args.execute:
     try:
         from kabu_send_lss import _log_ordered as _ORDER_LOG
@@ -880,7 +894,8 @@ def _n_adopt_unknown() -> None:
               f" → settle の対象に入れます", flush=True)
 
 
-def _n_close_positions(_sym: str, _qty: int, _exec_ids: set) -> list | None:
+def _n_close_positions(_sym: str, _qty: int, _exec_ids: set,
+                       _retry_s: float = 15.0) -> list | None:
     """N が建てた建玉だけの ClosePositions を作る。作れなければ None。
 
     ⛔⛔ send_moc(close_positions=None) は kabu_api の中で
@@ -897,45 +912,51 @@ def _n_close_positions(_sym: str, _qty: int, _exec_ids: set) -> list | None:
         print(f"    ⛔ {_sym}: 自分の約定 ExecutionID が取れません。"
               f"**自動割当てに落とさず MOC を見送ります**", flush=True)
         return None
-    try:
-        _ps = cli.get_margin_positions(_sym)
-    except Exception as _pe:
-        print(f"    ⛔ {_sym}: 建玉を取得できません({_pe})", flush=True)
+    # ⚠ 約定直後は positions への反映が遅れる / ExecutionID が一時的に空に
+    #   なる事例が公式に報告されている。1回で諦めず数秒 再照会する。
+    _mine, _other, _ps, _tries = [], 0, [], 0
+    _t0 = time.time()
+    while True:
+        _tries += 1
+        try:
+            _ps = cli.get_margin_positions(_sym)
+        except Exception as _pe:
+            print(f"    ⚠ {_sym}: 建玉の取得で例外({_pe}) 再試行 {_tries}",
+                  flush=True)
+            _ps = []
+        _mine, _other = [], 0
+        for _p in _ps:
+            if str(_p.get("Side", "")) != "1":              # 1=売建
+                continue
+            _lv = int(_p.get("LeavesQty") or _p.get("Qty") or 0)
+            if _lv <= 0:
+                continue
+            _eid = str(_p.get("ExecutionID", "") or "")
+            if _eid and _eid in _exec_ids:
+                _mine.append({"HoldID": _eid, "Qty": _lv})
+            else:
+                _other += 1
+        if sum(int(x["Qty"]) for x in _mine) >= _qty:
+            break
+        if time.time() - _t0 > _retry_s:
+            break
+        time.sleep(1.0)
+    _have = sum(int(x["Qty"]) for x in _mine)
+    print(f"    [建玉] {_sym}: 一致 {_have}株 / 約定 {_qty}株 "
+          f"(自分の約定ID {len(_exec_ids)}件 / 建玉 {len(_ps)}本 / "
+          f"他 {_other}本 / 再照会 {_tries}回)", flush=True)
+    # ⛔⛔ **数量が完全に一致したときだけ** MOC を出す(レビュー4巡目②)。
+    #   足りないぶんだけ返済すると、残りが無防備なまま「成功」で終わる。
+    if _have != _qty:
+        print(f"    ⛔ {_sym}: 建玉 {_have}株 ≠ 約定 {_qty}株 → "
+              f"**MOC を見送ります**。\n"
+              f"       kabu ステーションで売建を確認し、手動で引け成行を"
+              f"出してください", flush=True)
         return None
-    _mine, _other = [], 0
-    for _p in _ps:
-        if str(_p.get("Side", "")) != "1":                 # 1=売建
-            continue
-        _lv = int(_p.get("LeavesQty") or _p.get("Qty") or 0)
-        if _lv <= 0:
-            continue
-        _eid = str(_p.get("ExecutionID", "") or "")
-        if _eid and _eid in _exec_ids:
-            _mine.append({"HoldID": _eid, "Qty": _lv})
-        else:
-            _other += 1
     if _other:
         print(f"    ⚠ {_sym}: 自分のものでない売建 {_other}本 は触りません",
               flush=True)
-    _have = sum(int(x["Qty"]) for x in _mine)
-    if not _mine:
-        print(f"    ⛔ {_sym}: ExecutionID の一致する建玉がありません "
-              f"(自分の約定ID {len(_exec_ids)}件 / 建玉 {len(_ps)}本)。\n"
-              f"       **MOC を見送ります**。kabu ステーションで確認し、"
-              f"売建があれば手動で引け成行を出してください", flush=True)
-        return None
-    if _have < _qty:
-        print(f"    ⚠ {_sym}: 一致した建玉 {_have}株 < 約定 {_qty}株。"
-              f"差分は手動確認が必要です", flush=True)
-    # 数量は建玉側に合わせる(約定より多く返済しない)
-    _need, _out = min(_qty, _have), []
-    for _x in _mine:
-        if _need <= 0:
-            break
-        _u = min(_need, int(_x["Qty"]))
-        _out.append({"HoldID": _x["HoldID"], "Qty": _u})
-        _need -= _u
-    return _out or None
+    return _mine
 
 
 def _n_settle(_timeout: float = 60.0, _every: float = 3.0) -> bool:
@@ -1045,11 +1066,12 @@ def _n_settle(_timeout: float = 60.0, _every: float = 3.0) -> bool:
                 _eids.setdefault(_sy, set()).add(_ei)
     if not _fill:
         print("    (約定した建玉がありません。MOC は不要です)", flush=True)
-        return _ok
+    # ⛔⛔ ここで return しない(レビュー4巡目①)。約定ゼロでも
+    #   未解決の _N_UNK / _N_FAIL の検査と settled の記録は必ず通す。
 
     # ── MOC を置いて受付を確認 ───────────────────────────────────
     _mok = _mng = 0
-    for _sy, _q in sorted(_fill.items()):
+    for _sy, _q in sorted(_fill.items()):   # 約定ゼロなら空ループ
         # ⛔ close_positions を **必ず明示**する。None にすると kabu_api が
         #   他戦略の返済注文を取り消し、FIFO で古い建玉を決済する(レビュー②)。
         _cp = _n_close_positions(_sy, _q, _eids.get(_sy, set()))
