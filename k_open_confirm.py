@@ -85,6 +85,7 @@ import datetime as _dt
 import re
 import sys
 import time
+import uuid as _uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -718,6 +719,15 @@ _N_FAIL: set = set()   # 復元不能などの致命的な事象
 _N_PRE_TAKEN = [False]
 _N_OID_ARG = [""]       # 直近の OrderId(台帳に書くため)
 _N_SETTLE_OK = [True]   # settle が全部そろったか。False なら非ゼロ終了
+# ⛔⛔ 台帳の集約キーは **attempt_id**(2026-08-31 レビュー5巡目①)。
+#   OrderId をキーにすると、同じ注文なのに
+#     pending  order_id=""        → 別キー・最終状態 pending
+#     settled  order_id="ABC123"  → 別キー・最終状態 settled
+#   と2つに割れ、**正常に決済まで終わった翌朝も必ず exit 2** になる。
+#   送信の前に attempt_id を作り、pending / ordered / failed / settled の
+#   全行に同じものを書く。
+_N_ATT = [""]           # 今から出す注文の attempt_id
+_N_ATT_SYM: dict = {}   # 銘柄 -> attempt_id(settle が settled を書くため)
 _EX = {"left": args.budget * 1e4, "n": 0, "yen": 0.0, "ng": 0,
        "cap": (args.max_notional or args.budget) * 1e4}
 _ORDER_LOG = None
@@ -736,13 +746,15 @@ if args.execute and args.n_mode:
             if _new:
                 _w.writerow(["ts", "date", "symbol", "name", "strategy",
                              "side", "qty", "order_price", "status",
-                             "prod", "entry_mode", "exit", "order_id"])
+                             "prod", "entry_mode", "exit", "order_id",
+                             "attempt_id"])
             _w.writerow([f"{_dt.datetime.now():%Y-%m-%d %H:%M:%S}",
                          f"{_dt.date.today()}", _sig.get("symbol", ""),
                          _sig.get("name", ""), _sig.get("strategy", "N"),
                          "sell", _qty, order_price or _sig.get("order_price", 0),
                          status, 1 if _prod else 0, entry_mode or "n_open",
-                         "MOC", _kw.get("order_id", "")])
+                         "MOC", _kw.get("order_id", ""),
+                         _kw.get("attempt_id", "")])
     print(f"[N] 発注記録は **{_N_LEDGER.name}** に書きます"
           f"(ordered_signals_lss.csv には書かない = watcher の視界に入れない)")
 
@@ -760,8 +772,14 @@ if args.execute and args.n_mode:
                 open(_N_LEDGER, encoding="utf-8-sig")))
             _last_l: dict = {}
             for _r_l in _rows_l:
-                _k_l = (str(_r_l.get("date", "")), str(_r_l.get("symbol", "")),
-                        str(_r_l.get("order_id", "")))
+                # ⛔⛔ order_id をキーに含めない(レビュー5巡目①)。同じ注文でも
+                #   pending は order_id="" なので**別キーに割れ**、決済まで
+                #   終わっても pending 行が残って毎朝 exit 2 になっていた。
+                #   attempt_id があればそれ、無ければ(古い台帳)銘柄で束ねる
+                #   — N は1銘柄1日1注文なので銘柄で一意になる。
+                _k_l = (str(_r_l.get("date", "")),
+                        str(_r_l.get("attempt_id") or "")
+                        or str(_r_l.get("symbol", "")))
                 _last_l[_k_l] = _r_l          # 同じ注文の最後の行が残る
             _stuck = [v for v in _last_l.values()
                       if str(v.get("status", "")) not in ("failed", "settled")]
@@ -895,7 +913,7 @@ def _n_adopt_unknown() -> None:
 
 
 def _n_close_positions(_sym: str, _qty: int, _exec_ids: set,
-                       _retry_s: float = 15.0) -> list | None:
+                       _retry_s: float = 60.0) -> list | None:
     """N が建てた建玉だけの ClosePositions を作る。作れなければ None。
 
     ⛔⛔ send_moc(close_positions=None) は kabu_api の中で
@@ -989,10 +1007,19 @@ def _n_settle(_timeout: float = 60.0, _every: float = 3.0) -> bool:
         return True
 
     _ok = True
+    # ⛔⛔ 「照会にまだ出てこない自分の注文ID」を成功扱いにしない
+    #   (2026-08-31 レビュー5巡目②)。send_sell が OrderId を返した直後は
+    #   /orders への反映が遅れることがある。そのとき _mine() は空・_open も
+    #   空・_N_UNK も空になり、**板に注文が残っているのに約定ゼロで True**
+    #   を返していた。全IDを一度は照会で確認するまで待つ。
+    _seen_ids: set = set()
 
     def _mine() -> list:
-        return [(_N_ORD[str(_o.get('ID'))], _o) for _o in (cli.get_orders() or [])
+        _got = [(_N_ORD[str(_o.get('ID'))], _o)
+                for _o in (cli.get_orders() or [])
                 if str(_o.get("ID") or "") in _N_ORD]
+        _seen_ids.update(str(_o.get("ID") or "") for _, _o in _got)
+        return _got
 
     # ── 取消して終端まで待つ ─────────────────────────────────────
     _t0, _cxl_n, _last, _seen_all = time.time(), {}, [], False
@@ -1012,9 +1039,11 @@ def _n_settle(_timeout: float = 60.0, _every: float = 3.0) -> bool:
             _n_adopt_unknown()
         _open = [(s, o) for s, o in _last
                  if int(o.get("OrderState") or o.get("State") or 0) < 5]
-        if not _open and not _N_UNK:
+        # ★ まだ照会に現れていない自分の注文(レビュー5巡目②)。
+        _miss = set(_N_ORD) - _seen_ids
+        if not _open and not _N_UNK and not _miss:
             break
-        if not _open and time.time() - _t0 > _timeout:
+        if not _open and not _miss and time.time() - _t0 > _timeout:
             break
         for _sy, _o in _open:
             _oid = str(_o.get("ID") or "")
@@ -1036,14 +1065,27 @@ def _n_settle(_timeout: float = 60.0, _every: float = 3.0) -> bool:
                 print(f"    ⚠ {_sy} 取消で例外: {_ce} "
                       f"(再試行 {_cxl_n[_oid]}/3)", flush=True)
         if time.time() - _t0 > _timeout:
-            print(f"    ⛔⛔ {_timeout:.0f}秒たっても終端になりません "
-                  f"({len(_open)}件)。**約定数量が確定していません**。\n"
-                  f"       この後 MOC を出しますが、数量が足りない可能性が"
-                  f"あります。kabu の注文照会で必ず目視してください",
-                  flush=True)
+            if _open:
+                print(f"    ⛔⛔ {_timeout:.0f}秒たっても終端になりません "
+                      f"({len(_open)}件)。**約定数量が確定していません**。\n"
+                      f"       この後 MOC を出しますが、数量が足りない可能性が"
+                      f"あります。kabu の注文照会で必ず目視してください",
+                      flush=True)
             _ok = False                      # ⛔ 成功扱いにしない
             break
         time.sleep(_every)
+
+    # ⛔⛔ 反映されないままの注文IDは **成功扱いにしない**(レビュー5巡目②)。
+    #   ここを通さないと「板に残っているのに約定ゼロで完了」になる。
+    _miss = set(_N_ORD) - _seen_ids
+    if _miss:
+        print(f"\n    ⛔⛔ **注文が {_timeout:.0f}秒たっても注文照会に現れま"
+              f"せん** ({len(_miss)}件)\n"
+              f"       {sorted(_N_ORD[m] for m in _miss)} — 板に残っている\n"
+              f"       可能性があります。取消も約定数量の確定もできていません。\n"
+              f"       kabu ステーションで注文と売建を確認し、必要なら手動で\n"
+              f"       取消・引け成行を出してください。", flush=True)
+        _ok = False
 
     if not _seen_all:
         print(f"    ⛔⛔ 注文の状態を一度も取得できませんでした。"
@@ -1120,12 +1162,16 @@ def _n_settle(_timeout: float = 60.0, _every: float = 3.0) -> bool:
         if _ORDER_LOG:
             for _oid_s, _sy_s in _N_ORD.items():
                 try:
+                    # ★ pending と **同じ attempt_id** を書く(レビュー5巡目①)。
+                    #   これが無いと pending 行が別キーで残り、翌朝 exit 2。
                     _ORDER_LOG({"symbol": _sy_s, "strategy": "N"}, args.prod,
                                int(_fill.get(_sy_s, 0)), entry_mode="n_open",
                                order_price=0, status="settled",
-                               order_id=_oid_s)
-                except Exception:
-                    pass
+                               order_id=_oid_s,
+                               attempt_id=_N_ATT_SYM.get(_sy_s, ""))
+                except Exception as _we2:
+                    print(f"    ⚠ settled の記録に失敗({_sy_s}): {_we2} — "
+                          f"次回の起動で未完了として止まります", flush=True)
     return _ok
 
 
@@ -1260,8 +1306,11 @@ def _order_rows(_sel: list) -> None:
             if not (_ORDER_LOG and args.execute):
                 return
             try:
-                _oid_kw = ({"order_id": _N_OID_ARG[0]}
-                           if args.n_mode and _N_OID_ARG[0] else {})
+                # ★ attempt_id は **pending から settled まで同じもの**を書く
+                #   (レビュー5巡目①)。order_id は取れてから埋まる。
+                _oid_kw = ({"order_id": _N_OID_ARG[0],
+                            "attempt_id": _N_ATT[0]}
+                           if args.n_mode else {})
                 # ⛔ N はバリアを持たないので、損切/利確/ATR を **0 で書く**。
                 #   記録自体は残す(§18.48 ⑦「記録を発注より先に書く」)が、
                 #   万一 watcher が起動しても **武装するものが無い**状態にする。
@@ -1283,6 +1332,12 @@ def _order_rows(_sel: list) -> None:
                       flush=True)
 
         _N_OID_ARG[0] = ""
+        # ★ 送信の**前**に attempt_id を作る(レビュー5巡目①)。この1本の注文の
+        #   pending / ordered / failed / settled が全部これで束ねられる。
+        if args.n_mode:
+            _N_ATT[0] = (f"{_dt.date.today():%Y%m%d}-{_r['symbol']}-"
+                         f"{_uuid.uuid4().hex[:8]}")
+            _N_ATT_SYM[str(_r["symbol"])] = _N_ATT[0]
         _log("pending")
         # ⛔ 送信の**前**に「出そうとした銘柄」を記録する(2026-08-31 レビュー①)。
         #   例外で OrderId が取れなくても、注文が通っている可能性がある。

@@ -34,11 +34,16 @@ REM   that shape leaves two holes: a partial fill can complete AFTER the MOC
 REM   quantity was decided, and sweeping positions touches OTHER strategies'
 REM   shorts (a margin close cancels their existing closing order).
 REM   N instead settles only its own orders:
-REM     1. cancel every one of our new-sell orders, filled-in-part included
-REM     2. wait until every one of them reaches a terminal state
+REM     1. wait until EVERY order id we were handed actually shows up in
+REM        /orders. A fresh id can lag; if we skipped this we would read
+REM        "no fills" while the order was still live on the book.
+REM     2. cancel every one of our new-sell orders, filled-in-part included
+REM     3. wait until every one of them reaches a terminal state
 REM        -> only then is the filled quantity final
-REM     3. place one closing MOC per symbol for exactly that quantity
-REM     4. confirm each MOC was accepted; shout loudly if any was not
+REM     4. place one closing MOC per symbol for exactly that quantity,
+REM        naming our own HoldIDs, and only if they add up exactly
+REM     5. confirm each MOC was accepted; shout loudly if any was not
+REM   Anything short of all five prints a warning and exits non-zero.
 REM
 REM SEQUENCE
 REM   0. build tonight's candidates (yfinance only, no kabu)
