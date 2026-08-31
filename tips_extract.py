@@ -1328,6 +1328,10 @@ def main() -> None:
                     help="2つ目のエンジンで独立抽出して突き合わせる")
     ap.add_argument("--llm-cmd", default="", help='例: "codex exec -"')
     ap.add_argument("--model", default=DEFAULT_MODEL)
+    ap.add_argument("--promo", action="store_true",
+                    help="宣伝ブロックの解析結果だけを表示する (LLM を呼ばない)")
+    ap.add_argument("--duration", type=float, default=0.0,
+                    help="--promo 用の動画長 (秒)。字幕JSONなら自動取得")
     a = ap.parse_args()
 
     if a.llm_cmd:
@@ -1342,6 +1346,30 @@ def main() -> None:
             raw = yt_transcript.segments_to_text(d["segments"])
     except json.JSONDecodeError:
         pass
+    if a.promo:
+        dur = a.duration or float(meta.get("duration") or 0)
+        pa  = analyze_promotion(raw, dur)
+        def hms(x):
+            return f"{int(x) // 60}:{int(x) % 60:02d}" if x is not None else "-"
+        print(f"動画長      : {hms(dur)} ({dur:.0f}秒)"
+              f"{'  ※未指定のため末尾チャンク+30秒で代用' if not dur else ''}")
+        print(f"宣伝比率    : {pa['time_ratio']:.1%}")
+        print(f"冒頭20%比率 : {pa['lead_ratio']:.1%}")
+        print(f"初出        : {hms(pa['first_sec'])}"
+              f"{'  (終盤のみ)' if pa['tail_only'] else ''}")
+        print(f"タイムスタンプ: {'あり' if pa['timed'] else 'なし (文字位置で近似)'}")
+        print("宣伝ブロック:")
+        for st, en in pa["spans"] or []:
+            print(f"  {hms(st)} 〜 {hms(en)}  ({en - st:.0f}秒)")
+        if not pa["spans"]:
+            print("  (なし)")
+        print("検出箇所:")
+        for m in pa["mentions"]:
+            print(f"  ・{m.strip()[:90]}")
+        print(f"\n判定の目安: 除外 = 比率 >= 40% / 冒頭比率 >= 50%、"
+              f"信頼度 -15 = 比率 >= {PROMO_FLAG_RATIO:.0%}")
+        return
+
     r = extract_tips(raw, meta, a.backend, a.model, verbose=True, cross_check=a.cross_check)
     print(json.dumps(r, ensure_ascii=False, indent=2))
 

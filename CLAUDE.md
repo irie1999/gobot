@@ -951,6 +951,8 @@ python youtube_tips.py --allow-unofficial  # yt-dlp 等の非公式経路を許�
 python youtube_tips.py --report --days 7   # 収集済みから再レポート
 python youtube_tips.py --digest --days 7   # ターミナル出力
 python youtube_tips.py --failures          # 字幕取得に失敗した動画
+python tips_extract.py --file <字幕> --promo --duration 1980
+                                           # 宣伝ブロックの解析だけ表示 (LLM を呼ばない)
 python youtube_tips.py --backend heuristic # LLM を使わない
 python youtube_tips.py --cross-check cmd --llm-cmd "codex exec -"
                                            # 相手が未知CLIなら TIPS_LLM_SANDBOX_ARGS 必須
