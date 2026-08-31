@@ -876,7 +876,20 @@ def print_failures(recs: dict[str, dict]) -> None:
 
 
 # ── CLI ────────────────────────────────────────────────────────────────
+def _safe_console() -> None:
+    """
+    Windows の cp932 コンソールで「✓」等が UnicodeEncodeError にならないようにする。
+    (エンコードできない文字は ? に置き換えて出力を続ける)
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def main() -> None:
+    _safe_console()
     ap = argparse.ArgumentParser(
         description="YouTube 字幕から株の見解/Tips を収集し gobot と照合する",
         formatter_class=argparse.RawDescriptionHelpFormatter)

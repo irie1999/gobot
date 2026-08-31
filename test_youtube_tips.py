@@ -2,6 +2,7 @@
 test_youtube_tips.py  ―  YouTube Tips パイプラインの自己テスト
 ================================================================
 ネットワーク・pandas・LLM 無しで走る範囲を検証する。
+Windows / macOS / Linux のいずれでも同じ内容が走る (外部シェルに依存しない)。
 
   python test_youtube_tips.py        # 全テスト実行 (失敗があれば exit 1)
 
@@ -19,6 +20,7 @@ test_youtube_tips.py  ―  YouTube Tips パイプラインの自己テスト
  11. 隔離実行        … 空の一時ディレクトリ / 未知CLIの拒否 / 子孫プロセスの停止
  12. フォールバック  … heuristic を成功扱いにせず、一致ボーナスも与えないか
  13. 集計除外        … proxy / heuristic の行を正式な実績から外すか
+ 14. Windows 互換    … cp932 コンソールで記号を出しても落ちないか
 """
 
 from __future__ import annotations
@@ -282,8 +284,15 @@ def test_entry_reference() -> None:
     check("proxy 明示時のみ当日終値、ただし proxy 印",
           (p, rule) == (103.0, tk.RULE_PROXY), (d, p, rule))
 
+    d, p, rule = tk.entry_reference(bars, datetime(2026, 8, 27, 15, 15, tzinfo=JST), True, [])
+    check("15:15 は大引け前 (2024-11-05 以降の 15:30 終了) なのでザラ場扱い",
+          rule == tk.RULE_NEXT_INTRA, (d, p, rule))
     d, p, rule = tk.entry_reference(bars, datetime(2026, 8, 27, 16, 0, tzinfo=JST), True)
-    check("引け後→翌営業日始値", (d, p) == ("2026-08-28", 104.0), (d, p, rule))
+    check("引け後→翌営業日始値", (d, p, rule) == ("2026-08-28", 104.0, tk.RULE_NEXT_OPEN),
+          (d, p, rule))
+    check("大引けは 2024-11-05 から 15:30",
+          (tk.market_close(date(2026, 8, 27)), tk.market_close(date(2024, 10, 1)))
+          == (tk.MARKET_CLOSE, tk.MARKET_CLOSE_LEGACY))
 
     d, p, rule = tk.entry_reference(bars, datetime(2026, 8, 27, 0, 0, tzinfo=JST), False)
     check("時刻不明→翌営業日始値", (d, p) == ("2026-08-28", 104.0), (d, p, rule))
@@ -294,8 +303,8 @@ def test_entry_reference() -> None:
     ev = tk._eval_call(bars, noon, True, "強気", [], True)
     check("proxy 行に is_proxy が立つ", ev["is_proxy"] is True, ev)
     ev2 = tk._eval_call(bars, datetime(2026, 8, 26, 16, 0, tzinfo=JST), True, "強気")
-    check("判定確定日時を大引けで記録",
-          ev2.get("resolved_30_at", "").endswith("15:00:00+09:00"), ev2.get("resolved_30_at"))
+    check("判定確定日時を大引け (15:30) で記録",
+          ev2.get("resolved_30_at", "").endswith("15:30:00+09:00"), ev2.get("resolved_30_at"))
     check("proxy でない行は is_proxy=False", ev2["is_proxy"] is False)
 
 
@@ -303,7 +312,7 @@ def test_entry_reference() -> None:
 def test_point_in_time() -> None:
     print("8. チャンネル実績は時点情報のみ")
     def h(d, hit):
-        return {"resolved_at": f"{d}T15:00:00+09:00", "hit": hit}
+        return {"resolved_at": f"{d}T15:30:00+09:00", "hit": hit}
     stats = {"ch": {"history": [
         h("2026-01-10", True), h("2026-01-20", True), h("2026-02-01", True),
         h("2026-02-10", True), h("2026-02-20", True),
@@ -355,6 +364,7 @@ def test_providers() -> None:
 # ── 11. 外部プロセスの隔離実行 ────────────────────────────────────────
 def test_isolation() -> None:
     print("11. 外部エージェント CLI の隔離")
+    import tempfile
     import time
     from pathlib import Path
 
@@ -375,25 +385,37 @@ def test_isolation() -> None:
     check("引数は環境変数で上書きできる", ex._sandbox_args(["codex"]) == ["--read-only"])
     os.environ.pop("TIPS_LLM_SANDBOX_ARGS", None)
 
-    p = ex._run_isolated(["sh", "-c", "pwd"], "", 10)
+    # 子プロセスは sh ではなく Python 自身で起動する (Windows でも同じテストが走る)
+    def py(code: str) -> list[str]:
+        return [sys.executable, "-c", code]
+
+    p = ex._run_isolated(py("import os;print(os.getcwd())"), "", 30)
     cwd = p.stdout.strip()
     check("cwd は空の一時ディレクトリ (リポジトリではない)",
-          cwd != str(Path(__file__).parent) and "tips_llm_" in cwd, cwd)
-    p = ex._run_isolated(["sh", "-c", "ls -a | wc -l"], "", 10)
-    check("作業ディレクトリは空", p.stdout.strip() in ("2", "3"), p.stdout)
-    p = ex._run_isolated(["sh", "-c", "cat"], "hello-stdin", 10)
+          cwd != str(Path(__file__).resolve().parent) and "tips_llm_" in cwd, cwd)
+    p = ex._run_isolated(py("import os;print(len(os.listdir('.')))"), "", 30)
+    check("作業ディレクトリは空", p.stdout.strip() == "0", p.stdout)
+    p = ex._run_isolated(py("import sys;sys.stdout.write(sys.stdin.read())"),
+                         "hello-stdin", 30)
     check("stdin が渡る", p.stdout.strip() == "hello-stdin", p.stdout)
 
-    marker = Path(os.environ.get("TMPDIR", "/tmp")) / f"tips_kill_{os.getpid()}.txt"
+    # 孫プロセスを産む子を 1 秒で打ち切り、孫が生き残っていないことを確認する。
+    # 孫は 3 秒後に marker を書くので、停止できていれば marker は現れない。
+    marker = Path(tempfile.gettempdir()) / f"tips_kill_{os.getpid()}.txt"
     marker.unlink(missing_ok=True)
+    grandchild = (f"import time,pathlib;time.sleep(3);"
+                  f"pathlib.Path({str(marker)!r}).write_text('x')")
+    parent = (f"import subprocess,sys,time;"
+              f"subprocess.Popen([sys.executable,'-c',{grandchild!r}]);"
+              f"time.sleep(20)")
     t0 = time.time()
     try:
-        ex._run_isolated(["sh", "-c", f"(sleep 3; echo x > {marker}) & wait"], "", 1)
+        ex._run_isolated(py(parent), "", 1)
         check("タイムアウトで失敗にする", False, "例外が出なかった")
     except RuntimeError as e:
         check("タイムアウトで失敗にする", "タイムアウト" in str(e), str(e)[:60])
-    check("タイムアウトは待ち続けない", time.time() - t0 < 3, time.time() - t0)
-    time.sleep(3.5)
+    check("タイムアウトは待ち続けない", time.time() - t0 < 10, time.time() - t0)
+    time.sleep(4)
     check("子孫プロセスも停止している", not marker.exists(),
           "孫プロセスが生き残ってファイルを作った")
     marker.unlink(missing_ok=True)
@@ -437,7 +459,7 @@ def test_fallback_marking() -> None:
 def test_stats_exclusion() -> None:
     print("13. proxy / heuristic を正式集計から除外")
     base = {"channel": "ch", "hit_30": True, "ret_30": 5.0,
-            "resolved_30_at": "2026-05-01T15:00:00+09:00"}
+            "resolved_30_at": "2026-05-01T15:30:00+09:00"}
     rows = [
         {**base, "entry_rule": tk.RULE_NEXT_OPEN, "is_proxy": False,
          "extraction_backend": "cli", "requires_review": False},
@@ -453,12 +475,59 @@ def test_stats_exclusion() -> None:
     check("見解の総数は保持", st["calls"] == 3, st)
 
 
+# ── 14. Windows コンソール (cp932) 互換 ─────────────────────────────
+def test_windows_console() -> None:
+    print("14. Windows コンソール (cp932) 互換")
+    import io
+    import youtube_tips as ytips
+
+    glyphs = "✓ ⚠ ■ ★ · ─ →"          # 進捗表示に使っている記号
+    buf, orig = io.BytesIO(), sys.stdout
+    w = io.TextIOWrapper(buf, encoding="cp932", newline="")
+    try:
+        sys.stdout = w
+        raised = ""
+        try:
+            print(glyphs)      # 対策前はここで UnicodeEncodeError になる
+            w.flush()
+        except UnicodeEncodeError as e:
+            raised = str(e)
+    finally:
+        sys.stdout = orig
+    check("対策なしの cp932 では記号が出せない (前提の確認)", bool(raised), "落ちなかった")
+
+    buf2 = io.BytesIO()
+    w2 = io.TextIOWrapper(buf2, encoding="cp932", newline="")
+    try:
+        sys.stdout = w2
+        ytips._safe_console()
+        ok = True
+        try:
+            print(glyphs)
+            w2.flush()
+        except UnicodeEncodeError:
+            ok = False
+    finally:
+        sys.stdout = orig
+    check("_safe_console 適用後は落ちない", ok)
+    check("出力自体は続く", "■" in buf2.getvalue().decode("cp932", "replace"))
+
+    for mod in ("youtube_tips", "tips_track", "yt_transcript", "tips_extract"):
+        m = __import__(mod)
+        check(f"{mod} に _safe_console がある", hasattr(m, "_safe_console"))
+
+
 def main() -> int:
+    for stream in (sys.stdout, sys.stderr):     # Windows cp932 対策
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
     for fn in (test_transcript_parsing, test_schema_validation, test_injection,
                test_command_safety, test_scores, test_cross_check,
                test_entry_reference, test_point_in_time, test_symbol_lookup,
                test_providers, test_isolation, test_fallback_marking,
-               test_stats_exclusion):
+               test_stats_exclusion, test_windows_console):
         fn()
     print()
     if _fails:

@@ -361,7 +361,7 @@ def _call_cli(prompt: str, model: str) -> str:
     # CLAUDE.md 探索やツール定義が乗らないので、要約タスクとしては最小コストで済む。
     # プロンプトは stdin のみ (引数に字幕を載せない)。
     # 抽出はテキスト処理だけなので全ツールを禁止し、空の一時ディレクトリで走らせる。
-    cmd = ["claude", "-p", "--output-format", "json",
+    cmd = [shutil.which("claude") or "claude", "-p", "--output-format", "json",
            "--model", model,
            "--system-prompt", SYSTEM_PROMPT,
            "--strict-mcp-config",              # MCP サーバを読み込まない
@@ -394,7 +394,9 @@ def _sandbox_args(argv: list[str]) -> list[str]:
     if override is not None and override.strip():
         return shlex.split(override)
 
-    name    = os.path.basename(argv[0])
+    # Windows の codex.cmd / codex.exe でもプロファイルに当てる
+    # (区切りは / と \ の両方を見る。どの OS 上でも同じ判定になるように)
+    name    = os.path.splitext(re.split(r"[\\/]", argv[0])[-1])[0].lower()
     profile = SANDBOX_PROFILES.get(name)
     if profile is None or (override is not None and not override.strip()):
         if os.environ.get("TIPS_LLM_ALLOW_UNSANDBOXED") == "1":
@@ -424,32 +426,65 @@ def _sandbox_env() -> dict:
             "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy",
             "no_proxy", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
             "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "OPENAI_API_KEY",
-            "CODEX_HOME", "XDG_CONFIG_HOME")
+            "CODEX_HOME", "XDG_CONFIG_HOME",
+            # Windows で子プロセスを起動するために最低限必要なもの
+            "SYSTEMROOT", "SystemRoot", "COMSPEC", "ComSpec", "PATHEXT",
+            "WINDIR", "windir", "TEMP", "TMP", "USERPROFILE", "APPDATA",
+            "LOCALAPPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMDATA",
+            "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE")
     return {k: v for k, v in os.environ.items() if k in keep}
+
+
+IS_WINDOWS = os.name == "nt"
+
+
+def _kill_tree(p: subprocess.Popen) -> None:
+    """子プロセスとその子孫をまとめて停止する (POSIX / Windows 両対応)。"""
+    if IS_WINDOWS:
+        # taskkill /T で子孫ごと落とす (CREATE_NEW_PROCESS_GROUP と併用)
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)],
+                           capture_output=True, timeout=15)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    else:
+        try:
+            os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    if p.poll() is None:
+        try:
+            p.kill()
+        except OSError:
+            pass
 
 
 def _run_isolated(argv: list[str], stdin_text: str, timeout: int) -> subprocess.CompletedProcess:
     """
     空の一時ディレクトリを作業ディレクトリにして子プロセスを起動する。
     ・gobot リポジトリを cwd にしない (字幕由来の指示でファイルを触られないため)
-    ・start_new_session=True でプロセスグループを分け、タイムアウト時は
-      **子孫プロセスごと** SIGKILL する
+    ・POSIX は start_new_session、Windows は CREATE_NEW_PROCESS_GROUP で
+      プロセスグループを分け、タイムアウト時は **子孫プロセスごと** 停止する
+      (POSIX: killpg + SIGKILL / Windows: taskkill /F /T)
     """
     with tempfile.TemporaryDirectory(prefix="tips_llm_") as work:
         env = _sandbox_env()
-        env["TMPDIR"] = work
+        env["TMPDIR"] = work          # POSIX
+        env["TEMP"] = env["TMP"] = work   # Windows
+        spawn = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if IS_WINDOWS
+                 else {"start_new_session": True})
         p = subprocess.Popen(argv, cwd=work, env=env, text=True,
                              encoding="utf-8", errors="replace",
                              stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                             stderr=subprocess.PIPE, start_new_session=True)
+                             stderr=subprocess.PIPE, **spawn)
         try:
             out, err = p.communicate(stdin_text, timeout=timeout)
         except subprocess.TimeoutExpired:
+            _kill_tree(p)
             try:
-                os.killpg(os.getpgid(p.pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError, OSError):
-                p.kill()
-            out, err = p.communicate()
+                out, err = p.communicate(timeout=15)
+            except subprocess.TimeoutExpired:
+                out, err = "", ""
             raise RuntimeError(f"{os.path.basename(argv[0])} がタイムアウト "
                                f"({timeout}秒) — 子プロセスごと終了しました") from None
         return subprocess.CompletedProcess(argv, p.returncode, out, err)
@@ -494,8 +529,10 @@ def _call_cmd(prompt: str, model: str) -> str:
     if not c:
         raise RuntimeError("TIPS_LLM_CMD (または --llm-cmd) が未設定です")
     argv = shlex.split(c)
-    if not argv or shutil.which(argv[0]) is None:
+    exe  = shutil.which(argv[0]) if argv else None
+    if not argv or exe is None:
         raise RuntimeError(f"外部コマンドが見つかりません: {c}")
+    argv[0] = exe          # Windows の .cmd/.bat も直接起動できるようフルパスに
 
     argv = argv + _sandbox_args(argv)
     full = f"{SYSTEM_PROMPT}\n\n{prompt}"
@@ -956,7 +993,20 @@ def extract_tips(transcript: str, meta: dict, backend: str = "auto",
 
 
 # ── CLI (単体デバッグ用) ───────────────────────────────────────────────
+def _safe_console() -> None:
+    """
+    Windows の cp932 コンソールで「✓」等が UnicodeEncodeError にならないようにする。
+    (エンコードできない文字は ? に置き換えて出力を続ける)
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def main() -> None:
+    _safe_console()
     ap = argparse.ArgumentParser(description="字幕テキスト → 株の見解/Tips 抽出 (デバッグ用)")
     ap.add_argument("--file", required=True, help="字幕テキスト or yt_transcript の JSON")
     ap.add_argument("--backend", default="auto",

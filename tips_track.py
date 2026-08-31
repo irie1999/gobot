@@ -10,13 +10,15 @@ youtube_tips.py が貯めた calls (銘柄への売買見解) を、実際の株
   1. **基準価格は「公開後に現実に買える最初の価格」**。公開時刻で場合分けする:
 
        寄り付き前 (< 09:00 JST) に公開 → その日の始値
-       ザラ場中   (09:00-15:00)  に公開 → 公開後最初の分足の始値
+       ザラ場中   (09:00-15:30)  に公開 → 公開後最初の分足の始値
                                           分足が取れなければ **翌営業日の始値**
-       引け後     (>= 15:00)     に公開 → 翌営業日の始値
+       引け後     (>= 15:30)     に公開 → 翌営業日の始値
        公開時刻が不明 (日付のみ)        → 翌営業日の始値 (最も保守的)
 
      **ザラ場公開に「当日終値」は使わない。** 10 時公開の動画に 15 時の終値を
      当てると、公開時点では知り得ない価格を参照することになり未来情報になる。
+     大引けは 2024-11-05 から 15:30 (それ以前は 15:00) で、market_close() が
+     日付ごとに切り替える。
      分足 (yfinance の 5 分足は直近 60 日程度しか取れない) が使える場合だけ
      「公開後最初の足の始値」を使い、それ以外は翌営業日始値へ寄せる。
 
@@ -26,7 +28,7 @@ youtube_tips.py が貯めた calls (銘柄への売買見解) を、実際の株
 
   2. **チャンネル実績はその時点で確定していた結果だけで計算する**
      (`source_reliability_asof`)。判定が確定した日時 (resolved_at) は
-     「評価期間の最終足の大引け (15:00 JST)」として **タイムゾーン付きで** 記録し、
+     「評価期間の最終足の大引け (JST)」として **タイムゾーン付きで** 記録し、
      `resolved_at < 動画の公開日時` を満たすものだけを集計する。
      後から判明した成績を過去動画に逆適用すると、バックテストに未来情報が混ざる。
 
@@ -55,6 +57,7 @@ import argparse
 import csv
 import json
 import pickle
+import sys
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
@@ -73,7 +76,16 @@ THRESHOLD_PRICED_IN = 8.0           # 公開後にこれ以上動いていたら
 NEUTRAL_SCORE       = 50.0          # 実績不明のときの source_reliability
 
 MARKET_OPEN  = time(9, 0)
-MARKET_CLOSE = time(15, 0)
+# 東証の大引けは 2024-11-05 から 15:30 (それ以前は 15:00)。
+# https://www.jpx.co.jp/equities/trading/domestic/01.html
+MARKET_CLOSE        = time(15, 30)
+MARKET_CLOSE_LEGACY = time(15, 0)
+CLOSE_CHANGE_DATE   = date(2024, 11, 5)
+
+
+def market_close(day: date) -> time:
+    """その日の大引け時刻。2024-11-05 以降は 15:30、それ以前は 15:00。"""
+    return MARKET_CLOSE if day >= CLOSE_CHANGE_DATE else MARKET_CLOSE_LEGACY
 INTRADAY_LOOKBACK_DAYS = 55        # yfinance の分足が遡れる範囲 (60日弱)
 INTRADAY_INTERVAL      = "5m"
 
@@ -182,7 +194,7 @@ def entry_reference(bars: list[tuple[date, float, float]], published: datetime,
         return same[0][0].strftime("%Y-%m-%d"), same[0][1], RULE_SAME_OPEN
 
     # ザラ場中 → 公開後最初の分足始値 (無ければ翌営業日始値)
-    if has_time and MARKET_OPEN <= published.time() < MARKET_CLOSE:
+    if has_time and MARKET_OPEN <= published.time() < market_close(pub_d):
         for ts, op in (intraday or []):
             if ts > published:
                 return ts.strftime("%Y-%m-%d"), float(op), RULE_INTRADAY
@@ -199,8 +211,9 @@ def entry_reference(bars: list[tuple[date, float, float]], published: datetime,
 
 
 def _resolved_at(bar_day: date) -> str:
-    """判定が確定した日時 = その足の大引け (15:00 JST) を ISO8601 で返す。"""
-    return datetime.combine(bar_day, MARKET_CLOSE, tzinfo=JST).isoformat(timespec="seconds")
+    """判定が確定した日時 = その足の大引け (JST) を ISO8601 で返す。"""
+    return datetime.combine(bar_day, market_close(bar_day),
+                            tzinfo=JST).isoformat(timespec="seconds")
 
 
 def parse_dt(v) -> datetime | None:
@@ -217,7 +230,7 @@ def parse_dt(v) -> datetime | None:
             dt = datetime.strptime(txt[:10], "%Y-%m-%d")
         except ValueError:
             return None
-        dt = datetime.combine(dt.date(), MARKET_CLOSE)
+        dt = datetime.combine(dt.date(), market_close(dt.date()))
     return dt.astimezone(JST) if dt.tzinfo else dt.replace(tzinfo=JST)
 
 
@@ -335,7 +348,8 @@ def update(days: int = 0, verbose: bool = True,
             rows.append({**base, "status": "no_data"})
             continue
         intraday = []
-        if c["has_time"] and MARKET_OPEN <= c["published"].time() < MARKET_CLOSE:
+        if c["has_time"] and \
+                MARKET_OPEN <= c["published"].time() < market_close(c["published"].date()):
             intraday = _fetch_intraday(sym, c["published"].date())
         rows.append({**base, **_eval_call(bars, c["published"], c["has_time"],
                                           c["stance"], intraday, allow_proxy)})
@@ -511,7 +525,20 @@ def report(by_symbol: bool = False) -> None:
           "(source_reliability_asof)。未来情報は入れない。")
 
 
+def _safe_console() -> None:
+    """
+    Windows の cp932 コンソールで「✓」等が UnicodeEncodeError にならないようにする。
+    (エンコードできない文字は ? に置き換えて出力を続ける)
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def main() -> None:
+    _safe_console()
     ap = argparse.ArgumentParser(description="YouTube 発言の事後検証・チャンネル実績")
     ap.add_argument("--update", action="store_true", help="株価を取得して検証を更新")
     ap.add_argument("--report", action="store_true", help="集計結果を表示")

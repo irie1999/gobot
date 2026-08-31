@@ -503,7 +503,20 @@ def fetch_transcript(video_id: str, use_cache: bool = True) -> dict:
 
 
 # ── CLI (単体デバッグ用) ───────────────────────────────────────────────
+def _safe_console() -> None:
+    """
+    Windows の cp932 コンソールで「✓」等が UnicodeEncodeError にならないようにする。
+    (エンコードできない文字は ? に置き換えて出力を続ける)
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def main() -> None:
+    _safe_console()
     ap = argparse.ArgumentParser(description="YouTube 字幕取得 (デバッグ用)")
     ap.add_argument("--list",  metavar="URL", help="チャンネル/再生リストの動画一覧")
     ap.add_argument("--feed",  metavar="UCID", help="公式RSSで新着検知 (チャンネルID)")
