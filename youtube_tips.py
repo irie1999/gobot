@@ -305,6 +305,7 @@ def process_one(v: dict, args, verbose: bool = True) -> dict | None:
     # 発信者の実績は「この動画の公開時刻より前に確定していた判定」だけを使う。
     # (後から判明した成績を過去動画に逆適用すると未来情報が混ざる)
     # 公開時刻が分かればそれを、日付しか無ければその日の 00:00 JST を使う (保守的)。
+    # 公開日時が全く不明な動画には実績を使わない (source_reliability_asof が None を返す)。
     pub_iso = (meta.get("published_at") or "").strip()
     if not pub_iso:
         ud = meta.get("upload_date") or ""

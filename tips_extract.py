@@ -437,16 +437,110 @@ def _sandbox_env() -> dict:
 
 IS_WINDOWS = os.name == "nt"
 
+# Windows Job Object 用の定数 (kernel32)
+_JOB_KILL_ON_CLOSE   = 0x2000     # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+_JOB_EXTENDED_LIMIT  = 9          # JobObjectExtendedLimitInformation
 
-def _kill_tree(p: subprocess.Popen) -> None:
-    """子プロセスとその子孫をまとめて停止する (POSIX / Windows 両対応)。"""
+
+def _win_create_job():
+    """
+    子孫プロセスをまとめて始末するための Job Object を作る (Windows のみ)。
+
+    taskkill /T は「親子関係が残っていること」に依存するため、孫が先に
+    切り離される (親が先に終了する / DETACHED で起動される) と取り逃がす。
+    Job Object に入れておけば、TerminateJobObject でも、ハンドルを閉じた時点でも
+    (KILL_ON_JOB_CLOSE) ジョブ内の**全プロセス**が確実に停止する。
+
+    戻り値: (job ハンドル, kernel32) / 失敗時は (None, None)
+    """
+    if not IS_WINDOWS:
+        return None, None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        # 64bit でハンドルが切り詰められないよう restype/argtypes を明示する
+        k32.CreateJobObjectW.restype  = wintypes.HANDLE
+        k32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+        k32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int,
+                                                wintypes.LPVOID, wintypes.DWORD]
+        k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        k32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+        class IO_COUNTERS(ctypes.Structure):
+            _fields_ = [("ReadOperationCount", ctypes.c_ulonglong),
+                        ("WriteOperationCount", ctypes.c_ulonglong),
+                        ("OtherOperationCount", ctypes.c_ulonglong),
+                        ("ReadTransferCount", ctypes.c_ulonglong),
+                        ("WriteTransferCount", ctypes.c_ulonglong),
+                        ("OtherTransferCount", ctypes.c_ulonglong)]
+
+        class BASIC_LIMIT(ctypes.Structure):
+            _fields_ = [("PerProcessUserTimeLimit", wintypes.LARGE_INTEGER),
+                        ("PerJobUserTimeLimit", wintypes.LARGE_INTEGER),
+                        ("LimitFlags", wintypes.DWORD),
+                        ("MinimumWorkingSetSize", ctypes.c_size_t),
+                        ("MaximumWorkingSetSize", ctypes.c_size_t),
+                        ("ActiveProcessLimit", wintypes.DWORD),
+                        ("Affinity", ctypes.c_size_t),        # ULONG_PTR
+                        ("PriorityClass", wintypes.DWORD),
+                        ("SchedulingClass", wintypes.DWORD)]
+
+        class EXTENDED_LIMIT(ctypes.Structure):
+            _fields_ = [("BasicLimitInformation", BASIC_LIMIT),
+                        ("IoInfo", IO_COUNTERS),
+                        ("ProcessMemoryLimit", ctypes.c_size_t),
+                        ("JobMemoryLimit", ctypes.c_size_t),
+                        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                        ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+        job = k32.CreateJobObjectW(None, None)
+        if not job:
+            return None, None
+        info = EXTENDED_LIMIT()
+        info.BasicLimitInformation.LimitFlags = _JOB_KILL_ON_CLOSE
+        if not k32.SetInformationJobObject(job, _JOB_EXTENDED_LIMIT,
+                                           ctypes.byref(info), ctypes.sizeof(info)):
+            k32.CloseHandle(job)
+            return None, None
+        return job, k32
+    except Exception:
+        return None, None
+
+
+def _win_assign_job(job, k32, p: subprocess.Popen) -> bool:
+    """起動した子プロセスを Job Object に入れる。"""
+    if not job or not k32:
+        return False
+    try:
+        return bool(k32.AssignProcessToJobObject(job, int(p._handle)))
+    except Exception:
+        return False
+
+
+def _kill_tree(p: subprocess.Popen, job=None, k32=None) -> None:
+    """
+    子プロセスとその子孫をまとめて停止する (POSIX / Windows 両対応)。
+
+    Windows: Job Object があれば TerminateJobObject (孫が切り離されていても確実)。
+             取れなかった場合のみ taskkill /F /T にフォールバックする。
+    POSIX  : プロセスグループへ SIGKILL。
+    """
     if IS_WINDOWS:
-        # taskkill /T で子孫ごと落とす (CREATE_NEW_PROCESS_GROUP と併用)
-        try:
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)],
-                           capture_output=True, timeout=15)
-        except (OSError, subprocess.SubprocessError):
-            pass
+        killed = False
+        if job and k32:
+            try:
+                killed = bool(k32.TerminateJobObject(job, 1))
+            except Exception:
+                killed = False
+        if not killed:
+            try:
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)],
+                               capture_output=True, timeout=15)
+            except (OSError, subprocess.SubprocessError):
+                pass
     else:
         try:
             os.killpg(os.getpgid(p.pid), signal.SIGKILL)
@@ -462,32 +556,46 @@ def _kill_tree(p: subprocess.Popen) -> None:
 def _run_isolated(argv: list[str], stdin_text: str, timeout: int) -> subprocess.CompletedProcess:
     """
     空の一時ディレクトリを作業ディレクトリにして子プロセスを起動する。
+
     ・gobot リポジトリを cwd にしない (字幕由来の指示でファイルを触られないため)
-    ・POSIX は start_new_session、Windows は CREATE_NEW_PROCESS_GROUP で
-      プロセスグループを分け、タイムアウト時は **子孫プロセスごと** 停止する
-      (POSIX: killpg + SIGKILL / Windows: taskkill /F /T)
+    ・POSIX は start_new_session でプロセスグループを分け、タイムアウト時に
+      killpg + SIGKILL で子孫ごと停止する
+    ・Windows は Job Object (KILL_ON_JOB_CLOSE) に入れて起動し、タイムアウト時は
+      TerminateJobObject で子孫ごと停止する。正常終了時もジョブを閉じた時点で
+      residue が残らない。Job Object が使えない環境では taskkill /F /T に落ちる
     """
-    with tempfile.TemporaryDirectory(prefix="tips_llm_") as work:
-        env = _sandbox_env()
-        env["TMPDIR"] = work          # POSIX
-        env["TEMP"] = env["TMP"] = work   # Windows
-        spawn = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if IS_WINDOWS
-                 else {"start_new_session": True})
-        p = subprocess.Popen(argv, cwd=work, env=env, text=True,
-                             encoding="utf-8", errors="replace",
-                             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                             stderr=subprocess.PIPE, **spawn)
-        try:
-            out, err = p.communicate(stdin_text, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            _kill_tree(p)
+    job, k32 = _win_create_job()
+    try:
+        with tempfile.TemporaryDirectory(prefix="tips_llm_") as work:
+            env = _sandbox_env()
+            env["TMPDIR"] = work              # POSIX
+            env["TEMP"] = env["TMP"] = work   # Windows
+            spawn = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if IS_WINDOWS
+                     else {"start_new_session": True})
+            p = subprocess.Popen(argv, cwd=work, env=env, text=True,
+                                 encoding="utf-8", errors="replace",
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, **spawn)
+            if IS_WINDOWS:
+                _win_assign_job(job, k32, p)
             try:
-                out, err = p.communicate(timeout=15)
+                out, err = p.communicate(stdin_text, timeout=timeout)
             except subprocess.TimeoutExpired:
-                out, err = "", ""
-            raise RuntimeError(f"{os.path.basename(argv[0])} がタイムアウト "
-                               f"({timeout}秒) — 子プロセスごと終了しました") from None
-        return subprocess.CompletedProcess(argv, p.returncode, out, err)
+                _kill_tree(p, job, k32)
+                try:
+                    out, err = p.communicate(timeout=15)
+                except subprocess.TimeoutExpired:
+                    out, err = "", ""
+                raise RuntimeError(f"{os.path.basename(argv[0])} がタイムアウト "
+                                   f"({timeout}秒) — 子プロセスごと終了しました") from None
+            return subprocess.CompletedProcess(argv, p.returncode, out, err)
+    finally:
+        # KILL_ON_JOB_CLOSE: ハンドルを閉じた時点で、生き残りがいれば道連れに落ちる
+        if job and k32:
+            try:
+                k32.CloseHandle(job)
+            except Exception:
+                pass
 
 
 # ── バックエンド 3: 任意の外部コマンド (codex など) ───────────────────

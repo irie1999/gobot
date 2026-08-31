@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 os.environ.pop("YT_CAPTION_PROVIDERS", None)
 os.environ.pop("TIPS_LLM_CMD", None)
@@ -338,6 +338,34 @@ def test_point_in_time() -> None:
           tk.source_reliability_asof("old", "2026-08-01", {"old": {"history": [
               {"judged_at": "2026-01-01", "hit": True}] * 5}}) is not None)
 
+    # ── 公開日時が「日付のみ」の動画 ──
+    day = {"ch2": {"source_reliability": 90.0, "history": [
+        {"resolved_at": f"2026-03-{d:02d}T15:30:00+09:00", "hit": True} for d in range(1, 11)]}}
+    only_date = tk.source_reliability_asof("ch2", "2026-03-10", day)
+    with_time = tk.source_reliability_asof("ch2", "2026-03-10T21:00:00+09:00", day)
+    check("日付のみの公開日は 00:00 JST 扱い (当日確定分を含めない)",
+          only_date is not None and with_time is not None and only_date < with_time,
+          (only_date, with_time))
+    check("YYYYMMDD 形式でも読める",
+          tk.source_reliability_asof("ch2", "20260310", day) == only_date)
+    check("公開日時が不明なら実績を使わない (未来情報を返さない)",
+          tk.source_reliability_asof("ch2", None, day) is None)
+    check("集計値が欲しいときは明示的に allow_overall",
+          tk.source_reliability_asof("ch2", None, day, allow_overall=True) == 90.0)
+    check("壊れた日時なら実績を使わない",
+          tk.source_reliability_asof("ch2", "not-a-date", day) is None)
+
+    # 日付のみの文字列は用途で時刻の埋め方が変わる
+    check("resolved_at の日付のみは大引けで補完 (2024-11-05 以降 15:30)",
+          tk.parse_dt("2026-02-19").strftime("%H:%M") == "15:30",
+          tk.parse_dt("2026-02-19"))
+    check("resolved_at の日付のみ (旧ルール) は 15:00",
+          tk.parse_dt("2024-10-01").strftime("%H:%M") == "15:00", tk.parse_dt("2024-10-01"))
+    check("asof の日付のみは 00:00",
+          tk.parse_dt("2026-02-19", default_time=time(0, 0)).strftime("%H:%M") == "00:00")
+    check("時刻付きはそのまま",
+          tk.parse_dt("2026-02-19T10:30:00+09:00").strftime("%H:%M") == "10:30")
+
 
 # ── 9. 銘柄名寄せ ──────────────────────────────────────────────────────
 def test_symbol_lookup() -> None:
@@ -419,6 +447,52 @@ def test_isolation() -> None:
     check("子孫プロセスも停止している", not marker.exists(),
           "孫プロセスが生き残ってファイルを作った")
     marker.unlink(missing_ok=True)
+
+    # ── Windows 経路の分岐を (POSIX 上で) 論理的に検証する ──
+    # 実機の挙動は確認できないが、「Job Object を優先し、駄目なら taskkill」
+    # という分岐そのものはここで固定できる。
+    import subprocess as sp
+
+    class FakeProc:
+        pid = 4242
+        _handle = 1234
+
+        def poll(self):
+            return 0        # すでに終了している扱い (kill は呼ばれない)
+
+    class FakeK32:
+        def __init__(self, ok):
+            self.ok, self.calls = ok, []
+
+        def TerminateJobObject(self, job, code):
+            self.calls.append((job, code))
+            return 1 if self.ok else 0
+
+    orig_win, orig_run = ex.IS_WINDOWS, sp.run
+    taskkill: list = []
+    try:
+        ex.IS_WINDOWS = True
+        sp.run = lambda argv, **kw: taskkill.append(argv) or sp.CompletedProcess(argv, 0)
+        k32 = FakeK32(ok=True)
+        ex._kill_tree(FakeProc(), job=99, k32=k32)
+        check("Windows: Job Object があれば TerminateJobObject で止める",
+              k32.calls == [(99, 1)] and not taskkill, (k32.calls, taskkill))
+
+        k32b = FakeK32(ok=False)
+        ex._kill_tree(FakeProc(), job=99, k32=k32b)
+        check("Windows: Job Object が失敗したら taskkill /F /T に落ちる",
+              taskkill and "/T" in taskkill[-1] and "4242" in taskkill[-1], taskkill)
+
+        taskkill.clear()
+        ex._kill_tree(FakeProc(), job=None, k32=None)
+        check("Windows: Job Object を取れなければ最初から taskkill",
+              taskkill and taskkill[-1][0] == "taskkill", taskkill)
+    finally:
+        ex.IS_WINDOWS, sp.run = orig_win, orig_run
+
+    check("POSIX では Job Object を作らない", ex._win_create_job() == (None, None))
+    check("job 無しでも kill_tree は例外を出さない",
+          ex._kill_tree(FakeProc(), None, None) is None)
 
 
 # ── 12. heuristic フォールバックの扱い ───────────────────────────────

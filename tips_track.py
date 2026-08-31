@@ -57,6 +57,7 @@ import argparse
 import csv
 import json
 import pickle
+import re
 import sys
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
@@ -216,37 +217,38 @@ def _resolved_at(bar_day: date) -> str:
                             tzinfo=JST).isoformat(timespec="seconds")
 
 
-def parse_dt(v) -> datetime | None:
-    """ISO8601 (または YYYY-MM-DD) を JST の datetime に。日付だけなら大引け扱い。"""
+def parse_dt(v, default_time: time | None = None) -> datetime | None:
+    """
+    ISO8601 / YYYY-MM-DD / YYYYMMDD を JST の datetime にする。
+
+    **日付しか無いときの時刻の埋め方は用途で変える。**
+      判定確定日時 (resolved_at) … 既定 = その日の大引け (判定が確定するのは引け)
+      動画の公開日時 (asof)      … time(0, 0) を渡す (その日の実績は使わない = 保守的)
+
+    `datetime.fromisoformat("2026-02-19")` は 00:00 を返してしまうため、
+    日付だけの表記はパース前に判別する。
+    """
     if isinstance(v, datetime):
         return v.astimezone(JST) if v.tzinfo else v.replace(tzinfo=JST)
     txt = str(v or "").strip()
     if not txt:
         return None
+
+    # 日付のみ (2026-02-19 / 20260219) は時刻を明示的に補う
+    m = re.fullmatch(r"(\d{4})-?(\d{2})-?(\d{2})", txt)
+    if m:
+        try:
+            d = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            return None
+        t = default_time if default_time is not None else market_close(d)
+        return datetime.combine(d, t, tzinfo=JST)
+
     try:
         dt = datetime.fromisoformat(txt.replace("Z", "+00:00"))
     except ValueError:
-        try:
-            dt = datetime.strptime(txt[:10], "%Y-%m-%d")
-        except ValueError:
-            return None
-        dt = datetime.combine(dt.date(), market_close(dt.date()))
+        return None
     return dt.astimezone(JST) if dt.tzinfo else dt.replace(tzinfo=JST)
-
-
-def _parse_published(rec: dict) -> tuple[datetime | None, bool]:
-    """(公開日時, 時刻が判明しているか) を返す。"""
-    iso = (rec.get("published_at") or "").strip()
-    if iso:
-        try:
-            dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-            return (dt.astimezone(JST) if dt.tzinfo else dt.replace(tzinfo=JST)), True
-        except ValueError:
-            pass
-    try:
-        return datetime.strptime(rec.get("upload_date", ""), "%Y%m%d").replace(tzinfo=JST), False
-    except ValueError:
-        return None, False
 
 
 # ── 1 件の評価 ─────────────────────────────────────────────────────────
@@ -441,13 +443,21 @@ def load_channel_stats() -> dict:
 
 
 def source_reliability_asof(channel: str, asof: str | datetime | None = None,
-                            stats: dict | None = None) -> float | None:
+                            stats: dict | None = None,
+                            allow_overall: bool = False) -> float | None:
     """
     **asof 時点で既に確定していた** 判定だけを使って発信者の実績を算出する。
 
     asof には「これから採点する動画の公開日時」を渡すこと (タイムゾーン付き推奨)。
     比較は日付ではなく時刻まで見て `resolved_at < asof` を保証する
     (同じ日に確定した判定を、その日の朝に公開された動画へ使わないため)。
+
+    **公開日時が日付しか無い動画** は、その日の 00:00 JST として扱う。
+    当日中に確定した判定を混ぜないための保守的な扱い。
+    **公開日時が全く分からない動画には実績を使わない** (None を返す)。
+    現時点の集計値を過去の動画へ当てると未来情報になるため、
+    それが欲しい場合だけ allow_overall=True を明示すること (レポート表示用)。
+
     None を返したら実績不明 (呼び出し側は 50 = 中立として扱う)。
     """
     st = (stats if stats is not None else load_channel_stats()).get(channel)
@@ -455,10 +465,10 @@ def source_reliability_asof(channel: str, asof: str | datetime | None = None,
         return None
     hist = st.get("history") or []
     if asof is None:
-        return st.get("source_reliability")
-    asof_dt = parse_dt(asof)
+        return st.get("source_reliability") if allow_overall else None
+    asof_dt = parse_dt(asof, default_time=time(0, 0))   # 日付のみ → その日の 00:00
     if asof_dt is None:
-        return st.get("source_reliability")
+        return st.get("source_reliability") if allow_overall else None
 
     past = []
     for h in hist:
@@ -544,7 +554,9 @@ def main() -> None:
     ap.add_argument("--report", action="store_true", help="集計結果を表示")
     ap.add_argument("--by-symbol", action="store_true", help="銘柄別に集計")
     ap.add_argument("--days", type=int, default=0, help="直近N日の動画のみ検証")
-    ap.add_argument("--asof", help="この時点の実績を表示 (YYYY-MM-DD または ISO8601)")
+    ap.add_argument("--asof",
+                    help="この時点の実績を表示 (YYYY-MM-DD または ISO8601)。"
+                         "日付だけ渡した場合はその日の 00:00 JST として扱う")
     ap.add_argument("--intraday-proxy", action="store_true",
                     help="分足が無いザラ場公開を当日終値で参考評価する "
                          "(未来情報を含むため正式集計からは除外される)")

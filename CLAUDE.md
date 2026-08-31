@@ -694,7 +694,7 @@ tips_track.py        30日/90日後の騰落率で答え合わせ → 発信者�
 | `tips_extract.py` | LLM 抽出・スキーマ検証・信頼度ルーブリック・相互チェック |
 | `symbol_lookup.py` | 企業名 ⇄ 証券コードの名寄せ (推測でコードを作らせない) |
 | `tips_track.py` | 事後検証・発信者実績 (時点情報) |
-| `test_youtube_tips.py` | 自己テスト 108 チェック (ネットワーク・pandas・LLM 不要、Windows/macOS/Linux 共通)。**改修したら必ず実行** |
+| `test_youtube_tips.py` | 自己テスト 122 チェック (ネットワーク・pandas・LLM 不要、Windows/macOS/Linux 共通)。**改修したら必ず実行** |
 
 データは `youtube_tips_data/` 配下 (gitignore 済み):
 `transcripts/` (字幕キャッシュ)、`manual/` (手動取込)、`youtube_tips.jsonl` (全レコード)、
@@ -800,7 +800,10 @@ LLM には真偽フラグだけを答えさせ、点数は Python 側で決定�
   `TIPS_LLM_SANDBOX_ARGS` で引数を指定するか、承知のうえで
   `TIPS_LLM_ALLOW_UNSANDBOXED=1` を設定する
 - 環境変数は最小限に絞る (`_sandbox_env`)
-- `start_new_session=True` でプロセスグループを分け、**タイムアウト時は子孫ごと SIGKILL**
+- 子孫プロセスの停止: POSIX は `start_new_session` + `killpg`/SIGKILL、
+  **Windows は Job Object (KILL_ON_JOB_CLOSE)** に入れて起動し
+  `TerminateJobObject` で止める (親子関係が切れた孫も確実に落ちる。
+  Job Object を取れない環境のみ `taskkill /F /T` に落ちる)
 - 字幕・タイトルは argv に載せず **stdin だけ**で渡す。`shell=True` は使わない
 
 ネットワークそのものは LLM API に到達するため切れない。厳密に遮断したい場合は
@@ -848,6 +851,9 @@ LLM には真偽フラグだけを答えさせ、点数は Python 側で決定�
   タイムゾーン付きで記録し、`source_reliability_asof(channel, 公開日時)` が
   `resolved_at < 公開日時` を満たすものだけを集計する (日付ではなく時刻で比較。
   同じ日の大引けに確定した判定を、その日の朝公開の動画には使わない)。
+  **公開日時が日付しか無い動画はその日の 00:00 JST 扱い** (当日確定分を混ぜない)。
+  **公開日時が全く不明な動画には実績を使わない** (現在の集計値を過去へ当てない。
+  集計値が必要な表示用途だけ `allow_overall=True` を明示する)。
   heuristic 抽出 / requires_review / proxy の行は集計から除外。
   判定済 5 件未満は「不明」(=50 中立)、20 件で満額反映。
 
