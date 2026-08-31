@@ -216,13 +216,20 @@ ap.add_argument("--no-moc-on-exit", action="store_true",
 #     置けない」排他があったが、N は損切りを置かないので衝突が消える。
 #   ⛔ そして _verify の ATR チェックは N では**必ず落ちる**(バリアが無いので
 #     ATR を持たない)。2026-08-31 の記録実行で合格2件が両方止まった。
-ap.add_argument("--n-limit-ticks", type=int, default=2,
-                help="N の保護指値を始値から何ティック下に置くか(既定2)。"
-                     "⛔ bp で固定しない — 呼値は銘柄区分で変わる(§18.31)")
-ap.add_argument("--n-limit-max-bp", type=float, default=10.0,
-                help="N の保護指値の許容幅の上限(bp・既定10)。ティックが粗い"
-                     "銘柄で下げすぎないための頭打ち。N に残るのは +21.9bp なので"
-                     "ここが広いと約定した時点でエッジを失う")
+# ⛔ 既定 0 = **指値は始値ちょうど**(2026-08-31 レビュー④の指摘を受けて)。
+#   ・N に残るのは +21.9bp。往復の執行許容は 7.5bp。10bp でも広すぎる
+#   ・そして ticks.json が無い環境では floor_to_tick_sym が**粗いテーブルに
+#     フォールバック**するので、1ティックが 30〜60bp になりうる
+#   ・バックテストは「始値で建てる」前提なので、始値ちょうどが最も忠実
+#   ・約定しなければその銘柄を建てないだけで、損はしない
+#   下げたいときだけ --n-limit-ticks 1 のように明示する。
+ap.add_argument("--n-limit-ticks", type=int, default=0,
+                help="N の保護指値を始値から何ティック下に置くか"
+                     "(既定0 = 始値ちょうど)。⛔ bp で固定しない —"
+                     " 呼値は銘柄区分で変わる(§18.31)")
+ap.add_argument("--n-limit-max-bp", type=float, default=7.5,
+                help="N の保護指値の許容幅の上限(bp・既定7.5 = 往復の執行許容)。"
+                     "ティックが粗い銘柄で下げすぎないための頭打ち")
 ap.add_argument("--n-mode", action="store_true",
                 help="新方式N として発注する(§18.54)。候補=n_signals_<日付>.csv"
                      " / +100bp / 100株固定 / バリアなし(引けMOCだけ) /"
@@ -698,9 +705,16 @@ cli.connect()
 #       急落しているときだけ約定しない = 掴まされない。
 #     決済は lss_exit_watcher が **実約定価格基準**で OCO を組み直す
 #     (ordered_signals_lss.csv の atr/sm/tm を読む / §18.32)。
-# ★ 送信を試みた銘柄(例外で OrderId が取れなかったものも含む)。N の settle が
-#   「自分の注文だけ」を追うための集合。⛔ get_positions を舐めない根拠。
-_N_SENT: set = set()
+# ★ N の settle が「**自分の注文だけ**」を追うための台帳 (2026-08-31 レビュー①)。
+#   ⛔ 銘柄コードで拾ってはいけない。同じ銘柄に手動注文や他戦略の注文があると
+#     それも取消・数量加算の対象になる。OrderId で追う。
+_N_ORD: dict = {}      # OrderId -> 銘柄。send_sell の成功応答から
+_N_SENT: set = set()   # 送信を試みた銘柄(記録・警告用)
+_N_UNK: set = set()    # 送信で例外 = OrderId 不明。差分から復元する対象
+_N_PRE: set = set()    # 最初の送信の**直前**にあった注文IDのスナップショット
+_N_FAIL: set = set()   # 復元不能などの致命的な事象
+_N_PRE_TAKEN = [False]
+_N_SETTLE_OK = [True]   # settle が全部そろったか。False なら非ゼロ終了
 _EX = {"left": args.budget * 1e4, "n": 0, "yen": 0.0, "ng": 0,
        "cap": (args.max_notional or args.budget) * 1e4}
 _ORDER_LOG = None
@@ -793,75 +807,125 @@ def _verify(_r, _lim: float, _qty: int) -> str:
     return ""
 
 
+def _n_adopt_unknown() -> None:
+    """送信で例外が出て OrderId が取れなかった銘柄を、注文IDの差分から拾う。
+
+    ⛔ 例外の中身によっては **注文が通っている**。N には watcher が無いので、
+      ここで拾えないと無防備な建玉がそのまま残る(2026-08-31 レビュー①)。
+    """
+    if not _N_UNK:
+        return
+    try:
+        _now = cli.get_orders() or []
+    except Exception as _e:
+        print(f"    ⛔ 注文照会に失敗し、送信タイムアウト分を復元できません: {_e}\n"
+              f"       対象 {sorted(_N_UNK)} — **kabu で手動確認してください**",
+              flush=True)
+        _N_FAIL.add("unknown_unrecoverable")
+        return
+    for _o in _now:
+        _oid = str(_o.get("ID") or "")
+        _sy = str(_o.get("Symbol", "")).upper().removesuffix(".T").split(".")[0]
+        if not _oid or _oid in _N_PRE or _oid in _N_ORD:
+            continue
+        if _sy not in _N_UNK:
+            continue
+        if int(_o.get("CashMargin") or 0) != 2:
+            continue
+        if str(_o.get("Side") or "1") != "1":      # 1=売
+            continue
+        _N_ORD[_oid] = _sy
+        print(f"    ⚠ {_sy} 送信タイムアウトだったが注文 {_oid} が成立していた"
+              f" → settle の対象に入れます", flush=True)
+
+
 def _n_settle(_timeout: float = 60.0, _every: float = 3.0) -> bool:
-    """N: 自分の注文を終端まで追い、**確定した約定数量ぶんだけ** 引けMOC を置く。
+    """N: **自分の注文IDだけ**を終端まで追い、確定数量ぶんの引けMOC を置く。
 
     ⛔ J のやり方(未約定を取消 → 一部約定は残す → 建玉を舐めて MOC)は N では
       使えない。watcher が無いので後始末する者がいないため:
         ① 一部約定を残すと、MOC の数量を決めた**後に**残りが約定して無防備
         ② 建玉を舐めると、他戦略・手動の売建にも MOC を出し、その既存の
-           返済注文を取り消す(kabu の信用返済は発注時に既存を取消す/§18.48⑦③)
-      (2026-08-31 レビュー ①②)
+           返済注文を取り消す(§18.48 ⑦③)
 
-    ここでは:
-      ① 自分が送信を試みた銘柄(_N_SENT)の新規売り注文だけを対象にする
-      ② 未約定・**一部約定を問わず**全部 取消す
-      ③ 全部が終端(State>=5)になるまで待つ ← ここで数量が動かなくなる
-      ④ 確定した CumQty を銘柄単位で合算して MOC(1銘柄1本)
-      ⑤ 受付(Result==0)を確認。1件でも欠けたら大きく警告する
+    ⛔⛔ そして **銘柄コードで拾ってはいけない**(2026-08-31 レビュー①)。
+      同じ銘柄に手動注文や他戦略の注文があると、それも取消・数量加算の
+      対象になる。ここでは send_sell の応答で得た **OrderId** だけを追う。
 
-    戻り: 全銘柄で MOC を置けたら True
+    ⛔ fail-open にしない(同レビュー③)。照会失敗・非終端が残る・取消失敗・
+      MOC失敗 のどれか1つでも False を返す。呼出側は非ゼロ終了する。
     """
-    print(f"\n  ── N: 注文を終端まで追って引け成行(MOC)を置きます "
-          f"{'─' * 26}", flush=True)
-    if not _N_SENT:
+    print(f"\n  ── N: 自分の注文を終端まで追って引け成行(MOC)を置きます "
+          f"{'─' * 22}", flush=True)
+    _n_adopt_unknown()
+    if not _N_ORD:
+        if _N_SENT:
+            print(f"    ⛔⛔ 送信した {len(_N_SENT)}銘柄の注文IDが1つも取れて"
+                  f"いません。**建玉が残っている可能性があります**。\n"
+                  f"       kabu ステーションで確認し、売建があれば手動で"
+                  f"引け成行を出してください: {sorted(_N_SENT)}", flush=True)
+            return False
         print("    (送信した注文がありません)", flush=True)
         return True
 
-    def _mine_orders() -> list:
-        _out = []
-        for _o in (cli.get_orders() or []):
-            _sy = str(_o.get("Symbol", "")).upper().removesuffix(".T").split(".")[0]
-            if _sy not in _N_SENT:
-                continue
-            if int(_o.get("CashMargin") or 0) != 2:      # 信用新規売りのみ
-                continue
-            _out.append((_sy, _o))
-        return _out
+    _ok = True
 
-    # ── ②③ 取消して終端まで待つ ─────────────────────────────────
-    _t0, _cxl, _last = time.time(), set(), []
+    def _mine() -> list:
+        return [(_N_ORD[str(_o.get('ID'))], _o) for _o in (cli.get_orders() or [])
+                if str(_o.get("ID") or "") in _N_ORD]
+
+    # ── 取消して終端まで待つ ─────────────────────────────────────
+    _t0, _cxl_n, _last, _seen_all = time.time(), {}, [], False
     while True:
         try:
-            _last = _mine_orders()
+            _last = _mine()
+            _seen_all = True
         except Exception as _ge:
             print(f"    ⛔ 注文照会に失敗: {_ge}", flush=True)
-            break
+            _ok = False                      # ⛔ fail-open にしない
+            if time.time() - _t0 > _timeout:
+                break
+            time.sleep(_every)
+            continue
         _open = [(s, o) for s, o in _last
                  if int(o.get("OrderState") or o.get("State") or 0) < 5]
         if not _open:
             break
         for _sy, _o in _open:
             _oid = str(_o.get("ID") or "")
-            if not _oid or _oid in _cxl:
+            # ⛔ 取消は「1回出して終わり」にしない。応答が失敗なら再送する。
+            if _cxl_n.get(_oid, 0) >= 3:
                 continue
-            _cxl.add(_oid)
             try:
                 _rr = cli.cancel_order(_oid)
-                _cq = int(float(_o.get("CumQty") or 0))
-                print(f"    ✂ {_sy} 残りを取消 (約定 {_cq}株 / "
-                      f"Result={_rr.get('Result')})", flush=True)
+                _cxl_n[_oid] = _cxl_n.get(_oid, 0) + 1
+                if _rr.get("Result") == 0 or _rr.get("_dry_run"):
+                    print(f"    ✂ {_sy} 残りを取消 "
+                          f"(約定 {int(float(_o.get('CumQty') or 0))}株)",
+                          flush=True)
+                else:
+                    print(f"    ⚠ {_sy} 取消の応答が失敗: {_rr} "
+                          f"(再試行 {_cxl_n[_oid]}/3)", flush=True)
             except Exception as _ce:
-                print(f"    ⚠ {_sy} 取消で例外: {_ce}", flush=True)
+                _cxl_n[_oid] = _cxl_n.get(_oid, 0) + 1
+                print(f"    ⚠ {_sy} 取消で例外: {_ce} "
+                      f"(再試行 {_cxl_n[_oid]}/3)", flush=True)
         if time.time() - _t0 > _timeout:
             print(f"    ⛔⛔ {_timeout:.0f}秒たっても終端になりません "
-                  f"({len(_open)}件が未終了)。**数量が確定していないまま**"
-                  f"MOC を置きます。kabu の注文照会で必ず目視してください",
+                  f"({len(_open)}件)。**約定数量が確定していません**。\n"
+                  f"       この後 MOC を出しますが、数量が足りない可能性が"
+                  f"あります。kabu の注文照会で必ず目視してください",
                   flush=True)
+            _ok = False                      # ⛔ 成功扱いにしない
             break
         time.sleep(_every)
 
-    # ── ④ 確定した約定数量を銘柄単位で合算 ───────────────────────
+    if not _seen_all:
+        print(f"    ⛔⛔ 注文の状態を一度も取得できませんでした。"
+              f"**手動確認が必要です**", flush=True)
+        return False
+
+    # ── 確定した約定数量を銘柄単位で合算 ─────────────────────────
     _fill: dict = {}
     for _sy, _o in _last:
         _cq = int(float(_o.get("CumQty") or 0))
@@ -869,33 +933,34 @@ def _n_settle(_timeout: float = 60.0, _every: float = 3.0) -> bool:
             _fill[_sy] = _fill.get(_sy, 0) + _cq
     if not _fill:
         print("    (約定した建玉がありません。MOC は不要です)", flush=True)
-        return True
+        return _ok
 
-    # ── ⑤ MOC を置いて受付を確認 ─────────────────────────────────
-    _ok = _ng = 0
+    # ── MOC を置いて受付を確認 ───────────────────────────────────
+    _mok = _mng = 0
     for _sy, _q in sorted(_fill.items()):
         try:
             _r = cli.send_moc(_sy, qty=_q, side="buy", cash_margin=3)
         except Exception as _me:
-            _ng += 1
+            _mng += 1
             print(f"    ⛔ {_sy} {_q}株 MOC で例外: {_me}", flush=True)
             continue
         if _r.get("Result") == 0 or _r.get("_dry_run"):
-            _ok += 1
+            _mok += 1
             print(f"    ✅ {_sy} {_q}株 引け成行を設置", flush=True)
         else:
-            _ng += 1
+            _mng += 1
             print(f"    ⛔ {_sy} {_q}株 MOC 設置失敗: {_r}", flush=True)
-    if _ng:
-        print(f"\n  ⛔⛔ **{_ng}件 は引け成行を置けませんでした**。\n"
+    if _mng:
+        print(f"\n  ⛔⛔ **{_mng}件 は引け成行を置けませんでした**。\n"
               f"     N には watcher がありません。このままだと**持ち越し**に\n"
               f"     なります(2026-08-19 は8建玉で -36,800円)。\n"
               f"     kabu ステーションで手動で引け成行を出してください。",
               flush=True)
+        _ok = False
     else:
-        print(f"    [MOC] {_ok}件すべて設置しました。決済はこれで完結します",
+        print(f"    [MOC] {_mok}件すべて設置しました。決済はこれで完結します",
               flush=True)
-    return _ng == 0
+    return _ok
 
 
 def _seed_arm(_sym: str, _open_time: str) -> None:
@@ -1053,6 +1118,16 @@ def _order_rows(_sel: list) -> None:
         #   例外で OrderId が取れなくても、注文が通っている可能性がある。
         #   N はここを拾えないと settle の対象から漏れて無防備になる。
         _N_SENT.add(str(_r["symbol"]))
+        # ★ 最初の送信の**直前**に、既にある注文IDを控える。送信でタイムアウト
+        #   したとき「増えたID = 自分のもの」で復元するため(レビュー①)。
+        if args.n_mode and args.execute and not _N_PRE_TAKEN[0]:
+            _N_PRE_TAKEN[0] = True
+            try:
+                _N_PRE.update(str(_o.get("ID") or "")
+                              for _o in (cli.get_orders() or []))
+            except Exception as _pe:
+                print(f"    ⚠ 送信前の注文一覧を取れません({_pe})。"
+                      f"タイムアウト時の復元が効かなくなります", flush=True)
         try:
             _res = cli.send_sell(int(_r["symbol"]), qty=_qty, price=_lim,
                                  cash_margin=2,          # 信用新規(売建)
@@ -1064,8 +1139,15 @@ def _order_rows(_sel: list) -> None:
             # ⚠ 例外の中身によっては **注文が通っている**可能性がある
             #   (送信後にタイムアウト等)。打ち消さずに pending のまま残し、
             #   watcher に守らせる。余分な記録は無害。
-            print(f"     (記録は pending のまま残します。注文が通っていた場合に"
-                  f"watcher が守れるように)", flush=True)
+            if args.n_mode:
+                # ⛔ N には watcher が無い。ここで諦めると無防備な建玉が残る。
+                #   settle が注文IDの差分から復元する(レビュー①)。
+                _N_UNK.add(str(_r["symbol"]))
+                print(f"     ⛔ N: 注文が通っている可能性があります。"
+                      f"settle で注文IDの差分から復元を試みます", flush=True)
+            else:
+                print(f"     (記録は pending のまま残します。注文が通っていた"
+                      f"場合に watcher が守れるように)", flush=True)
             continue
         # 成功判定は lss_budget_cap と揃える(Result==0 かつ OrderId あり)。
         # OrderId が無いのに Result=0 のケースを通すと、発注できていないのに
@@ -1078,6 +1160,9 @@ def _order_rows(_sel: list) -> None:
                   flush=True)
             _log("failed")     # 上で書いた pending を打ち消す
             continue
+        # ★ N は **OrderId を控える**。settle はこのIDだけを追う(レビュー①)。
+        if args.n_mode and _res.get("OrderId"):
+            _N_ORD[str(_res["OrderId"])] = str(_r["symbol"])
         _EX["n"] += 1
         _EX["yen"] += _need
         _r["ordered"] = 1
@@ -1518,8 +1603,10 @@ if args.execute:
     # 無い時刻・無い値段で持つことになる(§18.9 の鉄則違反)。
     # ⛔ 一部約定(CumQty>0)は残す。取り消すと建玉だけ残って watcher が
     #    決済できなくなる。cancel_gap_orders._budget_sweep と同じ方針。
-    if _EX["n"] and args.n_mode:
-        _n_settle()
+    # ⛔ 条件を _EX["n"] にしない(レビュー②)。全件が送信タイムアウトだと
+    #   _EX["n"] は0のままで、**不明な実注文を残したまま終了**してしまう。
+    if args.n_mode and (_N_ORD or _N_SENT or _N_UNK):
+        _N_SETTLE_OK[0] = _n_settle()
     elif _EX["n"]:
         _ACTIVE = {1, 2, 3, 4}          # 5=終了 は対象外
         try:
@@ -1692,3 +1779,15 @@ except Exception as _ae:
     print(f"  ⚠ 朝の記録の保存に失敗({_ae})。"
           f"k_signals_*.csv / k_paper_*.csv は残っているので、"
           f"`python k_morning_archive.py --backfill` で作り直せます", flush=True)
+
+
+# ⛔⛔ N: 決済の設置が1件でも欠けたら **非ゼロで終了する**(2026-08-31 レビュー④)。
+#   ランチャー(.\nexec)が errorlevel を見て「done」を出さないようにするため。
+#   ⚠ ここを黙って0で終わると、無防備な建玉があるのに成功したように見える。
+if args.n_mode and args.execute and not _N_SETTLE_OK[0]:
+    print("\n⛔⛔ **N の決済設置が完了していません**。\n"
+          "   kabu ステーションで売建を確認し、引け成行が無いものは\n"
+          "   手動で出してください。**放置すると持ち越しになります**。",
+          flush=True)
+    sys.exit(1)
+

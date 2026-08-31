@@ -19,8 +19,12 @@ REM                                      top 50 by 20-day turnover)
 REM   pass        open >= prev close + 100bp, NO UPPER GAP LIMIT,
 REM               and the 09:00 open must itself be 1,000-6,000 yen
 REM   size        100 SHARES, FIXED
-REM   entry       protective limit 2 TICKS below the open (never a market
-REM               order, and never a wide percentage - N only has ~21.9bp)
+REM   entry       protective limit AT THE OPEN (--n-limit-ticks 0). N only
+REM               has ~21.9bp and the round-trip tolerance is 7.5bp, so any
+REM               wider limit gives the edge away the moment it fills. The
+REM               backtest assumes a fill AT the open, so this is the
+REM               faithful choice; a name that does not fill is simply not
+REM               traded, which costs nothing.
 REM   exit        CLOSING MOC ONLY. no stop, no target, NO WATCHER.
 REM
 REM HOW THE EXIT IS MADE SAFE (this is the part that took two rounds)
@@ -104,7 +108,10 @@ echo.
 echo ============================================================
 echo  done. after the close (15:40 or later):
 echo.
-echo      .\fills
+echo      .\fills --no-compare
+echo.
+echo  (--no-compare because .\fills reads J's detail rows for the backtest
+echo   comparison; for N that would compare against the wrong population.)
 echo.
 echo  and for the paper comparison:
 echo      python n_paper.py --close --budget 400 --seq-sides n
@@ -117,7 +124,7 @@ echo .\nexec --go               REAL orders, live account
 echo .\nexec --go --budget 50   first day: small
 echo.
 echo   N = prev-day +1.753 pct, open ^>= prev close +100bp, sell 100 shares
-echo       at 2 ticks below the open, close with a closing MOC.
+echo       at the open price, close with a closing MOC.
 echo       No stop, no target, no watcher, no upper gap limit.
 echo   Use .\norder for paper recording (that one cannot order at all).
 goto :eof
