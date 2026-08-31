@@ -694,7 +694,7 @@ tips_track.py        30日/90日後の騰落率で答え合わせ → 発信者�
 | `tips_extract.py` | LLM 抽出・スキーマ検証・信頼度ルーブリック・相互チェック |
 | `symbol_lookup.py` | 企業名 ⇄ 証券コードの名寄せ (推測でコードを作らせない) |
 | `tips_track.py` | 事後検証・発信者実績 (時点情報) |
-| `test_youtube_tips.py` | 自己テスト 122 チェック (ネットワーク・pandas・LLM 不要、Windows/macOS/Linux 共通)。**改修したら必ず実行** |
+| `test_youtube_tips.py` | 自己テスト 146 チェック (ネットワーク・pandas・LLM 不要、Windows/macOS/Linux 共通)。**改修したら必ず実行** |
 
 データは `youtube_tips_data/` 配下 (gitignore 済み):
 `transcripts/` (字幕キャッシュ)、`manual/` (手動取込)、`youtube_tips.jsonl` (全レコード)、
@@ -922,6 +922,11 @@ cron 例 (朝夕2回 + 週末に検証):
 - **heuristic の結果を LLM 抽出と同列に扱わない。** 一致ボーナスにも実績集計にも入れない。
 - **エージェント CLI を隔離せずに走らせない。** 未知の CLI は既定で実行を拒否する。
 - **大引けを 15:00 と決め打ちしない。** 2024-11-05 から 15:30。`market_close(日付)` を使う。
+- **`tips_track` / `youtube_tips` を直したら `test_youtube_tips.py` の
+  結合テスト (§15 相当のグループ) が本番経路を通ることを確認する。**
+  単体テストだけだと `load_calls()` のような「実データを読む関数」の欠落を見逃す
+  (実際に `_parse_published` の消し忘れで NameError を出した)。
+  `pip install pyflakes` を入れておくと undefined name を自動検出できる。
 - **CLI の進捗表示を print する前に `_safe_console()` を呼ぶ。** Windows の cp932
   コンソールでは `✓` 等が UnicodeEncodeError になるため。
 - **`--llm-cmd` に動画由来の文字列を混ぜない。** 設定値だけを渡す。

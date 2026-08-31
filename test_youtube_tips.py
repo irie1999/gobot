@@ -21,6 +21,8 @@ Windows / macOS / Linux のいずれでも同じ内容が走る (外部シェル
  12. フォールバック  … heuristic を成功扱いにせず、一致ボーナスも与えないか
  13. 集計除外        … proxy / heuristic の行を正式な実績から外すか
  14. Windows 互換    … cp932 コンソールで記号を出しても落ちないか
+ 15. 結合テスト      … 空でない JSONL を実際に読み書きし、本番経路を通す
+ 16. 静的チェック    … undefined name (関数の消し忘れ等) が無いか ※pyflakes 任意
 """
 
 from __future__ import annotations
@@ -490,7 +492,13 @@ def test_isolation() -> None:
     finally:
         ex.IS_WINDOWS, sp.run = orig_win, orig_run
 
-    check("POSIX では Job Object を作らない", ex._win_create_job() == (None, None))
+    job, k32 = ex._win_create_job()          # ← 実際に動いている OS で確認する
+    if ex.IS_WINDOWS:
+        check("Windows: Job Object を作成できる", bool(job) and k32 is not None, (job, k32))
+        if job and k32:
+            k32.CloseHandle(job)
+    else:
+        check("POSIX では Job Object を作らない", (job, k32) == (None, None), (job, k32))
     check("job 無しでも kill_tree は例外を出さない",
           ex._kill_tree(FakeProc(), None, None) is None)
 
@@ -591,6 +599,184 @@ def test_windows_console() -> None:
         check(f"{mod} に _safe_console がある", hasattr(m, "_safe_console"))
 
 
+# ── 15. 実データ経路の結合テスト ─────────────────────────────────────
+def _sample_records() -> list[dict]:
+    """youtube_tips.jsonl と同じ形のレコード (公開日時のパターンを網羅)。"""
+    def call(ticker="7203", verified=True, stance="強気"):
+        return {"ticker": ticker, "company": "トヨタ自動車", "code_verified": verified,
+                "stance": stance, "action": "押し目買い", "time_horizon": "数週間",
+                "entry_condition": "2800円", "target_price": "3100円",
+                "stop_condition": "安値割れ", "catalysts": ["円安"], "risks": [],
+                "evidence_type": ["業績"], "speaker_claim": "決算が良い",
+                "ai_note": "", "timestamp_seconds": 70,
+                "flags": {k: False for k in ex.RUBRIC}, "quote_confidence": 0.8,
+                "extraction_confidence": 70, "agreement_score": None,
+                "agreement": "未実施", "agreement_detail": {},
+                "source_reliability": 50.0, "reference_score": 60,
+                "requires_review": False}
+
+    base = {"channel": "テストch", "url": "https://www.youtube.com/watch?v=AAAAAAAAAAA",
+            "duration": 900, "view_count": 100, "lang": "ja", "source": "manual",
+            "chars": 500, "processed_at": "2026-02-03T21:00:00+09:00",
+            "backend": "cli", "extraction_backend": "cli", "llm_attempts": 1,
+            "llm_failure_reason": "", "requires_review": False, "model": "m",
+            "noise": False, "promo": False, "market_view": "中立",
+            "summary": ["要約1"], "tips": [{"category": "損切り", "tip": "買う前に決める",
+                                           "detail": "", "timestamp": "1:10",
+                                           "actionable": True, "confidence": 0.8}]}
+    return [
+        # 時刻付きの公開日時 (ザラ場)
+        {**base, "video_id": "AAAAAAAAAAA", "title": "ザラ場公開",
+         "upload_date": "20260202", "published_at": "2026-02-02T10:30:00+09:00",
+         "calls": [call()]},
+        # 日付だけの公開日時
+        {**base, "video_id": "BBBBBBBBBBB", "title": "日付のみ",
+         "upload_date": "20260203", "published_at": "", "calls": [call()]},
+        # 公開日時が全く不明 → 評価対象外
+        {**base, "video_id": "CCCCCCCCCCC", "title": "日付不明",
+         "upload_date": "", "published_at": "", "calls": [call()]},
+        # 銘柄コード未確認 → 評価対象外
+        {**base, "video_id": "DDDDDDDDDDD", "title": "コード未確認",
+         "upload_date": "20260204", "published_at": "",
+         "calls": [call(ticker="9999", verified=False)]},
+        # 字幕取得に失敗した動画 (calls なし + error)
+        {**base, "video_id": "EEEEEEEEEEE", "title": "字幕なし", "upload_date": "20260205",
+         "published_at": "", "calls": [], "tips": [], "error": "字幕なし",
+         "backend": "none", "extraction_backend": "none", "noise": True},
+    ]
+
+
+def test_integration_jsonl() -> None:
+    print("15. 実データ経路の結合テスト (空でない JSONL)")
+    import contextlib
+    import io
+    import json
+    import tempfile
+    from pathlib import Path
+
+    import youtube_tips as ytips
+
+    recs = _sample_records()
+    bars = []
+    d0 = date(2026, 1, 5)
+    for i in range(240):                       # 240 営業日ぶんの擬似日足
+        day = d0 + timedelta(days=i)
+        px = 2000.0 + i * 5
+        bars.append((day, px, px + 10))
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        jsonl = tmp / "youtube_tips.jsonl"
+        jsonl.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in recs),
+                         encoding="utf-8")
+
+        keep = (tk.JSONL, tk.DATA_DIR, tk.TRACK_CSV, tk.CHANNEL_STATS,
+                tk._fetch_adjusted, tk.to_bars)
+        tk.JSONL, tk.DATA_DIR = jsonl, tmp
+        tk.TRACK_CSV, tk.CHANNEL_STATS = tmp / "call_tracking.csv", tmp / "channel_stats.json"
+        tk._fetch_adjusted = lambda sym: "fake-df"        # pandas を使わない
+        tk.to_bars = lambda df: bars
+        try:
+            # --- load_calls: ここが _parse_published を呼ぶ本番経路 ---
+            calls = tk.load_calls()
+            ids = sorted(c["video_id"] for c in calls)
+            check("load_calls が実データを読める (NameError を出さない)",
+                  ids == ["AAAAAAAAAAA", "BBBBBBBBBBB"], ids)
+            by_id = {c["video_id"]: c for c in calls}
+            check("時刻付きの公開日時は has_time=True", by_id["AAAAAAAAAAA"]["has_time"] is True)
+            check("日付のみは has_time=False かつ 00:00 JST",
+                  by_id["BBBBBBBBBBB"]["has_time"] is False
+                  and by_id["BBBBBBBBBBB"]["published"].strftime("%H:%M") == "00:00")
+            check("公開日時が不明な動画は評価対象から外れる", "CCCCCCCCCCC" not in by_id)
+            check("コード未確認の見解は評価対象から外れる", "DDDDDDDDDDD" not in by_id)
+            check("期間フィルタが効く", tk.load_calls(days=1) == [])
+
+            # --- update: CSV / channel_stats まで書ける ---
+            with contextlib.redirect_stdout(io.StringIO()):
+                out = tk.update(verbose=False)
+            check("update が 2 件を評価する", len(out) == 2, len(out))
+            check("call_tracking.csv が書かれる", tk.TRACK_CSV.exists())
+            check("channel_stats.json が書かれる", tk.CHANNEL_STATS.exists())
+            rules = {r["entry_rule"] for r in out}
+            check("ザラ場公開に当日終値を使わない",
+                  tk.RULE_PROXY not in rules and tk.RULE_NEXT_INTRA in rules, rules)
+            check("日付のみは翌営業日始値", tk.RULE_NEXT_OPEN in rules, rules)
+            check("resolved_at がタイムゾーン付きで入る",
+                  all("+09:00" in (r.get("resolved_30_at") or "") for r in out), out[0])
+
+            # --- 書かれた stats から時点実績が引ける ---
+            stats = tk.load_channel_stats()
+            check("channel_stats を読み戻せる", "テストch" in stats, list(stats))
+            check("公開日時不明には実績を使わない",
+                  tk.source_reliability_asof("テストch", None, stats) is None)
+
+            # --- report が落ちない ---
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                tk.report()
+                tk.report(by_symbol=True)
+            check("report が実データで動く", "テストch" in buf.getvalue(), buf.getvalue()[:80])
+        finally:
+            (tk.JSONL, tk.DATA_DIR, tk.TRACK_CSV, tk.CHANNEL_STATS,
+             tk._fetch_adjusted, tk.to_bars) = keep
+
+        # --- youtube_tips 側 (レポート経路) ---
+        keep2 = (ytips.JSONL, ytips.DATA_DIR, ytips.CSV_LOG)
+        ytips.JSONL, ytips.DATA_DIR = jsonl, tmp
+        ytips.CSV_LOG = tmp / "youtube_tips_log.csv"
+        try:
+            loaded = ytips.load_records()
+            check("load_records が全件読める", len(loaded) == len(recs), len(loaded))
+            ytips.write_csv(loaded)
+            check("CSV インデックスを書ける", ytips.CSV_LOG.exists())
+            head = ytips.CSV_LOG.read_text(encoding="utf-8-sig").splitlines()[0]
+            check("CSV に抽出由来の列がある",
+                  "extraction_backend" in head and "requires_review" in head, head)
+
+            target = list(loaded.values())
+            html = ytips.build_html(target, None, None, False)
+            check("HTML を生成できる", "<html" in html and "gobot" in html)
+            check("HTML に見解が載る", "トヨタ自動車" in html)
+            check("字幕失敗の動画が失敗欄に出る", "字幕を取得できなかった動画" in html)
+
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                ytips.print_digest(target, None)
+                ytips.print_failures(loaded)
+            out = buf.getvalue()
+            check("digest が動く", "銘柄見解" in out, out[:60])
+            check("failures が動く", "EEEEEEEEEEE" in out, out[:60])
+        finally:
+            ytips.JSONL, ytips.DATA_DIR, ytips.CSV_LOG = keep2
+
+
+# ── 16. 静的チェック (任意) ──────────────────────────────────────────
+MODULES = ("youtube_tips.py", "youtube_sources.py", "yt_transcript.py",
+           "tips_extract.py", "symbol_lookup.py", "tips_track.py",
+           "test_youtube_tips.py")
+
+
+def test_static_check() -> None:
+    print("16. 静的チェック (pyflakes があれば)")
+    import subprocess
+    from pathlib import Path
+
+    here = Path(__file__).resolve().parent
+    files = [str(here / m) for m in MODULES if (here / m).exists()]
+    try:
+        p = subprocess.run([sys.executable, "-m", "pyflakes", *files],
+                           capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        print("  skip pyflakes が無いので省略 (pip install pyflakes で有効)")
+        return
+    if p.returncode != 0 and "No module named" in (p.stderr or ""):
+        print("  skip pyflakes が無いので省略 (pip install pyflakes で有効)")
+        return
+    undefined = [ln for ln in (p.stdout or "").splitlines() if "undefined name" in ln]
+    check("undefined name が無い (関数の消し忘れを検出)", not undefined,
+          "; ".join(undefined[:3]))
+
+
 def main() -> int:
     for stream in (sys.stdout, sys.stderr):     # Windows cp932 対策
         try:
@@ -601,7 +787,8 @@ def main() -> int:
                test_command_safety, test_scores, test_cross_check,
                test_entry_reference, test_point_in_time, test_symbol_lookup,
                test_providers, test_isolation, test_fallback_marking,
-               test_stats_exclusion, test_windows_console):
+               test_stats_exclusion, test_windows_console, test_integration_jsonl,
+               test_static_check):
         fn()
     print()
     if _fails:

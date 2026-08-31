@@ -251,6 +251,31 @@ def parse_dt(v, default_time: time | None = None) -> datetime | None:
     return dt.astimezone(JST) if dt.tzinfo else dt.replace(tzinfo=JST)
 
 
+def _parse_published(rec: dict) -> tuple[datetime | None, bool]:
+    """
+    レコードから (公開日時, 時刻が判明しているか) を返す。
+
+      published_at に時刻がある      → その時刻 / has_time=True
+      published_at が日付だけ        → その日の 00:00 JST / has_time=False
+      published_at が無い (upload_date のみ) → その日の 00:00 JST / has_time=False
+      どちらも無い / 壊れている      → (None, False) … 評価対象から外れる
+
+    has_time=False のときは entry_reference が「翌営業日始値」を選ぶ (最も保守的)。
+    """
+    iso = (rec.get("published_at") or "").strip()
+    if iso:
+        has_clock = bool(re.search(r"\d{1,2}:\d{2}", iso))
+        dt = parse_dt(iso, default_time=time(0, 0))
+        if dt is not None:
+            return dt, has_clock
+    ud = (rec.get("upload_date") or "").strip()
+    if ud:
+        dt = parse_dt(ud, default_time=time(0, 0))
+        if dt is not None:
+            return dt, False
+    return None, False
+
+
 # ── 1 件の評価 ─────────────────────────────────────────────────────────
 def _eval_call(bars: list[tuple[date, float, float]], published: datetime,
                has_time: bool, stance: str,

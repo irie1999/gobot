@@ -155,7 +155,7 @@ def parse_vtt(raw: str) -> list[dict]:
     buf: list[str] = []
 
     def flush():
-        nonlocal buf, cur_start
+        nonlocal buf
         if cur_start is None or not buf:
             buf = []
             return

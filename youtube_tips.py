@@ -75,7 +75,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import symbol_lookup
 import tips_extract as _ex
 import tips_track as _track
 import youtube_sources as _src
