@@ -694,7 +694,7 @@ tips_track.py        30日/90日後の騰落率で答え合わせ → 発信者�
 | `tips_extract.py` | LLM 抽出・スキーマ検証・信頼度ルーブリック・相互チェック |
 | `symbol_lookup.py` | 企業名 ⇄ 証券コードの名寄せ (推測でコードを作らせない) |
 | `tips_track.py` | 事後検証・発信者実績 (時点情報) |
-| `test_youtube_tips.py` | 自己テスト 166 チェック (ネットワーク・pandas・LLM 不要、Windows/macOS/Linux 共通)。**改修したら必ず実行** |
+| `test_youtube_tips.py` | 自己テスト 181 チェック (ネットワーク・pandas・LLM 不要、Windows/macOS/Linux 共通)。**改修したら必ず実行** |
 
 データは `youtube_tips_data/` 配下 (gitignore 済み):
 `transcripts/` (字幕キャッシュ)、`manual/` (手動取込)、`youtube_tips.jsonl` (全レコード)、
@@ -892,6 +892,23 @@ LLM には真偽フラグだけを答えさせ、点数は Python 側で決定�
 (`time_ratio` / `lead_ratio` / `first_sec` / `tail_only` / `spans`)。
 タイムスタンプが無いテキストでは文字位置で近似する。閾値は
 `youtube_tips.PROMO_MAX_RATIO` / `PROMO_LEAD_RATIO`。
+
+**終盤の告知は末尾まで伸ばす** (`TAIL_START_RATIO`)。自動字幕では
+「勉強会の参加方法は…」の後に宣伝語を含まないチャンクが続くため、語を含む
+チャンクだけ数えると 2 分の告知が数秒として計上されてしまう。終盤 (60% 以降) で
+宣伝が始まり、その後に本編復帰 (`CONTENT_PATTERNS` を含むチャンク) が無ければ
+動画末尾までを宣伝ブロックとする。
+
+宣伝が `PROMO_FLAG_RATIO` (15%) 以上を占める動画は、LLM が `promotional` を
+立てなくても **Python 側でフラグを立てて信頼度を -15 する** (減点が過小に
+ならないようにする)。HTML には「宣伝あり (0:45〜 / 全体の24%)」のように
+開始時刻と比率を表示する。
+
+「売買条件が宣伝ブロック内でしか語られていない」の判定は
+`tips_extract.conditions_in_body()` が **本文照合** で行う。
+call の代表タイムスタンプは「銘柄を紹介した時刻」であることが多く、条件が
+語られた時刻とは限らないため、条件文に含まれる価格の数値が宣伝ブロック外の
+チャンクに現れるかで見る (照合できる数値が無ければ `None` = 除外しない)。
 
 銘柄単位の `flags.promotional` (その銘柄の話に絡めた勧誘) は除外理由にせず、
 `extraction_confidence` を -15 するに留める。

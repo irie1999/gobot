@@ -176,13 +176,23 @@ def sanitize_transcript(text: str) -> str:
 # (「宣伝中心か」の最終判断は LLM の promo と併用する)。
 PROMO_PATTERNS = (
     r"(オンライン)?サロン", r"公式\s*LINE", r"LINE\s*(登録|追加|友だち)",
-    r"情報商材", r"無料\s*(プレゼント|配布|セミナー|レポート)", r"有料\s*(note|記事|配信)",
+    r"情報商材", r"無料\s*(プレゼント|配布|セミナー|レポート)", r"有料",
     r"会員(限定|様)", r"メルマガ", r"(概要欄|説明欄)(から|の|に).{0,12}(登録|参加|受け取)",
-    r"入会", r"月額\s*\d", r"特典",
+    r"入会", r"月額\s*\d", r"特典", r"宣伝", r"勉強会", r"参加(方法|者|費)",
+    r"申(し)?込", r"募集", r"セミナー", r"受講", r"講座",
+)
+
+# 「本編に戻った」と判断するための語 (相場・銘柄の具体的な話)
+CONTENT_PATTERNS = (
+    r"\d{3,5}\s*円", r"[1-9]\d{3}(?!\d)", r"損切", r"利確", r"利益確定", r"エントリー",
+    r"チャート", r"決算", r"株価", r"移動平均", r"出来高", r"目標", r"高値", r"安値",
+    r"買い|売り", r"上昇|下落", r"MACD|RSI|ボリンジャー",
 )
 
 
 _TS_MARK = re.compile(r"\[(\d+):(\d{2})(?::(\d{2}))?\]")
+TAIL_START_RATIO = 0.6      # これ以降に始まった宣伝は「終盤の告知」とみなす
+PROMO_FLAG_RATIO = 0.15     # 宣伝がこれ以上を占めたら promotional を立てる (信頼度 -15)
 
 
 def detect_promotion(text: str) -> list[str]:
@@ -225,6 +235,12 @@ def analyze_promotion(transcript: str, duration_sec: float = 0.0) -> dict:
       tail_only   : 宣伝が終盤 (60% 以降) にだけ固まっているか
       spans       : 宣伝ブロックの (開始秒, 終了秒) 一覧
       mentions    : 検出箇所のスニペット
+
+    **終盤の告知は末尾まで伸ばす。** 自動字幕では「勉強会の参加方法は…」の後に
+    宣伝語を含まないチャンクが続くため、語を含むチャンクだけ数えると
+    2 分の告知が数秒として計上されてしまう。終盤 (TAIL_START_RATIO 以降) で
+    宣伝が始まり、その後に本編復帰 (CONTENT_PATTERNS を含むチャンク) が
+    無ければ、動画末尾までを宣伝ブロックとして扱う。
     """
     text = transcript or ""
     mentions = detect_promotion(text)
@@ -260,6 +276,16 @@ def analyze_promotion(transcript: str, duration_sec: float = 0.0) -> dict:
             spans[-1][1] = end                    # 連続する宣伝チャンクは 1 ブロックに
         else:
             spans.append([start, end])
+
+    # 終盤で始まった宣伝は、明確な本編復帰が無い限り末尾まで続くとみなす
+    if spans:
+        last_start = spans[-1][0]
+        if last_start >= total_sec * TAIL_START_RATIO:
+            after = [body for start, body in chunks if start > last_start]
+            resumed = any(any(re.search(cp, b) for cp in CONTENT_PATTERNS) for b in after)
+            if not resumed:
+                spans[-1][1] = total_sec
+                promo_sec = sum(e - s2 for s2, e in spans)
 
     lead_cut = total_sec * 0.2
     lead_sec = sum(max(min(e, lead_cut) - s, 0.0) for s, e in spans)
@@ -856,6 +882,41 @@ def _list(v, n: int = 8, ln: int = 60) -> list[str]:
     return [_str(x, ln) for x in (v or []) if _str(x)][:n]
 
 
+def conditions_in_body(transcript: str, promo: dict, calls: list[dict]) -> bool | None:
+    """
+    売買条件が **宣伝ブロックの外 (本編)** で語られているかを判定する。
+
+      True  … 本編で語られている (登録しなくても条件が分かる)
+      False … 宣伝ブロック内でしか出てこない (条件を知るには登録が要る)
+      None  … 判定できない (照合できる数値が無い等)
+
+    条件文に含まれる価格などの数値が、宣伝ブロック外のチャンクに現れるかで見る。
+    call の代表タイムスタンプは「銘柄を紹介した時刻」であることが多く、
+    条件が語られた時刻とは限らないため、時刻ではなく本文で照合する。
+    """
+    spans = promo.get("spans") or []
+    if not spans:
+        return True
+    nums: set[str] = set()
+    for c in calls:
+        for key in ("entry_condition", "stop_condition", "target_price"):
+            nums.update(re.findall(r"\d[\d,]{2,}", str(c.get(key) or "")))
+    nums = {n.replace(",", "") for n in nums}
+    if not nums:
+        return None
+
+    chunks = _timed_chunks(transcript)
+    if not chunks:
+        return None
+    for start, body in chunks:
+        if any(s <= start < e for s, e in spans):        # 宣伝ブロック内は見ない
+            continue
+        plain = body.replace(",", "")
+        if any(n in plain for n in nums):
+            return True
+    return False
+
+
 def _normalize(d: dict, source_reliability: float | None = None) -> dict:
     src = UNKNOWN_SOURCE_RELIABILITY if source_reliability is None else float(source_reliability)
     out = {
@@ -1142,7 +1203,20 @@ def _mark(out: dict, backend: str, attempts: int, reason: str,
     out["injection_suspected"] = bool(out.get("injection_suspected") or injection)
     out["injection_hits"]      = injection
     out["promo_analysis"]      = promo or {}
+    out["conditions_in_body"]  = out.get("conditions_in_body")
     out["promo_mentions"]      = (promo or {}).get("mentions", [])
+
+    # 宣伝が一定以上を占める動画は、LLM が promotional を立てなくても
+    # ルーブリック上は宣伝ありとして扱う (減点が過小にならないようにする)。
+    if (promo or {}).get("time_ratio", 0.0) >= PROMO_FLAG_RATIO:
+        for c in out.get("calls", []):
+            if not c.get("flags", {}).get("promotional"):
+                c.setdefault("flags", {})["promotional"] = True
+                c["extraction_confidence"] = score_extraction(
+                    c["flags"], c.get("quote_confidence", 0.6))
+                c["reference_score"] = reference_score(
+                    c["extraction_confidence"], c.get("agreement_score"),
+                    c.get("source_reliability"))
     out["requires_review"]     = bool(requires_review or out["injection_suspected"])
     for c in out.get("calls", []):
         c["requires_review"] = out["requires_review"] or c.get("requires_review", False)
@@ -1182,6 +1256,8 @@ def extract_tips(transcript: str, meta: dict, backend: str = "auto",
     if backend == "heuristic":
         out = {**_normalize(_heuristic(transcript, meta), source_reliability),
                "backend": "heuristic", "model": ""}
+        out["conditions_in_body"] = conditions_in_body(transcript, promos,
+                                                       out.get("calls", []))
         return _mark(out, "heuristic", 0, "", True, injection, promos)
 
     stats: dict = {"llm_attempts": 0}
@@ -1195,6 +1271,8 @@ def extract_tips(transcript: str, meta: dict, backend: str = "auto",
                   file=sys.stderr)
         out = {**_normalize(_heuristic(transcript, meta), source_reliability),
                "backend": "heuristic", "model": "", "error": f"{backend}: {str(e)[:200]}"}
+        out["conditions_in_body"] = conditions_in_body(transcript, promos,
+                                                       out.get("calls", []))
         return _mark(out, "heuristic", stats["llm_attempts"], reason, True,
                      injection, promos)
 
@@ -1211,6 +1289,8 @@ def extract_tips(transcript: str, meta: dict, backend: str = "auto",
                 print(f"    ! cross-check({cc}) 失敗: {str(e)[:160]}", file=sys.stderr)
             out["cross_check_error"] = str(e)[:200]
 
+    out["conditions_in_body"] = conditions_in_body(transcript, promos,
+                                                   out.get("calls", []))
     return _mark(out, backend, stats["llm_attempts"], "", False, injection, promos)
 
 

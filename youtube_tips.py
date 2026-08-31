@@ -259,7 +259,8 @@ def curation_verdict(rec: dict) -> tuple[bool, list[str]]:
       ・宣伝が動画の PROMO_MAX_RATIO 以上を占める                 → 除外
       ・冒頭 20% の PROMO_LEAD_RATIO 以上が宣伝 (冒頭誘導型)      → 除外
       ・売買条件が宣伝ブロック内でしか語られていない              → 除外
-        (= 条件を知るには登録が要る動画)
+        (= 条件を知るには登録が要る動画。判定は tips_extract.conditions_in_body
+           が本文照合で行う。call の代表時刻ではなく条件文の数値で見る)
       ・本編に条件があり末尾だけ宣伝                              → **採用**
         (promo_note の警告 + flags.promotional による信頼度 -15)
     """
@@ -290,12 +291,9 @@ def curation_verdict(rec: dict) -> tuple[bool, list[str]]:
                        if c.get("entry_condition") and c.get("stop_condition")]
         if not conditioned:
             reasons.append("エントリー条件と撤退条件が揃った見解が無い")
-        elif pa.get("spans"):
-            timed = [c for c in conditioned if (c.get("timestamp_seconds") or 0) > 0]
-            if timed and all(_in_promo_span(c["timestamp_seconds"], pa["spans"])
-                             for c in timed):
-                # 条件を知るには登録が要る = 材料にならない
-                reasons.append("売買条件が宣伝ブロック内でしか語られていない")
+        elif rec.get("conditions_in_body") is False:
+            # 条件が宣伝ブロック内でしか語られていない = 登録しないと分からない
+            reasons.append("売買条件が宣伝ブロック内でしか語られていない")
         if all((c.get("flags") or {}).get("hindsight_only") for c in calls):
             reasons.append("事後解説のみ")
     return (not reasons), reasons
@@ -406,6 +404,8 @@ def process_one(v: dict, args, verbose: bool = True) -> dict | None:
            "injection_suspected": res.get("injection_suspected", False),
            "injection_hits": res.get("injection_hits", []),
            "promo_mentions": res.get("promo_mentions", []),
+           "promo_analysis": res.get("promo_analysis", {}),
+           "conditions_in_body": res.get("conditions_in_body"),
            "backend": res.get("backend", ""), "model": res.get("model", ""),
            "extraction_backend": res.get("extraction_backend", ""),
            "llm_attempts": res.get("llm_attempts", 0),
@@ -955,6 +955,12 @@ def print_digest(recs: list[dict], category: str | None) -> None:
             if c.get("entry_condition") or c.get("stop_condition"):
                 print(f"      条件: 入={c.get('entry_condition','-')} / "
                       f"退={c.get('stop_condition','-')}")
+
+    notes = [(r.get("title", "")[:28], promo_note(r)) for r in recs if promo_note(r)]
+    if notes:
+        print("\n■ 宣伝の含まれる動画")
+        for title, note in notes:
+            print(f"  ・{title}: {note}")
 
     tips = flatten(recs, "tips")
     if category:

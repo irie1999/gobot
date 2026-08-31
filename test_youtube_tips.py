@@ -855,10 +855,64 @@ def test_curation() -> None:
     ok, why = ytips.curation_verdict(half)
     check("宣伝が大半なら除外", not ok and any("占める" in w for w in why), why)
 
-    inside = rec_with(range(7, 10), ts=480)            # 条件が宣伝ブロック内
+    inside = rec_with(range(7, 10))
+    inside["conditions_in_body"] = False               # 条件が宣伝ブロック内だけ
     ok, why = ytips.curation_verdict(inside)
     check("売買条件が宣伝ブロック内だけなら除外",
           not ok and any("宣伝ブロック内" in w for w in why), why)
+    check("判定できない (None) なら除外しない",
+          ytips.curation_verdict({**rec_with(range(7, 10)),
+                                  "conditions_in_body": None})[0])
+
+    # ── 終盤の告知は「本編復帰」が無ければ末尾まで伸ばす ──
+    body8 = "".join(f"[{m}:00] アドバンテストは9700円割れで損切り 9600円台が支持帯 "
+                    for m in range(8))
+    tail_ad = ("[8:00] ここからは勉強会のお知らせです 参加方法をご案内します "
+               "[8:30] お申し込みはこちらから "
+               "[9:00] たくさんの方に来ていただいています ")
+    pa = ex.analyze_promotion(body8 + tail_ad, 600)
+    check("終盤の告知を末尾まで計上する (2分/10分 = 0.2)",
+          abs(pa["time_ratio"] - 0.2) < 0.01 and pa["spans"][-1][1] == 600, pa)
+    check("開始時刻を記録する", pa["first_sec"] == 480.0, pa["first_sec"])
+
+    resumed = ("[8:00] 勉強会のお知らせです 参加方法はこちら "
+               "[8:30] さて相場に戻りますが 9200円を割ったら撤退です "
+               "[9:00] チャート的にも出来高集中帯ですね ")
+    pa2 = ex.analyze_promotion(body8 + resumed, 600)
+    check("本編に復帰したら伸ばさない", pa2["time_ratio"] < 0.1, pa2)
+
+    for word in ("勉強会", "参加方法", "申し込み", "公式LINE", "有料", "宣伝"):
+        check(f"検出語: {word}", ex.detect_promotion(f"詳しくは{word}をご覧ください") != [],
+              word)
+
+    # 宣伝が一定以上なら promotional を自動で立てる (信頼度 -15)
+    marked = ex._mark({"calls": [{"flags": {k: False for k in ex.RUBRIC},
+                                  "quote_confidence": 0.8,
+                                  "extraction_confidence": ex.score_extraction({}, 0.8),
+                                  "agreement_score": None, "source_reliability": 50.0,
+                                  "reference_score": 60}]},
+                      "cli", 1, "", False, [], pa)
+    mc = marked["calls"][0]
+    check("宣伝比率が高ければ promotional を自動付与",
+          mc["flags"]["promotional"] is True, mc["flags"])
+    check("信頼度が -15 される",
+          mc["extraction_confidence"] == ex.score_extraction({}, 0.8) - 15,
+          mc["extraction_confidence"])
+
+    # 条件が本編にあるか宣伝内だけか
+    calls = [{"entry_condition": "9600円台", "stop_condition": "9700円割れ",
+              "target_price": "10500"}]
+    check("条件が本編にあれば True",
+          ex.conditions_in_body(body8 + tail_ad, pa, calls) is True)
+    only_ad = ("[0:00] 今日は相場の雑談です [8:00] 勉強会にお申し込みの方には "
+               "9600円台で買って9700円割れで損切り という条件をお伝えします ")
+    pa3 = ex.analyze_promotion(only_ad, 600)
+    check("条件が宣伝ブロック内だけなら False",
+          ex.conditions_in_body(only_ad, pa3, calls) is False, pa3["spans"])
+    check("照合できる数値が無ければ None",
+          ex.conditions_in_body(body8 + tail_ad, pa,
+                                [{"entry_condition": "押し目", "stop_condition": "安値割れ"}])
+          is None)
 
     check("宣伝が無ければ注記も出ない", ytips.promo_note(_good_record()) == "")
     check("単発の宣伝でも信頼度は下がる",
