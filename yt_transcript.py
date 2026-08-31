@@ -8,8 +8,16 @@ youtube_tips.py から呼ばれる下請けモジュール。単体でも動く�
   2) 動画 ID から字幕テキスト (手動字幕 > 自動生成字幕) を取得 → fetch_transcript()
   3) VTT / SRT を「タイムスタンプ付きプレーンテキスト」に整形
 
-【字幕の取得経路 (プロバイダ) — 差し替え可能な構造】
-  取得順は環境変数 YT_CAPTION_PROVIDERS で変えられる (既定 "manual,ytdlp,api")。
+【字幕の取得経路 (プロバイダ) — 差し替え可能・非公式経路は明示的オプトイン】
+  既定は **manual のみ**。yt-dlp / youtube-transcript-api は YouTube 公式の
+  字幕APIではなく、壊れやすさと利用条件上のリスクがあるため、
+  環境変数 YT_CAPTION_PROVIDERS を設定した場合 (または --allow-unofficial を
+  付けた場合) だけ有効になる。
+
+    既定                        : manual
+    非公式経路を許可する場合     : export YT_CAPTION_PROVIDERS=manual,ytdlp,api
+    自分の動画の公式API経路      : 将来 official プロバイダとして追加予定
+                                  (captions.download は自分の動画にのみ使える)
 
   manual : youtube_tips_data/manual/<video_id>.(txt|vtt|srt) を読む。
            YouTube 画面の「文字起こしを表示」からコピペしたものを置くだけ。
@@ -57,7 +65,8 @@ TRANSCRIPT_DIR = DATA_DIR / "transcripts"
 MANUAL_DIR     = DATA_DIR / "manual"        # 手動で置いた文字起こし
 SUB_LANGS      = "ja,ja-JP,ja-orig,en,en-US"   # 優先順 (前から順に採用)
 YTDLP_TIMEOUT  = 180                            # 1 動画あたりの上限秒
-DEFAULT_PROVIDERS = "manual,ytdlp,api"          # 字幕取得の優先順
+DEFAULT_PROVIDERS   = "manual"                  # 既定は公式に近い手動経路のみ
+UNOFFICIAL_PROVIDERS = "manual,ytdlp,api"       # --allow-unofficial 時の順序
 FEED_URL       = "https://www.youtube.com/feeds/videos.xml?channel_id={cid}"
 
 
@@ -371,12 +380,30 @@ def feed_videos(channel: str, limit: int = 15) -> list[dict]:
         vid = e.findtext("yt:videoId", "", ns)
         if not vid:
             continue
-        pub = (e.findtext("a:published", "", ns) or "")[:10].replace("-", "")
+        pub_iso = (e.findtext("a:published", "", ns) or "")
         out.append({"video_id": vid, "title": e.findtext("a:title", "", ns) or "",
                     "url": f"https://www.youtube.com/watch?v={vid}",
                     "duration": None, "channel": ch_name,
-                    "upload_date": pub, "live": False})
+                    "upload_date": pub_iso[:10].replace("-", ""),
+                    "published_at": pub_iso,      # 時刻まで入る (公式RSS の利点)
+                    "live": False})
     return out
+
+
+def _published_at(info: dict) -> str:
+    """
+    公開時刻を ISO8601 (JST) で返す。yt-dlp の timestamp があれば時刻まで取れる。
+    tips_track が「公開後に実際に買える最初の価格」を決めるのに使う。
+    """
+    ts = info.get("timestamp") or info.get("release_timestamp")
+    if ts:
+        try:
+            from datetime import datetime, timedelta, timezone
+            jst = timezone(timedelta(hours=9))
+            return datetime.fromtimestamp(int(ts), jst).isoformat(timespec="seconds")
+        except (ValueError, OSError, OverflowError):
+            pass
+    return ""
 
 
 def _meta(info: dict) -> dict:
@@ -386,6 +413,7 @@ def _meta(info: dict) -> dict:
         "channel":     info.get("channel") or info.get("uploader") or "",
         "channel_id":  info.get("channel_id", ""),
         "upload_date": info.get("upload_date", ""),          # YYYYMMDD
+        "published_at": _published_at(info),                  # ISO8601 (JST) 取れれば
         "duration":    info.get("duration") or 0,            # 秒
         "view_count":  info.get("view_count") or 0,
         "url":         info.get("webpage_url")
@@ -395,9 +423,20 @@ def _meta(info: dict) -> dict:
 
 
 def providers() -> list[str]:
-    """字幕取得の優先順 (環境変数 YT_CAPTION_PROVIDERS で上書き可)。"""
+    """
+    字幕取得の優先順。既定は manual のみ。
+    非公式経路 (yt-dlp / youtube-transcript-api) は環境変数
+    YT_CAPTION_PROVIDERS を明示設定した場合だけ有効になる。
+    """
     raw = os.environ.get("YT_CAPTION_PROVIDERS", DEFAULT_PROVIDERS)
     return [p.strip() for p in raw.split(",") if p.strip()]
+
+
+def allow_unofficial() -> None:
+    """非公式プロバイダを有効化する (--allow-unofficial から呼ぶ)。"""
+    os.environ.setdefault("YT_CAPTION_PROVIDERS", UNOFFICIAL_PROVIDERS)
+    if "ytdlp" not in providers():
+        os.environ["YT_CAPTION_PROVIDERS"] = UNOFFICIAL_PROVIDERS
 
 
 _PROVIDER_FN = {
@@ -454,6 +493,9 @@ def fetch_transcript(video_id: str, use_cache: bool = True) -> dict:
     out = best or {"meta": {"video_id": video_id,
                             "url": f"https://www.youtube.com/watch?v={video_id}"},
                    "segments": [], "lang": "", "source": "none"}
+    if "ytdlp" not in providers() and "api" not in providers():
+        errors.append("非公式の字幕取得は既定で無効 "
+                      "(--allow-unofficial か YT_CAPTION_PROVIDERS で明示的に許可)")
     out["error"] = "; ".join(errors) or out.get("error") or "字幕なし"
     out["text"]  = ""
     cache_f.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
@@ -472,7 +514,11 @@ def main() -> None:
     ap.add_argument("--parse-vtt", metavar="FILE", help="ローカル VTT をパースして表示")
     ap.add_argument("--limit", type=int, default=10)
     ap.add_argument("--no-cache", action="store_true")
+    ap.add_argument("--allow-unofficial", action="store_true",
+                    help="yt-dlp / youtube-transcript-api を有効化 (既定は manual のみ)")
     a = ap.parse_args()
+    if a.allow_unofficial:
+        allow_unofficial()
 
     if a.parse_vtt:
         segs = parse_vtt(Path(a.parse_vtt).read_text(encoding="utf-8"))

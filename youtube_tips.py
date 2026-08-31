@@ -17,8 +17,17 @@ youtube_tips.py  ―  YouTube 字幕から「株の売買見解 / Tips」を自�
 
 **自動発注はしない。** YouTube の見解は gobot シグナルの補助材料 (参考情報) として扱う。
 
+【字幕取得の既定は「手動取込」のみ】
+  yt-dlp / youtube-transcript-api は YouTube 公式の字幕APIではないため、
+  既定では **無効** です。使う場合だけ明示的に有効化してください。
+    python youtube_tips.py --allow-unofficial
+    export YT_CAPTION_PROVIDERS=manual,ytdlp,api
+  手動取込 (推奨・第一候補):
+    YouTube の「文字起こしを表示」→ コピー → ファイル保存 →
+    python yt_transcript.py --import <video_id> --from copied.txt
+
 【セットアップ】
-  pip install -U yt-dlp                 # 任意 (字幕の自動ダウンロード経路)
+  pip install -U yt-dlp                 # 任意 (--allow-unofficial 時のみ使用)
   pip install anthropic                 # 任意 (ANTHROPIC_API_KEY を使う場合)
   # 上記が無くても Claude Code CLI (`claude`) があれば抽出は動く
   vi youtube_sources.py                 # 監視チャンネルを登録
@@ -31,6 +40,7 @@ youtube_tips.py  ―  YouTube 字幕から「株の売買見解 / Tips」を自�
   python youtube_tips.py --report --days 7      # 収集済みから直近7日のHTML
   python youtube_tips.py --digest --days 7      # ターミナルにテキスト要約
   python youtube_tips.py --failures             # 字幕が取れなかった動画の一覧
+  python youtube_tips.py --allow-unofficial     # yt-dlp 等の非公式経路を許可
   python youtube_tips.py --backend heuristic    # LLM を使わない (無料・低精度)
   python youtube_tips.py --cross-check cmd --llm-cmd "codex exec -"
                                                 # Claude と codex の 2 エンジン合議
@@ -269,7 +279,9 @@ def _base_rec(vid: str, meta: dict) -> dict:
         "video_id": vid, "title": meta.get("title", ""),
         "channel": meta.get("channel", ""), "channel_id": meta.get("channel_id", ""),
         "url": meta.get("url", f"https://www.youtube.com/watch?v={vid}"),
-        "upload_date": meta.get("upload_date") or "", "duration": meta.get("duration") or 0,
+        "upload_date": meta.get("upload_date") or "",
+        "published_at": meta.get("published_at") or "",
+        "duration": meta.get("duration") or 0,
         "view_count": meta.get("view_count") or 0,
         "processed_at": datetime.now(JST).isoformat(timespec="seconds"),
     }
@@ -289,13 +301,19 @@ def process_one(v: dict, args, verbose: bool = True) -> dict | None:
                 "market_view": "", "summary": [], "calls": [], "tips": [],
                 "error": tr.get("error") or "字幕なし"}
 
-    bonus = _track.channel_bonus(meta.get("channel", ""))
+    # 発信者の実績は「この動画の公開日より前に確定していた判定」だけを使う。
+    # (後から判明した成績を過去動画に逆適用すると未来情報が混ざる)
+    asof = meta.get("upload_date") or ""
+    asof_str = f"{asof[:4]}-{asof[4:6]}-{asof[6:8]}" if len(asof) == 8 else None
+    src_rel = _track.source_reliability_asof(meta.get("channel", ""), asof_str)
     res = _ex.extract_tips(tr["text"], meta, backend=args.backend, model=args.model,
-                           verbose=verbose, channel_bonus=bonus,
+                           verbose=verbose, source_reliability=src_rel,
                            cross_check=args.cross_check)
     rec = {**_base_rec(vid, meta),
            "lang": tr.get("lang", ""), "source": tr.get("source", ""),
-           "chars": len(tr["text"]), "channel_bonus": bonus,
+           "chars": len(tr["text"]), "source_reliability": src_rel,
+           "injection_suspected": res.get("injection_suspected", False),
+           "injection_hits": res.get("injection_hits", []),
            "backend": res.get("backend", ""), "model": res.get("model", ""),
            "noise": res.get("noise", False), "promo": res.get("promo", False),
            "market_view": res.get("market_view", ""), "summary": res.get("summary", []),
@@ -419,7 +437,7 @@ def flatten(recs: list[dict], key: str) -> list[dict]:
                         "channel": r.get("channel", ""), "url": r.get("url", ""),
                         "upload_date": r.get("upload_date", "")})
     if key == "calls":
-        out.sort(key=lambda c: (c.get("reliability") or 0), reverse=True)
+        out.sort(key=lambda c: (c.get("reference_score") or 0), reverse=True)
     else:
         out.sort(key=lambda t: (t.get("upload_date") or "", t.get("confidence") or 0),
                  reverse=True)
@@ -551,7 +569,12 @@ def build_html(recs: list[dict], days: int | None, sigs: dict[str, list[dict]] |
         basis = " / ".join(c.get("evidence_type") or []) or "-"
         if c.get("catalysts"):
             basis += "<br><span class='muted'>" + _esc("・".join(c["catalysts"][:3])) + "</span>"
-        rel = int(c.get("reliability") or 0)
+        ext  = int(c.get("extraction_confidence") or 0)
+        agr  = c.get("agreement_score")
+        srel = c.get("source_reliability")
+        ref  = int(c.get("reference_score") or 0)
+        breakdown = (f"抽出{ext} / 一致{'-' if agr is None else int(agr)} / "
+                     f"発信者{'不明' if srel in (None, '') else int(float(srel))}")
         match_rows += f"""
         <tr>
           <td><b>{_esc(code or '-')}</b>{badge}<br><span class="muted">{_esc(c.get('company',''))}</span></td>
@@ -560,7 +583,8 @@ def build_html(recs: list[dict], days: int | None, sigs: dict[str, list[dict]] |
               {_esc(c['stance'])}</span><br><span class="muted">{_esc(c.get('action',''))}</span></td>
           <td class="muted">{_esc(c.get('upload_date',''))}<br>{_esc(c.get('time_horizon',''))}</td>
           <td>{basis}</td>
-          <td class="num"><span class="bar"><i style="width:{rel}%"></i></span> {rel}</td>
+          <td class="num"><span class="bar"><i style="width:{ref}%"></i></span> {ref}
+              <br><span class="muted">{_esc(breakdown)}</span></td>
           <td class="{cls}">{_esc(label)}</td>
         </tr>"""
     if not match_rows:
@@ -574,7 +598,11 @@ def build_html(recs: list[dict], days: int | None, sigs: dict[str, list[dict]] |
         ts   = c.get("timestamp_seconds") or 0
         ts_s = f'<a href="{_esc(link)}" target="_blank">{ts // 60}:{ts % 60:02d}</a>' if ts else ""
         risks = "・".join(c.get("risks") or []) or "-"
-        agree = f'<br><span class="muted">{_esc(c["agreement"])}</span>' if c.get("agreement") else ""
+        agree = (f'<br><span class="muted">{_esc(c["agreement"])}</span>'
+                 if c.get("agreement") and c["agreement"] != "未実施" else "")
+        ext   = int(c.get("extraction_confidence") or 0)
+        agr   = c.get("agreement_score")
+        srel  = c.get("source_reliability")
         call_rows += f"""
         <tr>
           <td><b>{_esc(c.get('ticker') or '-')}</b><br><span class="muted">{_esc(c.get('company',''))}</span></td>
@@ -586,12 +614,14 @@ def build_html(recs: list[dict], days: int | None, sigs: dict[str, list[dict]] |
               標: {_esc(c.get('target_price') or '-')}<br>
               退: {_esc(c.get('stop_condition') or '-')}</td>
           <td class="muted">{_esc(risks)}</td>
-          <td class="num">{int(c.get('reliability') or 0)}</td>
+          <td class="num">{ext}</td>
+          <td class="num">{'-' if agr is None else int(agr)}</td>
+          <td class="num">{'不明' if srel in (None, '') else int(float(srel))}</td>
           <td class="muted">{ts_s}<br><a href="{_esc(c['url'])}" target="_blank">{_esc(c['title'][:28])}</a>
               <br>{_esc(c['channel'][:20])}</td>
         </tr>"""
     if not call_rows:
-        call_rows = ('<tr><td colspan="7" style="text-align:center;color:#94a3b8">'
+        call_rows = ('<tr><td colspan="9" style="text-align:center;color:#94a3b8">'
                      '銘柄見解なし</td></tr>')
 
     # 3) Tips
@@ -636,13 +666,17 @@ def build_html(recs: list[dict], days: int | None, sigs: dict[str, list[dict]] |
             <td class="num">{'-' if s.get('hit_rate') is None else f"{s['hit_rate']:.1f}%"}</td>
             <td class="num">{'-' if s.get('avg_ret_30') is None else f"{s['avg_ret_30']:+.2f}%"}</td>
             <td class="num">{'-' if s.get('avg_ret_90') is None else f"{s['avg_ret_90']:+.2f}%"}</td>
-            <td class="num">{s.get('bonus', 0):+.1f}</td></tr>"""
+            <td class="num">{'不明' if s.get('source_reliability') is None
+                                 else f"{s['source_reliability']:.1f}"}</td></tr>"""
     stat_section = f"""
   <h2>チャンネル別 実績 (事後検証)</h2>
   <table><thead><tr><th>チャンネル</th><th>見解数</th><th>判定済</th><th>的中率(30日)</th>
-    <th>平均30日</th><th>平均90日</th><th>信頼度補正</th></tr></thead>
+    <th>平均30日</th><th>平均90日</th><th>実績スコア</th></tr></thead>
     <tbody>{stat_rows}</tbody></table>
-  <div class="note">tips_track.py --update で更新。判定済 {_track.MIN_CALLS_FOR_BONUS} 件未満は補正 0。</div>
+  <div class="note">tips_track.py --update で更新 (0-100, 50=中立)。判定済
+    {_track.MIN_CALLS_FOR_SCORE} 件未満は「不明」。抽出時に使うのは
+    <b>その動画の公開日より前に確定していた判定だけ</b>で、後から判明した成績を
+    過去の動画へ逆適用しません。</div>
 """ if stat_rows else ""
 
     # 5) 取得失敗
@@ -673,15 +707,23 @@ def build_html(recs: list[dict], days: int | None, sigs: dict[str, list[dict]] |
         mv   = (f'<div class="muted">相場観: {_esc(r["market_view"])}</div>'
                 if r.get("market_view") else "")
         promo = ' <span class="warn">宣伝多め</span>' if r.get("promo") else ""
+        inj   = (' <span class="unverified">字幕に指示文を検出</span>'
+                 if r.get("injection_suspected") else "")
         cards += f"""
       <div class="card{cls}">
-        <h3><a href="{_esc(r['url'])}" target="_blank">{_esc(r['title'] or r['video_id'])}</a>{promo}</h3>
+        <h3><a href="{_esc(r['url'])}" target="_blank">{_esc(r['title'] or r['video_id'])}</a>{promo}{inj}</h3>
         <div class="muted">{_esc(r.get('channel',''))} / {_esc(r.get('upload_date',''))}
              / {round((r.get('duration') or 0)/60)}分 / 見解{len(r.get('calls') or [])}件
              / Tips{len(r.get('tips') or [])}件 / {_esc(r.get('backend',''))}
              / 字幕:{_esc(r.get('source',''))}</div>
         {mv}<ul>{summ}</ul>
       </div>"""
+
+    injected = [r for r in recs if r.get("injection_suspected")]
+    injection_banner = (
+        f'<div class="note warn">⚠ {len(injected)} 本の字幕に「指示文」らしき記述を検出しました'
+        '(データとして扱い、指示には従っていません)。該当動画は下の一覧で確認してください。</div>'
+        if injected else "")
 
     match_note = ("gobot の当日シグナルと突き合わせ済み。"
                   if matched else
@@ -704,26 +746,33 @@ def build_html(recs: list[dict], days: int | None, sigs: dict[str, list[dict]] |
     <span class="stat">Tips <b>{len(tips)}</b> 件</span>
     <span class="stat">字幕取得失敗 <b>{len(fails)}</b> 本</span>
   </div>
+  {injection_banner}
 
   <h2>gobot シグナルとの照合</h2>
   <table>
     <thead><tr>
       <th style="width:150px">銘柄</th><th style="width:150px">gobot</th>
       <th style="width:120px">動画見解</th><th style="width:90px">投稿日</th>
-      <th>根拠</th><th style="width:110px">信頼度</th><th style="width:160px">扱い</th>
+      <th>根拠</th><th style="width:150px">参考値<br><span class="muted">(抽出/一致/発信者)</span></th>
+      <th style="width:160px">扱い</th>
     </tr></thead>
     <tbody>{match_rows}</tbody>
   </table>
   <div class="note">{match_note}
-    信頼度は「発言をどれだけ真に受けてよいか」の目安 (0-100) であって売買シグナルではありません。
-    <b>この表から自動発注は行いません。</b></div>
+    <b>スコアは 3 種類を分けて保存しています</b>: 抽出確度 (字幕から正しく読み取れたか) /
+    一致度 (2エンジンの独立抽出が一致したか) / 発信者実績 (公開時点で確定していた過去成績)。
+    表示している参考値はこの 3 つの加重平均 (重み {int(_ex.WEIGHT_EXTRACTION*100)}/
+    {int(_ex.WEIGHT_AGREEMENT*100)}/{int(_ex.WEIGHT_SOURCE*100)}) にすぎず、
+    <b>売買シグナルではありません。2エンジンが一致していても、両方が同じ誤読をしている
+    可能性は残ります。この表から自動発注は行いません。</b></div>
 
   <h2>銘柄見解の詳細 (発言 / AI補足を分離)</h2>
   <table>
     <thead><tr>
       <th style="width:110px">銘柄</th><th style="width:110px">スタンス</th>
-      <th>発言内容</th><th style="width:180px">条件</th><th style="width:140px">リスク</th>
-      <th style="width:60px">信頼度</th><th style="width:180px">出典</th>
+      <th>発言内容</th><th style="width:180px">条件</th><th style="width:130px">リスク</th>
+      <th style="width:56px">抽出<br>確度</th><th style="width:56px">一致<br>度</th>
+      <th style="width:64px">発信者<br>実績</th><th style="width:170px">出典</th>
     </tr></thead>
     <tbody>{call_rows}</tbody>
   </table>
@@ -757,8 +806,14 @@ def print_digest(recs: list[dict], category: str | None) -> None:
         for c in calls[:20]:
             mark = " ★WATCHLIST" if c.get("ticker") in wl else ""
             ver  = "" if c.get("code_verified") else " [コード未確認]"
+            agr  = c.get("agreement_score")
+            srel = c.get("source_reliability")
             print(f"  {c.get('ticker') or '----'} {c.get('company','')[:12]:<12} "
-                  f"{c['stance']} 信頼度{int(c.get('reliability') or 0):>3}{mark}{ver}")
+                  f"{c['stance']} 参考{int(c.get('reference_score') or 0):>3} "
+                  f"(抽出{int(c.get('extraction_confidence') or 0)}"
+                  f"/一致{'-' if agr is None else int(agr)}"
+                  f"/発信者{'不明' if srel in (None, '') else int(float(srel))})"
+                  f"{mark}{ver}")
             if c.get("speaker_claim"):
                 print(f"      発言: {c['speaker_claim'][:80]}")
             if c.get("entry_condition") or c.get("stop_condition"):
@@ -824,6 +879,8 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=3, help="並列数")
     ap.add_argument("--match-signals", action="store_true",
                     help="gobot の当日シグナルと照合する (株価取得あり)")
+    ap.add_argument("--allow-unofficial", action="store_true",
+                    help="yt-dlp / youtube-transcript-api を有効化 (既定は手動取込のみ)")
     ap.add_argument("--force", action="store_true", help="処理済み動画も再抽出")
     ap.add_argument("--no-cache", action="store_true", help="字幕キャッシュを使わない")
     ap.add_argument("--dry-run", action="store_true", help="対象一覧だけ表示")
@@ -837,6 +894,8 @@ def main() -> None:
 
     if args.llm_cmd:
         os.environ["TIPS_LLM_CMD"] = args.llm_cmd
+    if args.allow_unofficial:
+        _yt.allow_unofficial()
 
     if args.failures:
         print_failures(load_records())
