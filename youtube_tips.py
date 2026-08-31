@@ -347,7 +347,9 @@ def gather_targets(args, done: set[str]) -> list[dict]:
     for u in (args.url or []):
         vid = video_id_of(u)
         if not vid:
-            print(f"  ! 動画IDを取り出せません: {u}", file=sys.stderr)
+            print(f"  ! 動画IDを取り出せません: {u}  "
+                  f"(YouTube の video_id は 11 文字。URL をそのまま貼っても可)",
+                  file=sys.stderr)
             continue
         if vid not in seen:
             seen.add(vid)
