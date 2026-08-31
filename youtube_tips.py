@@ -218,20 +218,54 @@ def load_priced_in() -> dict[tuple, dict]:
 # 運用の前提: 収集側で --since-days 7 (公開7日以内) を掛けたうえで、
 # ここで「具体的な売買条件がある動画」だけに絞る。
 # 除外理由は必ず残す (黙って消すと、なぜ出ないのか分からなくなる)。
+#
+# 宣伝の扱いは「語数」ではなく **位置と占有時間** で決める。
+# 本編に売買条件があり、最後の数分だけ勉強会・有料サービスの告知という動画は
+# 実務上は有用なので捨てない (警告 + 信頼度 -15 に留める)。
+PROMO_MAX_RATIO  = 0.4    # 宣伝が動画のこれ以上を占めたら除外
+PROMO_LEAD_RATIO = 0.5    # 冒頭 20% のうち宣伝がこれ以上を占めたら除外 (冒頭誘導型)
+
+
+def _in_promo_span(sec: float, spans: list) -> bool:
+    return any(s <= sec <= e for s, e in (spans or []))
+
+
+def promo_note(rec: dict) -> str:
+    """採用した動画に付ける宣伝の注記 (空文字なら注記なし)。"""
+    pa = rec.get("promo_analysis") or {}
+    if not pa.get("mentions"):
+        return ""
+    ratio = pa.get("time_ratio") or 0.0
+    first = pa.get("first_sec")
+    where = f"{int(first) // 60}:{int(first) % 60:02d}〜 / " if first is not None else ""
+    tail  = "末尾に" if pa.get("tail_only") else ""
+    return f"{tail}宣伝あり ({where}全体の{ratio:.0%})"
+
+
 def curation_verdict(rec: dict) -> tuple[bool, list[str]]:
     """
     (採用するか, 除外理由のリスト) を返す。
 
     採用条件:
       ・LLM で抽出できている (heuristic / 要確認は材料にしない)
-      ・宣伝中心・中身なしでない (単発の告知は許容し、信頼度で減点するに留める)
+      ・宣伝が主目的でない (下記の宣伝ルール)
       ・コードが裏取りできた個別銘柄の見解がある
       ・強気/弱気の方向が示されている (中立だけの動画は材料にならない)
       ・エントリー条件と撤退条件の両方に触れた見解が 1 件以上ある
       ・事後解説だけでない
+
+    宣伝ルール (位置と占有時間で判定する):
+      ・動画の主目的が宣伝 (LLM の promo)                        → 除外
+      ・宣伝が動画の PROMO_MAX_RATIO 以上を占める                 → 除外
+      ・冒頭 20% の PROMO_LEAD_RATIO 以上が宣伝 (冒頭誘導型)      → 除外
+      ・売買条件が宣伝ブロック内でしか語られていない              → 除外
+        (= 条件を知るには登録が要る動画)
+      ・本編に条件があり末尾だけ宣伝                              → **採用**
+        (promo_note の警告 + flags.promotional による信頼度 -15)
     """
     reasons: list[str] = []
     calls = [c for c in (rec.get("calls") or []) if c.get("code_verified")]
+    pa    = rec.get("promo_analysis") or {}
 
     if str(rec.get("extraction_backend", "")).startswith("heuristic"):
         reasons.append("LLM 抽出でない (heuristic)")
@@ -239,21 +273,31 @@ def curation_verdict(rec: dict) -> tuple[bool, list[str]]:
         reasons.append("要確認 (注入検出など)")
     if rec.get("noise"):
         reasons.append("中身が薄い")
+
     if rec.get("promo"):
-        reasons.append("宣伝中心")
-    elif len(rec.get("promo_mentions") or []) >= 3:
-        reasons.append(f"宣伝誘導が多い ({len(rec['promo_mentions'])}箇所)")
+        reasons.append("宣伝中心 (動画の主目的が宣伝)")
+    elif (pa.get("time_ratio") or 0.0) >= PROMO_MAX_RATIO:
+        reasons.append(f"宣伝が動画の {pa['time_ratio']:.0%} を占める")
+    elif (pa.get("lead_ratio") or 0.0) >= PROMO_LEAD_RATIO:
+        reasons.append("冒頭から宣伝誘導が中心")
+
     if not calls:
         reasons.append("コードを裏取りできた銘柄見解が無い")
     else:
         if all(c.get("stance") == "中立" for c in calls):
             reasons.append("方向感の無い見解のみ")
-        if not any(c.get("entry_condition") and c.get("stop_condition") for c in calls):
+        conditioned = [c for c in calls
+                       if c.get("entry_condition") and c.get("stop_condition")]
+        if not conditioned:
             reasons.append("エントリー条件と撤退条件が揃った見解が無い")
+        elif pa.get("spans"):
+            timed = [c for c in conditioned if (c.get("timestamp_seconds") or 0) > 0]
+            if timed and all(_in_promo_span(c["timestamp_seconds"], pa["spans"])
+                             for c in timed):
+                # 条件を知るには登録が要る = 材料にならない
+                reasons.append("売買条件が宣伝ブロック内でしか語られていない")
         if all((c.get("flags") or {}).get("hindsight_only") for c in calls):
             reasons.append("事後解説のみ")
-        # 単発のサロン告知だけでは外さない (信頼度が -15 されるに留める)。
-        # 「宣伝中心」かどうかは上の promo / promo_mentions で判断する。
     return (not reasons), reasons
 
 
@@ -792,9 +836,9 @@ def build_html(recs: list[dict], days: int | None, sigs: dict[str, list[dict]] |
         promo = ' <span class="warn">宣伝多め</span>' if r.get("promo") else ""
         inj   = (' <span class="unverified">字幕に指示文を検出</span>'
                  if r.get("injection_suspected") else "")
-        n_promo = len(r.get("promo_mentions") or [])
-        if n_promo:
-            inj += f' <span class="warn">宣伝誘導 {n_promo}箇所</span>' 
+        note = promo_note(r)
+        if note:
+            inj += f' <span class="warn">{_esc(note)}</span>' 
         if r.get("llm_failure_reason"):
             inj += (f' <span class="unverified">LLM失敗→heuristic '
                     f'({_esc(r["llm_failure_reason"])}, {r.get("llm_attempts", 0)}回試行)</span>')

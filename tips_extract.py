@@ -182,6 +182,9 @@ PROMO_PATTERNS = (
 )
 
 
+_TS_MARK = re.compile(r"\[(\d+):(\d{2})(?::(\d{2}))?\]")
+
+
 def detect_promotion(text: str) -> list[str]:
     """宣伝・勧誘への誘導らしき箇所を返す (前後の文脈つき、最大5件)。"""
     hits = []
@@ -190,6 +193,84 @@ def detect_promotion(text: str) -> list[str]:
             hits.append(text[max(0, m.start() - 25):m.end() + 25].replace("\n", " "))
             break
     return hits[:5]
+
+
+def _timed_chunks(transcript: str) -> list[tuple[float, str]]:
+    """
+    "[mm:ss] 本文 …" 形式のテキストを [(開始秒, 本文), ...] に戻す。
+    タイムスタンプが無いテキストでは空リスト (呼び出し側が文字数比で代替する)。
+    """
+    marks = list(_TS_MARK.finditer(transcript))
+    if not marks:
+        return []
+    out = []
+    for i, m in enumerate(marks):
+        h, mi, sec = m.group(1), m.group(2), m.group(3)
+        start = (int(h) * 3600 + int(mi) * 60 + int(sec)) if sec else (int(h) * 60 + int(mi))
+        body_end = marks[i + 1].start() if i + 1 < len(marks) else len(transcript)
+        out.append((float(start), transcript[m.end():body_end]))
+    return out
+
+
+def analyze_promotion(transcript: str, duration_sec: float = 0.0) -> dict:
+    """
+    宣伝の **位置と占有時間** を測る。件数だけで動画を捨てないための材料。
+
+    「本編に売買条件があり、最後の数分だけ勉強会・有料サービスの告知」という動画は
+    実務上は有用なので、語数ではなく次を見る。
+
+      time_ratio  : 宣伝が動画全体に占める時間の割合 (タイムスタンプが無ければ文字数比)
+      lead_ratio  : 冒頭 20% のうち宣伝が占める割合 (冒頭から誘導中心か)
+      first_sec   : 最初に宣伝が出る秒
+      tail_only   : 宣伝が終盤 (60% 以降) にだけ固まっているか
+      spans       : 宣伝ブロックの (開始秒, 終了秒) 一覧
+      mentions    : 検出箇所のスニペット
+    """
+    text = transcript or ""
+    mentions = detect_promotion(text)
+    empty = {"mentions": mentions, "time_ratio": 0.0, "lead_ratio": 0.0,
+             "first_sec": None, "tail_only": False, "spans": [], "timed": False}
+    if not mentions:
+        return empty
+
+    def is_promo(chunk: str) -> bool:
+        return any(re.search(pat, chunk, re.I) for pat in PROMO_PATTERNS)
+
+    chunks = _timed_chunks(text)
+    if not chunks:
+        # タイムスタンプが無い場合は文字位置で近似する
+        total = max(len(text), 1)
+        pos = [m.start() for pat in PROMO_PATTERNS for m in re.finditer(pat, text, re.I)]
+        first = min(pos)
+        share = sum(1 for p in pos) * 200 / total          # 1 箇所 ≒ 200 文字とみなす
+        return {**empty, "time_ratio": round(min(share, 1.0), 3),
+                "lead_ratio": round(sum(1 for p in pos if p < total * 0.2) * 200
+                                    / max(total * 0.2, 1), 3),
+                "first_sec": None, "tail_only": first > total * 0.6}
+
+    total_sec = max(duration_sec or 0.0, chunks[-1][0] + 30.0)
+    spans: list[list[float]] = []
+    promo_sec = 0.0
+    for i, (start, body) in enumerate(chunks):
+        end = chunks[i + 1][0] if i + 1 < len(chunks) else total_sec
+        if not is_promo(body):
+            continue
+        promo_sec += max(end - start, 0.0)
+        if spans and abs(spans[-1][1] - start) < 1e-6:
+            spans[-1][1] = end                    # 連続する宣伝チャンクは 1 ブロックに
+        else:
+            spans.append([start, end])
+
+    lead_cut = total_sec * 0.2
+    lead_sec = sum(max(min(e, lead_cut) - s, 0.0) for s, e in spans)
+    first_sec = spans[0][0] if spans else None
+    return {"mentions": mentions,
+            "time_ratio": round(promo_sec / total_sec, 3) if total_sec else 0.0,
+            "lead_ratio": round(lead_sec / lead_cut, 3) if lead_cut else 0.0,
+            "first_sec": first_sec,
+            "tail_only": bool(first_sec is not None and first_sec >= total_sec * 0.6),
+            "spans": [[round(s), round(e)] for s, e in spans],
+            "timed": True}
 
 
 SYSTEM_PROMPT = (
@@ -1053,14 +1134,15 @@ def _failure_reason(e: Exception) -> str:
 
 def _mark(out: dict, backend: str, attempts: int, reason: str,
           requires_review: bool, injection: list[str],
-          promo_mentions: list[str] | None = None) -> dict:
+          promo: dict | None = None) -> dict:
     """抽出の由来を記録する。heuristic フォールバックを成功と同じ顔にしないため。"""
     out["extraction_backend"]  = backend
     out["llm_attempts"]        = attempts
     out["llm_failure_reason"]  = reason
     out["injection_suspected"] = bool(out.get("injection_suspected") or injection)
     out["injection_hits"]      = injection
-    out["promo_mentions"]      = promo_mentions or []
+    out["promo_analysis"]      = promo or {}
+    out["promo_mentions"]      = (promo or {}).get("mentions", [])
     out["requires_review"]     = bool(requires_review or out["injection_suspected"])
     for c in out.get("calls", []):
         c["requires_review"] = out["requires_review"] or c.get("requires_review", False)
@@ -1091,7 +1173,7 @@ def extract_tips(transcript: str, meta: dict, backend: str = "auto",
                      "none", 0, "no_transcript", True, [])
 
     injection = detect_injection(transcript)
-    promos    = detect_promotion(transcript)
+    promos    = analyze_promotion(transcript, float(meta.get("duration") or 0))
     if injection and verbose:
         print(f"    ! 字幕内に指示文らしき記述を検出 (データとして扱います): "
               f"{injection[0][:80]}", file=sys.stderr)

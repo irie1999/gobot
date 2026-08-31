@@ -803,7 +803,6 @@ def test_curation() -> None:
         ("要確認", {"requires_review": True}, "要確認"),
         ("中身が薄い", {"noise": True}, "中身が薄い"),
         ("宣伝中心", {"promo": True}, "宣伝中心"),
-        ("宣伝誘導が多い", {"promo_mentions": ["a", "b", "c"]}, "宣伝誘導が多い"),
     ]
     for label, patch, expect in cases:
         ok, why = ytips.curation_verdict({**_good_record(), **patch})
@@ -826,12 +825,43 @@ def test_curation() -> None:
     rec["calls"][0]["flags"]["hindsight_only"] = True
     check("除外: 事後解説のみ", not ytips.curation_verdict(rec)[0])
 
-    # 単発のサロン告知は除外しない (信頼度で減点するに留める)
-    rec = _good_record()
-    rec["calls"][0]["flags"]["promotional"] = True
-    rec["promo_mentions"] = ["概要欄のサロンで配信しています"]
-    check("単発の宣伝告知は採用したまま", ytips.curation_verdict(rec)[0])
-    check("ただし信頼度は下がる",
+    # ── 宣伝は「語数」ではなく位置と占有時間で判定する ──
+    body = "[{m}:00] アドバンテストは9700円割れで損切り 9600円台が支持帯です "
+    ad   = "[{m}:00] 勉強会と有料サロンの入会はこちら 公式LINEも登録してください "
+
+    def transcript(ad_minutes: range, total: int = 10) -> str:
+        return "".join((ad if m in ad_minutes else body).format(m=m) for m in range(total))
+
+    def rec_with(ad_minutes: range, ts: int = 240, **kw) -> dict:
+        r = _good_record()
+        pa = ex.analyze_promotion(transcript(ad_minutes), 600)
+        r["promo_analysis"], r["promo_mentions"] = pa, pa["mentions"]
+        r["calls"][0]["timestamp_seconds"] = ts
+        return {**r, **kw}
+
+    tail = rec_with(range(7, 10))                      # 末尾3分だけ宣伝
+    ok, why = ytips.curation_verdict(tail)
+    check("末尾だけの宣伝は採用する (本編に条件がある)", ok, why)
+    check("採用しても宣伝の位置と割合を注記する",
+          "宣伝あり" in ytips.promo_note(tail) and "7:00" in ytips.promo_note(tail),
+          ytips.promo_note(tail))
+    check("末尾判定が立つ", tail["promo_analysis"]["tail_only"] is True)
+
+    lead = rec_with(range(0, 3))                       # 冒頭3分が宣伝
+    ok, why = ytips.curation_verdict(lead)
+    check("冒頭から誘導中心は除外", not ok and any("冒頭" in w for w in why), why)
+
+    half = rec_with(range(0, 5), ts=540)               # 半分が宣伝
+    ok, why = ytips.curation_verdict(half)
+    check("宣伝が大半なら除外", not ok and any("占める" in w for w in why), why)
+
+    inside = rec_with(range(7, 10), ts=480)            # 条件が宣伝ブロック内
+    ok, why = ytips.curation_verdict(inside)
+    check("売買条件が宣伝ブロック内だけなら除外",
+          not ok and any("宣伝ブロック内" in w for w in why), why)
+
+    check("宣伝が無ければ注記も出ない", ytips.promo_note(_good_record()) == "")
+    check("単発の宣伝でも信頼度は下がる",
           ex.score_extraction({"promotional": True}, 0.8)
           < ex.score_extraction({}, 0.8))
 
@@ -840,6 +870,10 @@ def test_curation() -> None:
     check("宣伝誘導を検出する", len(hits) >= 2, hits)
     check("通常の解説では誤検出しない",
           ex.detect_promotion("9700円割れで損切りします 出来高集中帯は9200円です") == [])
+
+    # 占有時間の計測 (タイムスタンプが無いテキストでも動く)
+    pa = ex.analyze_promotion("サロン入会はこちら " * 3, 0)
+    check("タイムスタンプが無くても比率を出す", pa["time_ratio"] > 0 and not pa["timed"], pa)
 
 
 def main() -> int:

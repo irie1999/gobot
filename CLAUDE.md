@@ -694,7 +694,7 @@ tips_track.py        30日/90日後の騰落率で答え合わせ → 発信者�
 | `tips_extract.py` | LLM 抽出・スキーマ検証・信頼度ルーブリック・相互チェック |
 | `symbol_lookup.py` | 企業名 ⇄ 証券コードの名寄せ (推測でコードを作らせない) |
 | `tips_track.py` | 事後検証・発信者実績 (時点情報) |
-| `test_youtube_tips.py` | 自己テスト 160 チェック (ネットワーク・pandas・LLM 不要、Windows/macOS/Linux 共通)。**改修したら必ず実行** |
+| `test_youtube_tips.py` | 自己テスト 166 チェック (ネットワーク・pandas・LLM 不要、Windows/macOS/Linux 共通)。**改修したら必ず実行** |
 
 データは `youtube_tips_data/` 配下 (gitignore 済み):
 `transcripts/` (字幕キャッシュ)、`manual/` (手動取込)、`youtube_tips.jsonl` (全レコード)、
@@ -876,14 +876,25 @@ LLM には真偽フラグだけを答えさせ、点数は Python 側で決定�
 
 「公開7日以内」は収集側の `--since-days 7` で担保する。
 
-宣伝の扱いは 2 段階に分けている。
+**宣伝は「語数」ではなく位置と占有時間で判定する** (`tips_extract.analyze_promotion`)。
+本編に売買条件があり最後の数分だけ勉強会・有料サービスの告知、という動画は
+実務上は有用なので捨てない。
 
-- `promo` (動画単位) … 動画の主目的が宣伝で売買材料が乏しい → **除外**
-- `flags.promotional` (銘柄単位) … その銘柄の話に絡めた勧誘が一度でもある →
-  除外はせず `extraction_confidence` を -15 する
-- `promo_mentions` … サロン / 公式LINE / 情報商材などへの誘導を
-  `tips_extract.detect_promotion()` が**決定的に**検出したもの。
-  3 箇所以上で除外 (LLM の判断だけに依存しない)
+| 状態 | 判定 |
+|---|---|
+| 動画の主目的が宣伝 (LLM の `promo`) | 除外 |
+| 宣伝が動画の 40% 以上を占める (`time_ratio`) | 除外 |
+| 冒頭 20% の半分以上が宣伝 (`lead_ratio` = 冒頭誘導型) | 除外 |
+| 売買条件が宣伝ブロック内でしか語られていない | 除外 (登録しないと条件が分からない) |
+| **本編に条件があり末尾だけ宣伝** | **採用** + 注記 + 信頼度 -15 |
+
+`analyze_promotion` は字幕の `[mm:ss]` から宣伝チャンクの占有秒を測る
+(`time_ratio` / `lead_ratio` / `first_sec` / `tail_only` / `spans`)。
+タイムスタンプが無いテキストでは文字位置で近似する。閾値は
+`youtube_tips.PROMO_MAX_RATIO` / `PROMO_LEAD_RATIO`。
+
+銘柄単位の `flags.promotional` (その銘柄の話に絡めた勧誘) は除外理由にせず、
+`extraction_confidence` を -15 するに留める。
 
 ```
 python youtube_tips.py --since-days 7 --curate --match-signals
