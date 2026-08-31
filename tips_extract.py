@@ -277,15 +277,25 @@ def analyze_promotion(transcript: str, duration_sec: float = 0.0) -> dict:
         else:
             spans.append([start, end])
 
-    # 終盤で始まった宣伝は、明確な本編復帰が無い限り末尾まで続くとみなす
-    if spans:
-        last_start = spans[-1][0]
-        if last_start >= total_sec * TAIL_START_RATIO:
-            after = [body for start, body in chunks if start > last_start]
-            resumed = any(any(re.search(cp, b) for cp in CONTENT_PATTERNS) for b in after)
-            if not resumed:
-                spans[-1][1] = total_sec
-                promo_sec = sum(e - s2 for s2, e in spans)
+    # 終盤で始まった宣伝は、明確な本編復帰が無い限り末尾まで続くとみなす。
+    # **分断された終盤ブロックは結合する**: 終盤に始まったブロックのうち
+    # 「それ以降に本編が一度も出てこない」最も早いものを起点にし、末尾まで 1 本にする。
+    # (告知の合間に宣伝語を含まない雑談チャンクが挟まると、語ベースでは分断される)
+    if spans and chunks:
+        def _has_content(body: str) -> bool:
+            return any(re.search(cp, body) for cp in CONTENT_PATTERNS)
+
+        tail_cut = total_sec * TAIL_START_RATIO
+        merge_from = None
+        for start, _end in spans:                       # spans は時系列順
+            if start < tail_cut:
+                continue
+            if not any(_has_content(b) for st, b in chunks if st > start):
+                merge_from = start
+                break
+        if merge_from is not None:
+            spans = [sp for sp in spans if sp[0] < merge_from] + [[merge_from, total_sec]]
+            promo_sec = sum(e - s2 for s2, e in spans)
 
     lead_cut = total_sec * 0.2
     lead_sec = sum(max(min(e, lead_cut) - s, 0.0) for s, e in spans)
