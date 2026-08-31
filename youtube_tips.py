@@ -95,9 +95,10 @@ CAT_COLOR = {
     "銘柄": "#a16207", "ツール": "#334155", "その他": "#475569",
 }
 STANCE_COLOR = {"強気": "#16a34a", "弱気": "#dc2626", "中立": "#475569"}
-CSV_COLS = ["video_id", "upload_date", "channel", "title", "url", "duration_min",
-            "lang", "source", "chars", "n_calls", "n_tips", "noise", "promo",
-            "backend", "model", "error", "processed_at"]
+CSV_COLS = ["video_id", "upload_date", "published_at", "channel", "title", "url",
+            "duration_min", "lang", "source", "chars", "n_calls", "n_tips", "noise",
+            "promo", "backend", "extraction_backend", "llm_attempts",
+            "llm_failure_reason", "requires_review", "model", "error", "processed_at"]
 
 MIN_DURATION = 180      # 短すぎる動画は費用対効果が悪いので既定で除外 (秒)
 MAX_DURATION = 7200
@@ -301,11 +302,14 @@ def process_one(v: dict, args, verbose: bool = True) -> dict | None:
                 "market_view": "", "summary": [], "calls": [], "tips": [],
                 "error": tr.get("error") or "字幕なし"}
 
-    # 発信者の実績は「この動画の公開日より前に確定していた判定」だけを使う。
+    # 発信者の実績は「この動画の公開時刻より前に確定していた判定」だけを使う。
     # (後から判明した成績を過去動画に逆適用すると未来情報が混ざる)
-    asof = meta.get("upload_date") or ""
-    asof_str = f"{asof[:4]}-{asof[4:6]}-{asof[6:8]}" if len(asof) == 8 else None
-    src_rel = _track.source_reliability_asof(meta.get("channel", ""), asof_str)
+    # 公開時刻が分かればそれを、日付しか無ければその日の 00:00 JST を使う (保守的)。
+    pub_iso = (meta.get("published_at") or "").strip()
+    if not pub_iso:
+        ud = meta.get("upload_date") or ""
+        pub_iso = (f"{ud[:4]}-{ud[4:6]}-{ud[6:8]}T00:00:00+09:00" if len(ud) == 8 else "")
+    src_rel = _track.source_reliability_asof(meta.get("channel", ""), pub_iso or None)
     res = _ex.extract_tips(tr["text"], meta, backend=args.backend, model=args.model,
                            verbose=verbose, source_reliability=src_rel,
                            cross_check=args.cross_check)
@@ -315,6 +319,10 @@ def process_one(v: dict, args, verbose: bool = True) -> dict | None:
            "injection_suspected": res.get("injection_suspected", False),
            "injection_hits": res.get("injection_hits", []),
            "backend": res.get("backend", ""), "model": res.get("model", ""),
+           "extraction_backend": res.get("extraction_backend", ""),
+           "llm_attempts": res.get("llm_attempts", 0),
+           "llm_failure_reason": res.get("llm_failure_reason", ""),
+           "requires_review": res.get("requires_review", False),
            "noise": res.get("noise", False), "promo": res.get("promo", False),
            "market_view": res.get("market_view", ""), "summary": res.get("summary", []),
            "calls": res.get("calls", []), "tips": res.get("tips", [])}
@@ -323,6 +331,8 @@ def process_one(v: dict, args, verbose: bool = True) -> dict | None:
             rec[k] = res[k]
     if verbose:
         mark = " (ノイズ)" if rec["noise"] else ""
+        if rec.get("requires_review"):
+            mark += f" ⚠要確認({rec.get('llm_failure_reason') or 'heuristic/注入検出'})"
         print(f"  ✓ {vid} calls={len(rec['calls'])} tips={len(rec['tips'])}{mark} "
               f"[{rec['backend']}/{rec['source']}] {rec['title'][:36]}")
     return rec
@@ -600,6 +610,8 @@ def build_html(recs: list[dict], days: int | None, sigs: dict[str, list[dict]] |
         risks = "・".join(c.get("risks") or []) or "-"
         agree = (f'<br><span class="muted">{_esc(c["agreement"])}</span>'
                  if c.get("agreement") and c["agreement"] != "未実施" else "")
+        if c.get("requires_review"):
+            agree += '<br><span class="unverified">要確認</span>' 
         ext   = int(c.get("extraction_confidence") or 0)
         agr   = c.get("agreement_score")
         srel  = c.get("source_reliability")
@@ -709,6 +721,9 @@ def build_html(recs: list[dict], days: int | None, sigs: dict[str, list[dict]] |
         promo = ' <span class="warn">宣伝多め</span>' if r.get("promo") else ""
         inj   = (' <span class="unverified">字幕に指示文を検出</span>'
                  if r.get("injection_suspected") else "")
+        if r.get("llm_failure_reason"):
+            inj += (f' <span class="unverified">LLM失敗→heuristic '
+                    f'({_esc(r["llm_failure_reason"])}, {r.get("llm_attempts", 0)}回試行)</span>')
         cards += f"""
       <div class="card{cls}">
         <h3><a href="{_esc(r['url'])}" target="_blank">{_esc(r['title'] or r['video_id'])}</a>{promo}{inj}</h3>
@@ -745,6 +760,7 @@ def build_html(recs: list[dict], days: int | None, sigs: dict[str, list[dict]] |
     <span class="stat">銘柄見解 <b>{len(calls)}</b> 件</span>
     <span class="stat">Tips <b>{len(tips)}</b> 件</span>
     <span class="stat">字幕取得失敗 <b>{len(fails)}</b> 本</span>
+    <span class="stat">要確認 <b>{sum(1 for r in recs if r.get('requires_review'))}</b> 本</span>
   </div>
   {injection_banner}
 
@@ -806,6 +822,8 @@ def print_digest(recs: list[dict], category: str | None) -> None:
         for c in calls[:20]:
             mark = " ★WATCHLIST" if c.get("ticker") in wl else ""
             ver  = "" if c.get("code_verified") else " [コード未確認]"
+            if c.get("requires_review"):
+                ver += " [要確認]"
             agr  = c.get("agreement_score")
             srel = c.get("source_reliability")
             print(f"  {c.get('ticker') or '----'} {c.get('company','')[:12]:<12} "

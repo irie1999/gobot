@@ -10,17 +10,24 @@ youtube_tips.py が貯めた calls (銘柄への売買見解) を、実際の株
   1. **基準価格は「公開後に現実に買える最初の価格」**。公開時刻で場合分けする:
 
        寄り付き前 (< 09:00 JST) に公開 → その日の始値
-       ザラ場中   (09:00-15:00)  に公開 → その日の終値      ※日足の制約 (下記)
+       ザラ場中   (09:00-15:00)  に公開 → 公開後最初の分足の始値
+                                          分足が取れなければ **翌営業日の始値**
        引け後     (>= 15:00)     に公開 → 翌営業日の始値
        公開時刻が不明 (日付のみ)        → 翌営業日の始値 (最も保守的)
 
-     日足しか持っていないため、ザラ場中公開の「公開直後の約定価格」は取れない。
-     その日の終値を代用しており、実際の値より有利にも不利にもなりうる。
-     どのルールを使ったかは CSV の entry_rule 列に残す。
+     **ザラ場公開に「当日終値」は使わない。** 10 時公開の動画に 15 時の終値を
+     当てると、公開時点では知り得ない価格を参照することになり未来情報になる。
+     分足 (yfinance の 5 分足は直近 60 日程度しか取れない) が使える場合だけ
+     「公開後最初の足の始値」を使い、それ以外は翌営業日始値へ寄せる。
+
+     どうしても当日終値で評価したい場合は allow_proxy=True / --intraday-proxy を
+     明示的に指定する。その行は entry_rule="same_day_close_proxy" として記録され、
+     **正式な的中率と発信者実績からは除外**される (参考値としてのみ別集計)。
 
   2. **チャンネル実績はその時点で確定していた結果だけで計算する**
-     (`source_reliability_asof`)。動画 X を採点するときに使ってよいのは、
-     X の公開日より前に評価期間 (30日) が満了していた見解だけ。
+     (`source_reliability_asof`)。判定が確定した日時 (resolved_at) は
+     「評価期間の最終足の大引け (15:00 JST)」として **タイムゾーン付きで** 記録し、
+     `resolved_at < 動画の公開日時` を満たすものだけを集計する。
      後から判明した成績を過去動画に逆適用すると、バックテストに未来情報が混ざる。
 
 【株価データ】
@@ -38,7 +45,8 @@ youtube_tips.py が貯めた calls (銘柄への売買見解) を、実際の株
   python tips_track.py --update --days 180 # 直近180日に公開された動画だけ
   python tips_track.py --report            # チャンネル別ランキング
   python tips_track.py --report --by-symbol # 銘柄別
-  python tips_track.py --asof 2026-06-01 --channel "○○ch"   # 時点実績の確認
+  python tips_track.py --update --intraday-proxy   # ザラ場公開を当日終値で参考評価
+  python tips_track.py --asof 2026-06-01T21:00+09:00 --channel "○○ch"  # 時点実績
 """
 
 from __future__ import annotations
@@ -66,11 +74,21 @@ NEUTRAL_SCORE       = 50.0          # 実績不明のときの source_reliabilit
 
 MARKET_OPEN  = time(9, 0)
 MARKET_CLOSE = time(15, 0)
+INTRADAY_LOOKBACK_DAYS = 55        # yfinance の分足が遡れる範囲 (60日弱)
+INTRADAY_INTERVAL      = "5m"
+
+RULE_SAME_OPEN   = "当日始値(寄付前公開)"
+RULE_INTRADAY    = "公開後最初の分足始値(ザラ場公開)"
+RULE_NEXT_OPEN   = "翌営業日始値"
+RULE_NEXT_INTRA  = "翌営業日始値(ザラ場公開/分足なし)"
+RULE_PROXY       = "same_day_close_proxy"      # 未来情報を含む参考値。正式集計から除外
+PROXY_RULES      = (RULE_PROXY,)
 
 TRACK_COLS = ["video_id", "channel", "upload_date", "published_at", "ticker", "company",
-              "stance", "extraction_confidence", "entry_rule", "entry_date", "entry_price",
-              "ret_30", "ret_90", "ret_now", "hit_30", "hit_90", "judged_30_at",
-              "judged_90_at", "priced_in", "status", "url"]
+              "stance", "extraction_backend", "requires_review", "extraction_confidence",
+              "entry_rule", "is_proxy", "entry_date", "entry_price",
+              "ret_30", "ret_90", "ret_now", "hit_30", "hit_90",
+              "resolved_30_at", "resolved_90_at", "priced_in", "status", "url"]
 
 
 # ── 価格取得 (調整後終値) ──────────────────────────────────────────────
@@ -107,6 +125,35 @@ def _fetch_adjusted(symbol: str):
     return raw
 
 
+def _fetch_intraday(symbol: str, day: date) -> list[tuple[datetime, float]]:
+    """
+    指定日の分足 [(時刻JST, 始値), ...] を返す。取れなければ空リスト。
+    yfinance の分足は直近 60 日程度しか遡れないため、それより古い動画では空になる
+    (呼び出し側は翌営業日始値へフォールバックする)。
+    """
+    if (date.today() - day).days > INTRADAY_LOOKBACK_DAYS:
+        return []
+    try:
+        import yfinance as yf
+        raw = yf.Ticker(f"{symbol}.T").history(
+            start=day.isoformat(), end=(day + timedelta(days=1)).isoformat(),
+            interval=INTRADAY_INTERVAL, auto_adjust=True, actions=False)
+    except Exception:
+        return []
+    if raw is None or len(raw) == 0:
+        return []
+    raw.columns = [str(c).lower() for c in raw.columns]
+    out: list[tuple[datetime, float]] = []
+    for idx, row in raw.iterrows():
+        ts = idx.to_pydatetime()
+        ts = ts.astimezone(JST) if ts.tzinfo else ts.replace(tzinfo=JST)
+        try:
+            out.append((ts, float(row["open"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
 # ── 日足 → 純 Python のバー列 (テストしやすくするため) ────────────────
 def to_bars(df) -> list[tuple[date, float, float]]:
     """DataFrame を [(日付, 始値, 終値), ...] に変換する。"""
@@ -117,22 +164,61 @@ def to_bars(df) -> list[tuple[date, float, float]]:
 
 # ── 基準価格 (公開後に現実に買える最初の価格) ─────────────────────────
 def entry_reference(bars: list[tuple[date, float, float]], published: datetime,
-                    has_time: bool) -> tuple[str, float, str]:
+                    has_time: bool, intraday: list[tuple[datetime, float]] | None = None,
+                    allow_proxy: bool = False) -> tuple[str, float, str]:
     """
     (entry_date, entry_price, entry_rule) を返す。取れなければ ("", 0.0, 理由)。
-    ルールの根拠はモジュール docstring を参照。
+
+    ザラ場中の公開は「公開後最初の分足の始値」を使う。分足が無ければ翌営業日始値。
+    allow_proxy=True のときだけ当日終値を使うが、それは未来情報を含む参考値なので
+    entry_rule=RULE_PROXY として記録し、正式な集計からは除外される。
     """
     pub_d = published.date()
     same  = [b for b in bars if b[0] == pub_d]
     after = [b for b in bars if b[0] > pub_d]
 
+    # 寄り付き前 → 当日始値
     if has_time and published.time() < MARKET_OPEN and same:
-        return same[0][0].strftime("%Y-%m-%d"), same[0][1], "当日始値(寄付前公開)"
-    if has_time and MARKET_OPEN <= published.time() < MARKET_CLOSE and same:
-        return same[0][0].strftime("%Y-%m-%d"), same[0][2], "当日終値(ザラ場公開/日足代用)"
+        return same[0][0].strftime("%Y-%m-%d"), same[0][1], RULE_SAME_OPEN
+
+    # ザラ場中 → 公開後最初の分足始値 (無ければ翌営業日始値)
+    if has_time and MARKET_OPEN <= published.time() < MARKET_CLOSE:
+        for ts, op in (intraday or []):
+            if ts > published:
+                return ts.strftime("%Y-%m-%d"), float(op), RULE_INTRADAY
+        if allow_proxy and same:
+            # 当日終値は「公開時点では未知の価格」。参考値としてのみ残す
+            return same[0][0].strftime("%Y-%m-%d"), same[0][2], RULE_PROXY
+        if after:
+            return after[0][0].strftime("%Y-%m-%d"), after[0][1], RULE_NEXT_INTRA
+        return "", 0.0, "評価可能な足がまだ無い"
+
     if after:
-        return after[0][0].strftime("%Y-%m-%d"), after[0][1], "翌営業日始値"
+        return after[0][0].strftime("%Y-%m-%d"), after[0][1], RULE_NEXT_OPEN
     return "", 0.0, "評価可能な足がまだ無い"
+
+
+def _resolved_at(bar_day: date) -> str:
+    """判定が確定した日時 = その足の大引け (15:00 JST) を ISO8601 で返す。"""
+    return datetime.combine(bar_day, MARKET_CLOSE, tzinfo=JST).isoformat(timespec="seconds")
+
+
+def parse_dt(v) -> datetime | None:
+    """ISO8601 (または YYYY-MM-DD) を JST の datetime に。日付だけなら大引け扱い。"""
+    if isinstance(v, datetime):
+        return v.astimezone(JST) if v.tzinfo else v.replace(tzinfo=JST)
+    txt = str(v or "").strip()
+    if not txt:
+        return None
+    try:
+        dt = datetime.fromisoformat(txt.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            dt = datetime.strptime(txt[:10], "%Y-%m-%d")
+        except ValueError:
+            return None
+        dt = datetime.combine(dt.date(), MARKET_CLOSE)
+    return dt.astimezone(JST) if dt.tzinfo else dt.replace(tzinfo=JST)
 
 
 def _parse_published(rec: dict) -> tuple[datetime | None, bool]:
@@ -152,9 +238,12 @@ def _parse_published(rec: dict) -> tuple[datetime | None, bool]:
 
 # ── 1 件の評価 ─────────────────────────────────────────────────────────
 def _eval_call(bars: list[tuple[date, float, float]], published: datetime,
-               has_time: bool, stance: str) -> dict:
-    edate, entry, rule = entry_reference(bars, published, has_time)
+               has_time: bool, stance: str,
+               intraday: list[tuple[datetime, float]] | None = None,
+               allow_proxy: bool = False) -> dict:
+    edate, entry, rule = entry_reference(bars, published, has_time, intraday, allow_proxy)
     out = {"entry_rule": rule, "entry_date": edate,
+           "is_proxy": rule in PROXY_RULES,
            "entry_price": round(entry, 1) if entry else "", "status": "ok"}
     if not edate or entry <= 0:
         out["status"] = "pending"
@@ -168,14 +257,13 @@ def _eval_call(bars: list[tuple[date, float, float]], published: datetime,
     now = datetime.now(JST)
     for h in HORIZONS:
         end = entry_dt + timedelta(days=h)
-        out[f"judged_{h}_at"] = end.strftime("%Y-%m-%d")
-        if end > now:
-            out[f"ret_{h}"], out[f"hit_{h}"] = None, None
-            out["status"] = "pending"
-            continue
         window = [b for b in bars if b[0] <= end.date()]
-        if not window:
+        # 判定が確定するのは「評価期間の最終足の大引け」
+        out[f"resolved_{h}_at"] = _resolved_at(window[-1][0]) if window else ""
+        if end > now or not window:
             out[f"ret_{h}"], out[f"hit_{h}"] = None, None
+            if end > now:
+                out["status"] = "pending"
             continue
         ret = (window[-1][2] / entry - 1) * 100
         out[f"ret_{h}"] = round(ret, 2)
@@ -215,11 +303,15 @@ def load_calls(days: int = 0) -> list[dict]:
                 "company": c.get("company", ""), "stance": c.get("stance", "中立"),
                 "extraction_confidence": c.get("extraction_confidence",
                                                c.get("reliability", "")),
+                # heuristic フォールバックの結果は正式な実績集計に入れない
+                "extraction_backend": r.get("extraction_backend") or r.get("backend", ""),
+                "requires_review": bool(r.get("requires_review")),
             }
     return list(seen.values())
 
 
-def update(days: int = 0, verbose: bool = True) -> list[dict]:
+def update(days: int = 0, verbose: bool = True,
+           allow_proxy: bool = False) -> list[dict]:
     calls = load_calls(days)
     if not calls:
         print("検証対象の calls がありません (ticker 確定済みの見解が必要)。")
@@ -237,11 +329,16 @@ def update(days: int = 0, verbose: bool = True) -> list[dict]:
         bars = cache[sym]
         base = {k: c.get(k, "") for k in
                 ("video_id", "channel", "upload_date", "published_at", "ticker",
-                 "company", "stance", "extraction_confidence", "url")}
+                 "company", "stance", "extraction_confidence", "extraction_backend",
+                 "requires_review", "url")}
         if not bars:
             rows.append({**base, "status": "no_data"})
             continue
-        rows.append({**base, **_eval_call(bars, c["published"], c["has_time"], c["stance"])})
+        intraday = []
+        if c["has_time"] and MARKET_OPEN <= c["published"].time() < MARKET_CLOSE:
+            intraday = _fetch_intraday(sym, c["published"].date())
+        rows.append({**base, **_eval_call(bars, c["published"], c["has_time"],
+                                          c["stance"], intraday, allow_proxy)})
         if verbose:
             r = rows[-1]
             print(f"  · {sym} {c['company'][:10]:<10} {c['stance']} "
@@ -265,22 +362,37 @@ def build_stats(rows: list[dict]) -> dict:
     """
     チャンネル別に「いつ判定が確定したか」を含む履歴を残す。
     source_reliability_asof がこの履歴を使って、指定時点までの成績だけを集計する。
+
+    **正式な実績から除外するもの** (別カウントして可視化する):
+      ・entry_rule が proxy (当日終値代用 = 未来情報を含む参考値)
+      ・heuristic フォールバックで抽出した見解 / requires_review が立っている見解
     """
     out: dict[str, dict] = {}
     for r in rows:
         ch = r.get("channel") or "(不明)"
-        a  = out.setdefault(ch, {"calls": 0, "history": [], "ret30": [], "ret90": []})
+        a  = out.setdefault(ch, {"calls": 0, "history": [], "ret30": [], "ret90": [],
+                                 "excluded_proxy": 0, "excluded_heuristic": 0})
         a["calls"] += 1
+        is_proxy = str(r.get("is_proxy", "")).lower() in ("true", "1") or \
+                   r.get("entry_rule") in PROXY_RULES
+        low_qual = (str(r.get("extraction_backend", "")).startswith("heuristic")
+                    or str(r.get("requires_review", "")).lower() in ("true", "1"))
+        if is_proxy:
+            a["excluded_proxy"] += 1
+        if low_qual:
+            a["excluded_heuristic"] += 1
+        if is_proxy or low_qual:
+            continue
         for h, key in ((30, "ret30"), (90, "ret90")):
             v = r.get(f"ret_{h}")
             if isinstance(v, (int, float)):
                 a[key].append(v)
         hit = r.get("hit_30")
-        if isinstance(hit, bool) and r.get("judged_30_at"):
-            a["history"].append({"judged_at": r["judged_30_at"], "hit": hit})
+        if isinstance(hit, bool) and r.get("resolved_30_at"):
+            a["history"].append({"resolved_at": r["resolved_30_at"], "hit": hit})
 
     for ch, a in out.items():
-        a["history"].sort(key=lambda x: x["judged_at"])
+        a["history"].sort(key=lambda x: x["resolved_at"])
         judged = len(a["history"])
         hits   = sum(1 for h in a["history"] if h["hit"])
         a["judged"]     = judged
@@ -288,7 +400,7 @@ def build_stats(rows: list[dict]) -> dict:
         a["avg_ret_30"] = round(sum(a["ret30"]) / len(a["ret30"]), 2) if a["ret30"] else None
         a["avg_ret_90"] = round(sum(a["ret90"]) / len(a["ret90"]), 2) if a["ret90"] else None
         a["source_reliability"] = _score(hits, judged)
-        a["updated"] = datetime.now(JST).strftime("%Y-%m-%d")
+        a["updated"] = datetime.now(JST).isoformat(timespec="seconds")
         del a["ret30"], a["ret90"]
     return out
 
@@ -319,7 +431,9 @@ def source_reliability_asof(channel: str, asof: str | datetime | None = None,
     """
     **asof 時点で既に確定していた** 判定だけを使って発信者の実績を算出する。
 
-    asof には「これから採点する動画の公開日」を渡すこと。
+    asof には「これから採点する動画の公開日時」を渡すこと (タイムゾーン付き推奨)。
+    比較は日付ではなく時刻まで見て `resolved_at < asof` を保証する
+    (同じ日に確定した判定を、その日の朝に公開された動画へ使わないため)。
     None を返したら実績不明 (呼び出し側は 50 = 中立として扱う)。
     """
     st = (stats if stats is not None else load_channel_stats()).get(channel)
@@ -328,10 +442,15 @@ def source_reliability_asof(channel: str, asof: str | datetime | None = None,
     hist = st.get("history") or []
     if asof is None:
         return st.get("source_reliability")
-    if isinstance(asof, datetime):
-        asof = asof.strftime("%Y-%m-%d")
-    asof = str(asof)[:10]
-    past = [h for h in hist if str(h.get("judged_at", ""))[:10] < asof]
+    asof_dt = parse_dt(asof)
+    if asof_dt is None:
+        return st.get("source_reliability")
+
+    past = []
+    for h in hist:
+        r = parse_dt(h.get("resolved_at") or h.get("judged_at"))
+        if r is not None and r < asof_dt:
+            past.append(h)
     return _score(sum(1 for h in past if h.get("hit")), len(past))
 
 
@@ -378,8 +497,14 @@ def report(by_symbol: bool = False) -> None:
         a90 = f"{s['avg_ret_90']:+.2f}%" if s["avg_ret_90"] is not None else "-"
         sc  = f"{s['source_reliability']:.1f}" if s["source_reliability"] is not None else "不明"
         print(f"{ch[:23]:<24}{s['calls']:>5}{s['judged']:>6}{hr:>8}{a30:>9}{a90:>9}{sc:>10}")
-    pend = sum(1 for r in rows if r.get("status") == "pending")
+    pend  = sum(1 for r in rows if r.get("status") == "pending")
+    proxy = sum(v["excluded_proxy"] for v in stats.values())
+    heur  = sum(v["excluded_heuristic"] for v in stats.values())
     print(f"\n判定待ち (評価期間が未経過): {pend} 件")
+    if proxy:
+        print(f"正式集計から除外 (当日終値の参考評価): {proxy} 件")
+    if heur:
+        print(f"正式集計から除外 (heuristic 抽出 / 要確認): {heur} 件")
     print(f"※ 実績スコアは 0-100 (50=中立)。判定済 {MIN_CALLS_FOR_SCORE} 件未満は『不明』、"
           f"{FULL_WEIGHT_N} 件で満額反映。")
     print("※ 抽出時に使うのは『その動画の公開日より前に確定していた分だけ』"
@@ -392,7 +517,10 @@ def main() -> None:
     ap.add_argument("--report", action="store_true", help="集計結果を表示")
     ap.add_argument("--by-symbol", action="store_true", help="銘柄別に集計")
     ap.add_argument("--days", type=int, default=0, help="直近N日の動画のみ検証")
-    ap.add_argument("--asof", help="この日付時点の実績を表示 (YYYY-MM-DD)")
+    ap.add_argument("--asof", help="この時点の実績を表示 (YYYY-MM-DD または ISO8601)")
+    ap.add_argument("--intraday-proxy", action="store_true",
+                    help="分足が無いザラ場公開を当日終値で参考評価する "
+                         "(未来情報を含むため正式集計からは除外される)")
     ap.add_argument("--channel", help="--asof で見るチャンネル名")
     a = ap.parse_args()
 
@@ -405,7 +533,7 @@ def main() -> None:
                   f"{'不明 (判定済不足)' if v is None else v}")
         return
     if a.update:
-        update(a.days)
+        update(a.days, allow_proxy=a.intraday_proxy)
     if a.report or not a.update:
         report(a.by_symbol)
 

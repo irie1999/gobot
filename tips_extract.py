@@ -59,8 +59,10 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 
 import symbol_lookup
 
@@ -71,6 +73,17 @@ MAX_TIPS        = 12
 MAX_CALLS       = 10
 CLI_TIMEOUT     = 420                 # 1 呼び出しの上限秒 (ハング防止)
 VALIDATE_RETRIES = 2                  # スキーマ違反時の再試行回数
+
+# 外部エージェント CLI をツール実行できない状態で起動するための既定引数。
+# 「字幕内の指示に従うな」というプロンプトだけに頼らず、実行権限そのものを削る。
+# フラグ名は CLI のバージョンで変わりうるので TIPS_LLM_SANDBOX_ARGS で上書きできる。
+SANDBOX_PROFILES: dict[str, list[str]] = {
+    "codex":  ["--sandbox", "read-only", "--ask-for-approval", "never"],
+    "gemini": ["--approval-mode", "yolo-off"],
+}
+# claude CLI 用: 抽出は純粋なテキスト処理なので全ツールを禁止する
+CLAUDE_DENY_TOOLS = ("Bash,Read,Write,Edit,MultiEdit,NotebookEdit,WebFetch,WebSearch,"
+                     "Glob,Grep,Task,Agent,TodoWrite,KillShell,BashOutput,SlashCommand")
 
 STANCES  = ("強気", "弱気", "中立")
 HORIZONS = ("数日", "数週間", "数ヶ月", "不明")
@@ -347,13 +360,15 @@ def _call_cli(prompt: str, model: str) -> str:
     # --system-prompt でシステムプロンプトごと差し替える。
     # CLAUDE.md 探索やツール定義が乗らないので、要約タスクとしては最小コストで済む。
     # プロンプトは stdin のみ (引数に字幕を載せない)。
+    # 抽出はテキスト処理だけなので全ツールを禁止し、空の一時ディレクトリで走らせる。
     cmd = ["claude", "-p", "--output-format", "json",
            "--model", model,
            "--system-prompt", SYSTEM_PROMPT,
-           "--strict-mcp-config",          # MCP サーバを読み込まない
-           "--disable-slash-commands"]     # skill 探索をしない
-    p = subprocess.run(cmd, input=prompt, capture_output=True, text=True,
-                       timeout=CLI_TIMEOUT, encoding="utf-8", errors="replace")
+           "--strict-mcp-config",              # MCP サーバを読み込まない
+           "--disable-slash-commands",         # skill 探索をしない
+           "--disallowed-tools", CLAUDE_DENY_TOOLS,
+           "--permission-mode", "manual"]      # 自動承認しない
+    p = _run_isolated(cmd, prompt, CLI_TIMEOUT)
     if p.returncode != 0:
         raise RuntimeError(f"claude CLI 失敗 (exit={p.returncode}): "
                            f"{(p.stderr or '').strip()[:300]}")
@@ -363,6 +378,81 @@ def _call_cli(prompt: str, model: str) -> str:
         return json.loads(p.stdout).get("result", "")
     except json.JSONDecodeError:
         return p.stdout
+
+
+# ── 外部プロセスの隔離実行 ────────────────────────────────────────────
+def _sandbox_args(argv: list[str]) -> list[str]:
+    """
+    エージェント CLI に付ける隔離用の引数を返す。
+
+    ・TIPS_LLM_SANDBOX_ARGS が設定されていればそれを使う
+    ・既知の CLI (codex 等) には SANDBOX_PROFILES の既定を付ける
+      (利用者が同種のフラグを既に書いていれば二重に付けない)
+    ・未知の CLI は TIPS_LLM_ALLOW_UNSANDBOXED=1 が無い限り実行を拒否する
+    """
+    override = os.environ.get("TIPS_LLM_SANDBOX_ARGS")
+    if override is not None and override.strip():
+        return shlex.split(override)
+
+    name    = os.path.basename(argv[0])
+    profile = SANDBOX_PROFILES.get(name)
+    if profile is None or (override is not None and not override.strip()):
+        if os.environ.get("TIPS_LLM_ALLOW_UNSANDBOXED") == "1":
+            return []
+        raise RuntimeError(
+            f"{name} の隔離設定が不明なため実行しません。読み取り専用・承認なしで動く"
+            f"引数を TIPS_LLM_SANDBOX_ARGS に指定してください "
+            f'(例: TIPS_LLM_SANDBOX_ARGS="--sandbox read-only --ask-for-approval never")。'
+            f" 意図的に無効化する場合のみ TIPS_LLM_ALLOW_UNSANDBOXED=1。")
+    if any(a in argv for a in profile):
+        return []
+    return profile
+
+
+def _sandbox_env() -> dict:
+    """
+    子プロセスへ渡す最小限の環境変数。
+
+    注意: LLM API へ到達するためのネットワーク自体は切れない (切ると抽出できない)。
+    ここで断つのは「リポジトリへの経路」と余計な設定であり、
+    ツール実行の禁止 (--sandbox / --disallowed-tools) と
+    空の作業ディレクトリと合わせて多層で守る。
+    OS レベルでネットワークを遮断したい場合は TIPS_LLM_CMD 自体を
+    firejail --net=none 等でラップすること。
+    """
+    keep = ("PATH", "HOME", "LANG", "LC_ALL", "TZ", "USER", "SHELL",
+            "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy",
+            "no_proxy", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
+            "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "OPENAI_API_KEY",
+            "CODEX_HOME", "XDG_CONFIG_HOME")
+    return {k: v for k, v in os.environ.items() if k in keep}
+
+
+def _run_isolated(argv: list[str], stdin_text: str, timeout: int) -> subprocess.CompletedProcess:
+    """
+    空の一時ディレクトリを作業ディレクトリにして子プロセスを起動する。
+    ・gobot リポジトリを cwd にしない (字幕由来の指示でファイルを触られないため)
+    ・start_new_session=True でプロセスグループを分け、タイムアウト時は
+      **子孫プロセスごと** SIGKILL する
+    """
+    with tempfile.TemporaryDirectory(prefix="tips_llm_") as work:
+        env = _sandbox_env()
+        env["TMPDIR"] = work
+        p = subprocess.Popen(argv, cwd=work, env=env, text=True,
+                             encoding="utf-8", errors="replace",
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, start_new_session=True)
+        try:
+            out, err = p.communicate(stdin_text, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                p.kill()
+            out, err = p.communicate()
+            raise RuntimeError(f"{os.path.basename(argv[0])} がタイムアウト "
+                               f"({timeout}秒) — 子プロセスごと終了しました") from None
+        return subprocess.CompletedProcess(argv, p.returncode, out, err)
 
 
 # ── バックエンド 3: 任意の外部コマンド (codex など) ───────────────────
@@ -393,7 +483,11 @@ def _call_cmd(prompt: str, model: str) -> str:
     安全上の要点:
       ・shell=True を使わない。shlex.split した**引数配列**で起動する。
       ・字幕/タイトルは argv に載せず stdin だけで渡す (コマンドインジェクション対策)。
+      ・**空の一時ディレクトリ**を cwd にする (gobot リポジトリを触らせない)。
+      ・読み取り専用・承認なしで動く引数を強制する (_sandbox_args)。
+      ・環境変数は最小限に絞る (_sandbox_env)。
       ・終了コード・タイムアウト・空出力をすべて失敗として扱う。
+        タイムアウト時は子孫プロセスごと SIGKILL する。
       ・stderr は stdout と分離して受け取り、JSON 解析対象にしない。
     """
     c = llm_cmd()
@@ -403,9 +497,9 @@ def _call_cmd(prompt: str, model: str) -> str:
     if not argv or shutil.which(argv[0]) is None:
         raise RuntimeError(f"外部コマンドが見つかりません: {c}")
 
+    argv = argv + _sandbox_args(argv)
     full = f"{SYSTEM_PROMPT}\n\n{prompt}"
-    p = subprocess.run(argv, input=full, capture_output=True, text=True,
-                       timeout=CLI_TIMEOUT, encoding="utf-8", errors="replace")
+    p = _run_isolated(argv, full, CLI_TIMEOUT)
     if p.returncode != 0:
         raise RuntimeError(f"外部コマンド失敗 ({argv[0]}, exit={p.returncode}): "
                            f"{(p.stderr or '').strip()[:300]}")
@@ -644,26 +738,38 @@ def compare_calls(a: dict, b: dict) -> tuple[str, int, dict]:
     return ("一致" if score >= 80 else "部分一致"), score, detail
 
 
-def merge_cross_check(primary: dict, second: dict) -> dict:
+def merge_cross_check(primary: dict, second: dict, second_backend: str = "") -> dict:
     """
     独立に抽出した 2 つの結果を Python 側で突き合わせる。
     **片方の出力をもう片方の LLM に見せることはしない** (独立性を保つため)。
+
+    2 つ目が heuristic (LLM 不使用) の場合は「一致」を根拠として扱わない。
+    キーワード抽出との一致は品質の証拠にならないため、agreement_score は None
+    (中立) のままにし、ラベルだけ 参考(heuristic) として残す。
     """
+    weak = str(second_backend).startswith("heuristic")
     by2 = {c["ticker"] or c["company"]: c for c in second.get("calls", [])}
     for c in primary.get("calls", []):
         key = c["ticker"] or c["company"]
         o   = by2.pop(key, None)
         if o is None:
-            c["agreement"], c["agreement_score"] = "片側", 25
+            c["agreement"], c["agreement_score"] = "片側", (None if weak else 25)
             c["agreement_detail"] = {}
         else:
             label, score, detail = compare_calls(c, o)
-            c["agreement"], c["agreement_score"], c["agreement_detail"] = label, score, detail
+            if weak:
+                c["agreement"] = f"参考(heuristic): {label}"
+                c["agreement_score"] = None          # 一致ボーナスの対象外
+            else:
+                c["agreement"], c["agreement_score"] = label, score
+            c["agreement_detail"] = detail
         c["reference_score"] = reference_score(
             c["extraction_confidence"], c["agreement_score"], c["source_reliability"])
 
     for _k, o in by2.items():
-        o["agreement"], o["agreement_score"] = "片側(2nd)", 25
+        o["agreement"] = "片側(2nd)" + ("/heuristic" if weak else "")
+        o["agreement_score"] = None if weak else 25
+        o["requires_review"] = True if weak else o.get("requires_review", False)
         o["agreement_detail"] = {}
         o["ai_note"] = (o.get("ai_note", "") + " ※第2エンジンのみが検出").strip()
         o["reference_score"] = reference_score(
@@ -702,14 +808,18 @@ def _call(prompt: str, backend: str, model: str) -> str:
     raise ValueError(backend)
 
 
-def _call_validated(prompt: str, backend: str, model: str, verbose: bool) -> dict:
+def _call_validated(prompt: str, backend: str, model: str, verbose: bool,
+                    stats: dict | None = None) -> dict:
     """
     呼び出し → JSON 取り出し → スキーマ検証。
     検証に落ちたら訂正指示を足して再試行する (最大 VALIDATE_RETRIES 回)。
+    stats には試行回数 (llm_attempts) を積む (フォールバック時の記録用)。
     """
     last: Exception | None = None
     for attempt in range(VALIDATE_RETRIES + 1):
         p = prompt if attempt == 0 else prompt + RETRY_SUFFIX.format(problem=last)
+        if stats is not None:
+            stats["llm_attempts"] = stats.get("llm_attempts", 0) + 1
         try:
             return validate_extraction(_loads(_call(p, backend, model)))
         except SchemaError as e:
@@ -745,19 +855,41 @@ def build_prompt(transcript: str, meta: dict) -> str:
 
 
 def _run_backend(transcript: str, meta: dict, backend: str, model: str,
-                 verbose: bool) -> dict:
+                 verbose: bool, stats: dict | None = None) -> dict:
     parts   = _chunks(transcript, CHUNK_CHARS)
     results = []
     for n, c in enumerate(parts, 1):
         if verbose and len(parts) > 1:
             print(f"    [{backend}] chunk {n}/{len(parts)} ({len(c)}字)", file=sys.stderr)
-        results.append(_call_validated(build_prompt(c, meta), backend, model, verbose))
+        results.append(_call_validated(build_prompt(c, meta), backend, model, verbose, stats))
     if len(results) == 1:
         return results[0]
     return _call_validated(
         MERGE_PROMPT.format(max_tips=MAX_TIPS, max_calls=MAX_CALLS,
                             parts=json.dumps(results, ensure_ascii=False)),
-        backend, model, verbose)
+        backend, model, verbose, stats)
+
+
+def _failure_reason(e: Exception) -> str:
+    if isinstance(e, SchemaError):
+        return "schema_validation_failed"
+    if "タイムアウト" in str(e) or "timeout" in str(e).lower():
+        return "timeout"
+    return "backend_error"
+
+
+def _mark(out: dict, backend: str, attempts: int, reason: str,
+          requires_review: bool, injection: list[str]) -> dict:
+    """抽出の由来を記録する。heuristic フォールバックを成功と同じ顔にしないため。"""
+    out["extraction_backend"]  = backend
+    out["llm_attempts"]        = attempts
+    out["llm_failure_reason"]  = reason
+    out["injection_suspected"] = bool(out.get("injection_suspected") or injection)
+    out["injection_hits"]      = injection
+    out["requires_review"]     = bool(requires_review or out["injection_suspected"])
+    for c in out.get("calls", []):
+        c["requires_review"] = out["requires_review"] or c.get("requires_review", False)
+    return out
 
 
 def extract_tips(transcript: str, meta: dict, backend: str = "auto",
@@ -771,14 +903,17 @@ def extract_tips(transcript: str, meta: dict, backend: str = "auto",
     渡すこと (tips_track.source_reliability_asof)。未来の成績を渡すと
     事後検証に未来情報が混ざる。
 
-    LLM 呼び出しやスキーマ検証に失敗した場合は heuristic に自動フォールバックする
-    (日次バッチが 1 本のエラーで止まらないようにするため)。
+    LLM 呼び出しやスキーマ検証に失敗した場合は heuristic に自動フォールバックするが、
+    **成功と同じ扱いにはしない**。extraction_backend / llm_attempts /
+    llm_failure_reason / requires_review を必ず記録し、相互チェックの
+    「一致」根拠にもしない (日次バッチは止めないが、人間の確認対象として残す)。
     """
     transcript = (transcript or "").strip()
     if not transcript:
-        return {**_normalize({"noise": True, "summary": ["字幕が取得できませんでした"]},
-                             source_reliability),
-                "backend": "none", "model": ""}
+        return _mark({**_normalize({"noise": True,
+                                    "summary": ["字幕が取得できませんでした"]},
+                                   source_reliability), "backend": "none", "model": ""},
+                     "none", 0, "no_transcript", True, [])
 
     injection = detect_injection(transcript)
     if injection and verbose:
@@ -789,21 +924,20 @@ def extract_tips(transcript: str, meta: dict, backend: str = "auto",
     if backend == "heuristic":
         out = {**_normalize(_heuristic(transcript, meta), source_reliability),
                "backend": "heuristic", "model": ""}
-        out["injection_suspected"] = out["injection_suspected"] or bool(injection)
-        out["injection_hits"] = injection
-        return out
+        return _mark(out, "heuristic", 0, "", True, injection)
 
+    stats: dict = {"llm_attempts": 0}
     try:
-        raw = _run_backend(transcript, meta, backend, model, verbose)
+        raw = _run_backend(transcript, meta, backend, model, verbose, stats)
         out = {**_normalize(raw, source_reliability), "backend": backend, "model": model}
     except Exception as e:
+        reason = _failure_reason(e)
         if verbose:
-            print(f"    ! {backend} 失敗 → heuristic: {str(e)[:160]}", file=sys.stderr)
+            print(f"    ! {backend} 失敗 ({reason}) → heuristic: {str(e)[:160]}",
+                  file=sys.stderr)
         out = {**_normalize(_heuristic(transcript, meta), source_reliability),
                "backend": "heuristic", "model": "", "error": f"{backend}: {str(e)[:200]}"}
-        out["injection_suspected"] = out["injection_suspected"] or bool(injection)
-        out["injection_hits"] = injection
-        return out
+        return _mark(out, "heuristic", stats["llm_attempts"], reason, True, injection)
 
     cc = pick_backend(cross_check) if cross_check else ""
     if cc and cc != backend:
@@ -811,16 +945,14 @@ def extract_tips(transcript: str, meta: dict, backend: str = "auto",
             # 2 つ目のエンジンにも「同じ字幕・同じスキーマ」だけを渡す (独立抽出)
             raw2 = (_heuristic(transcript, meta) if cc == "heuristic"
                     else _run_backend(transcript, meta, cc, model, verbose))
-            out  = merge_cross_check(out, _normalize(raw2, source_reliability))
+            out  = merge_cross_check(out, _normalize(raw2, source_reliability), cc)
             out["backend"] = f"{backend}+{cc}"
         except Exception as e:
             if verbose:
                 print(f"    ! cross-check({cc}) 失敗: {str(e)[:160]}", file=sys.stderr)
             out["cross_check_error"] = str(e)[:200]
 
-    out["injection_suspected"] = out.get("injection_suspected") or bool(injection)
-    out["injection_hits"] = injection
-    return out
+    return _mark(out, backend, stats["llm_attempts"], "", False, injection)
 
 
 # ── CLI (単体デバッグ用) ───────────────────────────────────────────────

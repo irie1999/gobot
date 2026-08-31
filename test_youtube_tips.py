@@ -12,10 +12,13 @@ test_youtube_tips.py  ―  YouTube Tips パイプラインの自己テスト
   4. コマンド実行    … 外部コマンドを引数配列で起動し、字幕を argv に載せないか
   5. スコア分離      … 抽出確度 / 一致度 / 発信者実績が混ざっていないか
   6. 相互チェック    … 時間軸相違を「実質不一致」として扱えるか
-  7. 基準価格        … 公開時刻による場合分け (寄付前 / ザラ場 / 引け後 / 不明)
-  8. 時点実績        … 未来の判定結果が過去動画の採点に混ざらないか
+  7. 基準価格        … 公開時刻による場合分け / ザラ場は分足 or 翌営業日始値
+  8. 時点実績        … 未来の判定結果が過去動画の採点に混ざらないか (時刻比較)
   9. 銘柄名寄せ      … 似た社名を取り違えないか
  10. 既定プロバイダ  … 非公式経路が既定で無効か
+ 11. 隔離実行        … 空の一時ディレクトリ / 未知CLIの拒否 / 子孫プロセスの停止
+ 12. フォールバック  … heuristic を成功扱いにせず、一致ボーナスも与えないか
+ 13. 集計除外        … proxy / heuristic の行を正式な実績から外すか
 """
 
 from __future__ import annotations
@@ -146,41 +149,42 @@ def test_command_safety() -> None:
     import subprocess
     calls: list[dict] = []
 
-    def fake_run(argv, **kw):
-        calls.append({"argv": argv, "kw": kw})
-        return subprocess.CompletedProcess(argv, 0, stdout='{"calls":[],"tips":[]}', stderr="")
+    def fake_isolated(argv, stdin_text, timeout):
+        calls.append({"argv": argv, "stdin": stdin_text, "timeout": timeout})
+        return subprocess.CompletedProcess(argv, 0, '{"calls":[],"tips":[]}', "")
 
-    orig_run, orig_which = subprocess.run, ex.shutil.which
+    orig_iso, orig_which = ex._run_isolated, ex.shutil.which
     ex.shutil.which = lambda x: "/usr/bin/" + x if x == "codex" else None
-    subprocess.run = fake_run
+    ex._run_isolated = fake_isolated
     os.environ["TIPS_LLM_CMD"] = "codex exec -"
     try:
         payload = "字幕; rm -rf / && echo pwned `whoami`"
         out = ex._call_cmd(payload, "m")
         check("stdout をそのまま返す", out.strip().startswith("{"))
         argv = calls[0]["argv"]
-        check("引数配列で起動する (shell=True を使わない)",
-              isinstance(argv, list) and calls[0]["kw"].get("shell") in (None, False))
+        check("引数配列で起動する (シェルを介さない)", isinstance(argv, list), argv)
         check("字幕を argv に載せない", all("rm -rf" not in a for a in argv), argv)
-        check("字幕は stdin で渡す", "rm -rf" in calls[0]["kw"].get("input", ""))
-        check("タイムアウトを設定", calls[0]["kw"].get("timeout") == ex.CLI_TIMEOUT)
-        check("stdout と stderr を分離", calls[0]["kw"].get("capture_output") is True)
+        check("字幕は stdin で渡す", "rm -rf" in calls[0]["stdin"])
+        check("隔離用の引数が付く", "--sandbox" in argv and "read-only" in argv, argv)
+        check("タイムアウトを渡す", calls[0]["timeout"] == ex.CLI_TIMEOUT)
 
-        subprocess.run = lambda argv, **kw: subprocess.CompletedProcess(argv, 1, "", "boom")
+        ex._run_isolated = lambda argv, stdin_text, timeout: \
+            subprocess.CompletedProcess(argv, 1, "", "boom")
         try:
             ex._call_cmd("x", "m")
             check("終了コード != 0 を失敗にする", False, "例外が出なかった")
         except RuntimeError:
             check("終了コード != 0 を失敗にする", True)
 
-        subprocess.run = lambda argv, **kw: subprocess.CompletedProcess(argv, 0, "   ", "")
+        ex._run_isolated = lambda argv, stdin_text, timeout: \
+            subprocess.CompletedProcess(argv, 0, "   ", "")
         try:
             ex._call_cmd("x", "m")
             check("空レスポンスを失敗にする", False, "例外が出なかった")
         except ex.SchemaError:
             check("空レスポンスを失敗にする", True)
     finally:
-        subprocess.run, ex.shutil.which = orig_run, orig_which
+        ex._run_isolated, ex.shutil.which = orig_iso, orig_which
         os.environ.pop("TIPS_LLM_CMD", None)
 
 
@@ -260,37 +264,51 @@ def test_entry_reference() -> None:
     bars = [(date(2026, 8, 26), 100.0, 101.0),
             (date(2026, 8, 27), 102.0, 103.0),
             (date(2026, 8, 28), 104.0, 105.0)]
-    cases = [
-        (datetime(2026, 8, 27, 8, 0, tzinfo=JST), True,  "2026-08-27", 102.0, "寄付前→当日始値"),
-        (datetime(2026, 8, 27, 11, 0, tzinfo=JST), True, "2026-08-27", 103.0, "ザラ場→当日終値"),
-        (datetime(2026, 8, 27, 16, 0, tzinfo=JST), True, "2026-08-28", 104.0, "引け後→翌営業日始値"),
-        (datetime(2026, 8, 27, 0, 0, tzinfo=JST), False, "2026-08-28", 104.0, "時刻不明→翌営業日始値"),
-    ]
-    for pub, has_time, want_d, want_p, label in cases:
-        d, p, _rule = tk.entry_reference(bars, pub, has_time)
-        check(label, (d, p) == (want_d, want_p), (d, p))
+    intra = [(datetime(2026, 8, 27, 10, 5, tzinfo=JST), 102.5),
+             (datetime(2026, 8, 27, 10, 10, tzinfo=JST), 102.8)]
+    noon = datetime(2026, 8, 27, 10, 0, tzinfo=JST)
+
+    d, p, rule = tk.entry_reference(bars, datetime(2026, 8, 27, 8, 0, tzinfo=JST), True)
+    check("寄付前→当日始値", (d, p) == ("2026-08-27", 102.0), (d, p, rule))
+
+    d, p, rule = tk.entry_reference(bars, noon, True, intra)
+    check("ザラ場→公開後最初の分足始値", (d, p) == ("2026-08-27", 102.5), (d, p, rule))
+
+    d, p, rule = tk.entry_reference(bars, noon, True, [])
+    check("ザラ場で分足なし→翌営業日始値 (当日終値を使わない)",
+          (d, p, rule) == ("2026-08-28", 104.0, tk.RULE_NEXT_INTRA), (d, p, rule))
+
+    d, p, rule = tk.entry_reference(bars, noon, True, [], True)
+    check("proxy 明示時のみ当日終値、ただし proxy 印",
+          (p, rule) == (103.0, tk.RULE_PROXY), (d, p, rule))
+
+    d, p, rule = tk.entry_reference(bars, datetime(2026, 8, 27, 16, 0, tzinfo=JST), True)
+    check("引け後→翌営業日始値", (d, p) == ("2026-08-28", 104.0), (d, p, rule))
+
+    d, p, rule = tk.entry_reference(bars, datetime(2026, 8, 27, 0, 0, tzinfo=JST), False)
+    check("時刻不明→翌営業日始値", (d, p) == ("2026-08-28", 104.0), (d, p, rule))
+
     d, p, rule = tk.entry_reference(bars, datetime(2026, 9, 5, 16, 0, tzinfo=JST), True)
     check("評価不能なら空で返す", d == "" and p == 0.0, rule)
 
-    ev = tk._eval_call(bars, datetime(2026, 8, 26, 16, 0, tzinfo=JST), True, "強気")
-    check("騰落率を基準価格から計算", ev["entry_price"] == 102.0 and ev["status"] == "pending",
-          ev)
+    ev = tk._eval_call(bars, noon, True, "強気", [], True)
+    check("proxy 行に is_proxy が立つ", ev["is_proxy"] is True, ev)
+    ev2 = tk._eval_call(bars, datetime(2026, 8, 26, 16, 0, tzinfo=JST), True, "強気")
+    check("判定確定日時を大引けで記録",
+          ev2.get("resolved_30_at", "").endswith("15:00:00+09:00"), ev2.get("resolved_30_at"))
+    check("proxy でない行は is_proxy=False", ev2["is_proxy"] is False)
 
 
 # ── 8. 時点実績 (未来情報の遮断) ──────────────────────────────────────
 def test_point_in_time() -> None:
     print("8. チャンネル実績は時点情報のみ")
+    def h(d, hit):
+        return {"resolved_at": f"{d}T15:00:00+09:00", "hit": hit}
     stats = {"ch": {"history": [
-        {"judged_at": "2026-01-10", "hit": True},
-        {"judged_at": "2026-01-20", "hit": True},
-        {"judged_at": "2026-02-01", "hit": True},
-        {"judged_at": "2026-02-10", "hit": True},
-        {"judged_at": "2026-02-20", "hit": True},
-        {"judged_at": "2026-07-01", "hit": False},
-        {"judged_at": "2026-07-02", "hit": False},
-        {"judged_at": "2026-07-03", "hit": False},
-        {"judged_at": "2026-07-04", "hit": False},
-        {"judged_at": "2026-07-05", "hit": False},
+        h("2026-01-10", True), h("2026-01-20", True), h("2026-02-01", True),
+        h("2026-02-10", True), h("2026-02-20", True),
+        h("2026-07-01", False), h("2026-07-02", False), h("2026-07-03", False),
+        h("2026-07-04", False), h("2026-07-05", False),
     ]}}
     early = tk.source_reliability_asof("ch", "2026-03-01", stats)
     late  = tk.source_reliability_asof("ch", "2026-08-01", stats)
@@ -301,6 +319,15 @@ def test_point_in_time() -> None:
     check("未知チャンネルは None", tk.source_reliability_asof("なし", "2026-08-01", stats) is None)
     check("標本が少ないほど中立へ縮む", tk._score(5, 5) < 100 and tk._score(20, 20) == 100,
           (tk._score(5, 5), tk._score(20, 20)))
+
+    # 同じ日でも「大引けで確定した判定」を、その日の朝に公開された動画へ使わない
+    morning = tk.source_reliability_asof("ch", "2026-02-20T08:00:00+09:00", stats)
+    evening = tk.source_reliability_asof("ch", "2026-02-20T21:00:00+09:00", stats)
+    check("同日でも時刻で切る (朝公開は当日大引けの判定を使わない)",
+          morning is None and evening is not None, (morning, evening))
+    check("旧形式 (judged_at/日付のみ) も読める",
+          tk.source_reliability_asof("old", "2026-08-01", {"old": {"history": [
+              {"judged_at": "2026-01-01", "hit": True}] * 5}}) is not None)
 
 
 # ── 9. 銘柄名寄せ ──────────────────────────────────────────────────────
@@ -325,11 +352,113 @@ def test_providers() -> None:
     os.environ.pop("YT_CAPTION_PROVIDERS", None)
 
 
+# ── 11. 外部プロセスの隔離実行 ────────────────────────────────────────
+def test_isolation() -> None:
+    print("11. 外部エージェント CLI の隔離")
+    import time
+    from pathlib import Path
+
+    os.environ.pop("TIPS_LLM_SANDBOX_ARGS", None)
+    os.environ.pop("TIPS_LLM_ALLOW_UNSANDBOXED", None)
+    check("既知CLIには読み取り専用・承認なしを強制",
+          ex._sandbox_args(["codex", "exec", "-"]) ==
+          ["--sandbox", "read-only", "--ask-for-approval", "never"])
+    try:
+        ex._sandbox_args(["mystery-llm"])
+        check("未知CLIは実行を拒否", False, "例外が出なかった")
+    except RuntimeError:
+        check("未知CLIは実行を拒否", True)
+    os.environ["TIPS_LLM_ALLOW_UNSANDBOXED"] = "1"
+    check("明示的に無効化したときだけ通す", ex._sandbox_args(["mystery-llm"]) == [])
+    os.environ.pop("TIPS_LLM_ALLOW_UNSANDBOXED", None)
+    os.environ["TIPS_LLM_SANDBOX_ARGS"] = "--read-only"
+    check("引数は環境変数で上書きできる", ex._sandbox_args(["codex"]) == ["--read-only"])
+    os.environ.pop("TIPS_LLM_SANDBOX_ARGS", None)
+
+    p = ex._run_isolated(["sh", "-c", "pwd"], "", 10)
+    cwd = p.stdout.strip()
+    check("cwd は空の一時ディレクトリ (リポジトリではない)",
+          cwd != str(Path(__file__).parent) and "tips_llm_" in cwd, cwd)
+    p = ex._run_isolated(["sh", "-c", "ls -a | wc -l"], "", 10)
+    check("作業ディレクトリは空", p.stdout.strip() in ("2", "3"), p.stdout)
+    p = ex._run_isolated(["sh", "-c", "cat"], "hello-stdin", 10)
+    check("stdin が渡る", p.stdout.strip() == "hello-stdin", p.stdout)
+
+    marker = Path(os.environ.get("TMPDIR", "/tmp")) / f"tips_kill_{os.getpid()}.txt"
+    marker.unlink(missing_ok=True)
+    t0 = time.time()
+    try:
+        ex._run_isolated(["sh", "-c", f"(sleep 3; echo x > {marker}) & wait"], "", 1)
+        check("タイムアウトで失敗にする", False, "例外が出なかった")
+    except RuntimeError as e:
+        check("タイムアウトで失敗にする", "タイムアウト" in str(e), str(e)[:60])
+    check("タイムアウトは待ち続けない", time.time() - t0 < 3, time.time() - t0)
+    time.sleep(3.5)
+    check("子孫プロセスも停止している", not marker.exists(),
+          "孫プロセスが生き残ってファイルを作った")
+    marker.unlink(missing_ok=True)
+
+
+# ── 12. heuristic フォールバックの扱い ───────────────────────────────
+def test_fallback_marking() -> None:
+    print("12. heuristic フォールバックを成功扱いにしない")
+    orig = ex._call
+    ex._call = lambda prompt, backend, model: "すみません、JSON は出せません"
+    try:
+        r = ex.extract_tips("損切りは買う前に決める トヨタ 7203 は押し目待ち",
+                            {"title": "t"}, backend="cli", model="dummy")
+    finally:
+        ex._call = orig
+    check("バックエンドを heuristic として記録", r["extraction_backend"] == "heuristic")
+    check("試行回数を記録", r["llm_attempts"] == ex.VALIDATE_RETRIES + 1, r["llm_attempts"])
+    check("失敗理由を記録", r["llm_failure_reason"] == "schema_validation_failed",
+          r["llm_failure_reason"])
+    check("要確認フラグが立つ", r["requires_review"] is True)
+    check("call 側にも要確認が伝わる",
+          all(c.get("requires_review") for c in r["calls"]) if r["calls"] else True)
+
+    ok = ex.extract_tips("x", {"title": "t"}, backend="heuristic")
+    check("heuristic 指定でも要確認", ok["requires_review"] is True)
+
+    a = {"ticker": "7203", "company": "トヨタ", "stance": "強気", "time_horizon": "数日",
+         "entry_condition": "", "target_price": "", "stop_condition": "",
+         "timestamp_seconds": 0, "extraction_confidence": 80, "source_reliability": 50}
+    merged = ex.merge_cross_check({"calls": [dict(a)], "tips": []},
+                                  {"calls": [dict(a)], "tips": []}, "heuristic")
+    c = merged["calls"][0]
+    check("heuristic との一致は加点しない", c["agreement_score"] is None, c["agreement_score"])
+    check("ラベルには参考として残す", c["agreement"].startswith("参考(heuristic)"), c["agreement"])
+    merged2 = ex.merge_cross_check({"calls": [dict(a)], "tips": []},
+                                   {"calls": [dict(a)], "tips": []}, "cmd")
+    check("LLM 同士の一致は加点する", merged2["calls"][0]["agreement_score"] == 100)
+
+
+# ── 13. 正式な実績集計からの除外 ─────────────────────────────────────
+def test_stats_exclusion() -> None:
+    print("13. proxy / heuristic を正式集計から除外")
+    base = {"channel": "ch", "hit_30": True, "ret_30": 5.0,
+            "resolved_30_at": "2026-05-01T15:00:00+09:00"}
+    rows = [
+        {**base, "entry_rule": tk.RULE_NEXT_OPEN, "is_proxy": False,
+         "extraction_backend": "cli", "requires_review": False},
+        {**base, "entry_rule": tk.RULE_PROXY, "is_proxy": True,
+         "extraction_backend": "cli", "requires_review": False},
+        {**base, "entry_rule": tk.RULE_NEXT_OPEN, "is_proxy": False,
+         "extraction_backend": "heuristic", "requires_review": True},
+    ]
+    st = tk.build_stats(rows)["ch"]
+    check("集計対象は 1 件だけ", st["judged"] == 1, st)
+    check("proxy を除外数として記録", st["excluded_proxy"] == 1, st)
+    check("heuristic を除外数として記録", st["excluded_heuristic"] == 1, st)
+    check("見解の総数は保持", st["calls"] == 3, st)
+
+
 def main() -> int:
     for fn in (test_transcript_parsing, test_schema_validation, test_injection,
                test_command_safety, test_scores, test_cross_check,
                test_entry_reference, test_point_in_time, test_symbol_lookup,
-               test_providers):
+               test_providers, test_isolation, test_fallback_marking,
+               test_stats_exclusion):
         fn()
     print()
     if _fails:
