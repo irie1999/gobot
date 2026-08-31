@@ -1012,20 +1012,31 @@ def _n_settle(_timeout: float = 60.0, _every: float = 3.0) -> bool:
     #   /orders への反映が遅れることがある。そのとき _mine() は空・_open も
     #   空・_N_UNK も空になり、**板に注文が残っているのに約定ゼロで True**
     #   を返していた。全IDを一度は照会で確認するまで待つ。
-    _seen_ids: set = set()
+    # ⛔⛔ さらに「一度見えて後で消える」穴を塞ぐ(レビュー6巡目)。
+    #   /orders は毎回おなじ集合を返すとは限らない(状態や日付で絞られる・
+    #   一時的に欠ける)。**今回の応答**だけを見ていると、9:02 に見えた注文が
+    #   9:05 の応答から消えたとき _open も空・_miss も空(一度見たので)に
+    #   なって break し、その注文の約定が _fill に入らず **MOC が出ない**。
+    #   → OrderId ごとに **最後に見た注文オブジェクトを保持**し、
+    #     判定も約定数量の集計も**キャッシュ**から行う。
+    _seen: dict = {}        # OrderId -> (銘柄, 最後に見た注文オブジェクト)
 
     def _mine() -> list:
         _got = [(_N_ORD[str(_o.get('ID'))], _o)
                 for _o in (cli.get_orders() or [])
                 if str(_o.get("ID") or "") in _N_ORD]
-        _seen_ids.update(str(_o.get("ID") or "") for _, _o in _got)
+        for _s_, _o_ in _got:
+            _seen[str(_o_.get("ID") or "")] = (_s_, _o_)
         return _got
 
+    def _term(_o) -> bool:
+        return int(_o.get("OrderState") or _o.get("State") or 0) >= 5
+
     # ── 取消して終端まで待つ ─────────────────────────────────────
-    _t0, _cxl_n, _last, _seen_all = time.time(), {}, [], False
+    _t0, _cxl_n, _seen_all = time.time(), {}, False
     while True:
         try:
-            _last = _mine()
+            _mine()
             _seen_all = True
         except Exception as _ge:
             print(f"    ⛔ 注文照会に失敗: {_ge}", flush=True)
@@ -1037,10 +1048,10 @@ def _n_settle(_timeout: float = 60.0, _every: float = 3.0) -> bool:
         # ⚠ 注文の反映は遅れることがある。待機中も復元を試み続ける。
         if _N_UNK:
             _n_adopt_unknown()
-        _open = [(s, o) for s, o in _last
-                 if int(o.get("OrderState") or o.get("State") or 0) < 5]
-        # ★ まだ照会に現れていない自分の注文(レビュー5巡目②)。
-        _miss = set(_N_ORD) - _seen_ids
+        # ★ 判定は**キャッシュ**から(今回の応答から消えても見失わない)。
+        _open = [(_s_, _o_) for _s_, _o_ in _seen.values() if not _term(_o_)]
+        # ★ まだ一度も照会に現れていない自分の注文(レビュー5巡目②)。
+        _miss = set(_N_ORD) - set(_seen)
         if not _open and not _N_UNK and not _miss:
             break
         if not _open and not _miss and time.time() - _t0 > _timeout:
@@ -1065,19 +1076,14 @@ def _n_settle(_timeout: float = 60.0, _every: float = 3.0) -> bool:
                 print(f"    ⚠ {_sy} 取消で例外: {_ce} "
                       f"(再試行 {_cxl_n[_oid]}/3)", flush=True)
         if time.time() - _t0 > _timeout:
-            if _open:
-                print(f"    ⛔⛔ {_timeout:.0f}秒たっても終端になりません "
-                      f"({len(_open)}件)。**約定数量が確定していません**。\n"
-                      f"       この後 MOC を出しますが、数量が足りない可能性が"
-                      f"あります。kabu の注文照会で必ず目視してください",
-                      flush=True)
-            _ok = False                      # ⛔ 成功扱いにしない
+            # ⚠ 何が残ったかはループを出た直後の _miss / _nonterm が印字する。
+            #   ここで出すと二重になるので黙って抜ける(判定は下で必ず付く)。
             break
         time.sleep(_every)
 
     # ⛔⛔ 反映されないままの注文IDは **成功扱いにしない**(レビュー5巡目②)。
     #   ここを通さないと「板に残っているのに約定ゼロで完了」になる。
-    _miss = set(_N_ORD) - _seen_ids
+    _miss = set(_N_ORD) - set(_seen)
     if _miss:
         print(f"\n    ⛔⛔ **注文が {_timeout:.0f}秒たっても注文照会に現れま"
               f"せん** ({len(_miss)}件)\n"
@@ -1093,9 +1099,20 @@ def _n_settle(_timeout: float = 60.0, _every: float = 3.0) -> bool:
         return False
 
     # ── 確定した約定数量と ExecutionID を銘柄単位で集める ────────
+    # ⛔ **キャッシュから**集める(レビュー6巡目)。今回の応答から消えた注文の
+    #   約定を取りこぼすと、その建玉に MOC が出ず無防備なまま持ち越す。
+    # ⛔ 終端でない注文が残っていたら、その数量は**確定していない**。
+    #   MOC は出す(無防備よりまし)が、成功扱いにはしない。
+    _nonterm = [_s_ for _s_, _o_ in _seen.values() if not _term(_o_)]
+    if _nonterm:
+        print(f"    ⛔⛔ 終端になっていない注文が {len(_nonterm)}件 残ります "
+              f"({sorted(set(_nonterm))})。**約定数量は確定していません**。\n"
+              f"       この後 MOC を出しますが、数量が足りない可能性があります。"
+              f"kabu の注文照会で必ず目視してください", flush=True)
+        _ok = False
     _fill: dict = {}
     _eids: dict = {}
-    for _sy, _o in _last:
+    for _sy, _o in _seen.values():
         _cq = int(float(_o.get("CumQty") or 0))
         if _cq > 0:
             _fill[_sy] = _fill.get(_sy, 0) + _cq
@@ -1170,8 +1187,16 @@ def _n_settle(_timeout: float = 60.0, _every: float = 3.0) -> bool:
                                order_id=_oid_s,
                                attempt_id=_N_ATT_SYM.get(_sy_s, ""))
                 except Exception as _we2:
-                    print(f"    ⚠ settled の記録に失敗({_sy_s}): {_we2} — "
-                          f"次回の起動で未完了として止まります", flush=True)
+                    # ⛔ ここで黙って True を返すと「今日は正常」と表示して
+                    #   おきながら**翌朝 exit 2 で止まる**ことになる(レビュー
+                    #   6巡目)。MOC は置けているので建玉は守られているが、
+                    #   台帳が壊れていることは**今日のうちに**知らせる。
+                    print(f"    ⛔ settled の記録に失敗({_sy_s}): {_we2}\n"
+                          f"       MOC は設置済みなので建玉は守られていますが、"
+                          f"台帳が書けていません。\n"
+                          f"       **次回の起動は停止します**。"
+                          f"{_N_LEDGER.name} を確認してください", flush=True)
+                    _ok = False
     return _ok
 
 
@@ -1302,9 +1327,10 @@ def _order_rows(_sel: list) -> None:
         #   watcher はそれを知らない** = 今日の実損と同じ無防備状態になる。
         #   記録が余分に残るのは無害(watcher が建玉を探して見つからないだけ)。
         #   失敗したら下で "failed" を追記して打ち消す。
-        def _log(_st):
+        def _log(_st) -> bool:
+            """台帳に1行書く。**書けたら True**(レビュー6巡目)。"""
             if not (_ORDER_LOG and args.execute):
-                return
+                return True
             try:
                 # ★ attempt_id は **pending から settled まで同じもの**を書く
                 #   (レビュー5巡目①)。order_id は取れてから埋まる。
@@ -1330,6 +1356,8 @@ def _order_rows(_sel: list) -> None:
                 print(f"    ⚠ 発注記録({_st})の書き込み失敗({_we})。"
                       f"**watcher が決済できません** → 手動で買い戻すこと",
                       flush=True)
+                return False
+            return True
 
         _N_OID_ARG[0] = ""
         # ★ 送信の**前**に attempt_id を作る(レビュー5巡目①)。この1本の注文の
@@ -1338,7 +1366,18 @@ def _order_rows(_sel: list) -> None:
             _N_ATT[0] = (f"{_dt.date.today():%Y%m%d}-{_r['symbol']}-"
                          f"{_uuid.uuid4().hex[:8]}")
             _N_ATT_SYM[str(_r["symbol"])] = _N_ATT[0]
-        _log("pending")
+        # ⛔⛔ N は台帳が書けなかったら **送信しない**(レビュー6巡目)。
+        #   N には watcher が無いので、台帳に無い注文は
+        #     ・その日の settle も(_N_ORD には入るので)一応追える
+        #     ・だが**途中で落ちたら翌朝の起動ガードが気づけない**
+        #   = 誰も知らない無防備な建玉になる。書けないなら建てないほうが安全。
+        #   ⚠ J は watcher が建玉を見て決済するので、この扱いは N だけ。
+        if not _log("pending") and args.n_mode and args.execute:
+            _EX["ng"] += 1
+            print(f"  ⛔ {_r['symbol']} 発注中止: **台帳に書けませんでした**。"
+                  f"記録の無い建玉は翌朝の起動ガードが検知できないので、"
+                  f"建てません", flush=True)
+            continue
         # ⛔ 送信の**前**に「出そうとした銘柄」を記録する(2026-08-31 レビュー①)。
         #   例外で OrderId が取れなくても、注文が通っている可能性がある。
         #   N はここを拾えないと settle の対象から漏れて無防備になる。
@@ -1416,7 +1455,9 @@ def _order_rows(_sel: list) -> None:
         # ★ 発注が通ったことを記録する(pending → ordered)。
         #   ⛔ entry_mode="auction" にすると watcher が **実約定価格基準**で
         #     OCO を組み直す(§18.32 / lss_exit_watcher:355-)。J も同じ扱いで正しい。
-        #   ⚠ ここが失敗しても pending が残っているので watcher は守れる。
+        #   ⚠ ここが失敗しても pending が残る。J は watcher が守り、N は
+        #     この後の settle が MOC を置く。どちらにせよ **翌朝の起動ガードは
+        #     pending を未完了として止める**ので、取りこぼしにはならない。
         _log("ordered")
 
 
