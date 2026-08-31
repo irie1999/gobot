@@ -332,7 +332,10 @@ def process_one(v: dict, args, verbose: bool = True) -> dict | None:
     if verbose:
         mark = " (ノイズ)" if rec["noise"] else ""
         if rec.get("requires_review"):
-            mark += f" ⚠要確認({rec.get('llm_failure_reason') or 'heuristic/注入検出'})"
+            why = (rec.get("llm_failure_reason")
+                   or ("注入検出" if rec.get("injection_suspected") else "")
+                   or (rec.get("extraction_backend") or "要確認"))
+            mark += f" ⚠要確認({why})"
         print(f"  ✓ {vid} calls={len(rec['calls'])} tips={len(rec['tips'])}{mark} "
               f"[{rec['backend']}/{rec['source']}] {rec['title'][:36]}")
     return rec
