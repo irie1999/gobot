@@ -214,6 +214,49 @@ def load_priced_in() -> dict[tuple, dict]:
     return out
 
 
+# ── 採用基準 (どの動画を「使える材料」とみなすか) ────────────────────
+# 運用の前提: 収集側で --since-days 7 (公開7日以内) を掛けたうえで、
+# ここで「具体的な売買条件がある動画」だけに絞る。
+# 除外理由は必ず残す (黙って消すと、なぜ出ないのか分からなくなる)。
+def curation_verdict(rec: dict) -> tuple[bool, list[str]]:
+    """
+    (採用するか, 除外理由のリスト) を返す。
+
+    採用条件:
+      ・LLM で抽出できている (heuristic / 要確認は材料にしない)
+      ・宣伝中心・中身なしでない (単発の告知は許容し、信頼度で減点するに留める)
+      ・コードが裏取りできた個別銘柄の見解がある
+      ・強気/弱気の方向が示されている (中立だけの動画は材料にならない)
+      ・エントリー条件と撤退条件の両方に触れた見解が 1 件以上ある
+      ・事後解説だけでない
+    """
+    reasons: list[str] = []
+    calls = [c for c in (rec.get("calls") or []) if c.get("code_verified")]
+
+    if str(rec.get("extraction_backend", "")).startswith("heuristic"):
+        reasons.append("LLM 抽出でない (heuristic)")
+    if rec.get("requires_review") and not reasons:
+        reasons.append("要確認 (注入検出など)")
+    if rec.get("noise"):
+        reasons.append("中身が薄い")
+    if rec.get("promo"):
+        reasons.append("宣伝中心")
+    elif len(rec.get("promo_mentions") or []) >= 3:
+        reasons.append(f"宣伝誘導が多い ({len(rec['promo_mentions'])}箇所)")
+    if not calls:
+        reasons.append("コードを裏取りできた銘柄見解が無い")
+    else:
+        if all(c.get("stance") == "中立" for c in calls):
+            reasons.append("方向感の無い見解のみ")
+        if not any(c.get("entry_condition") and c.get("stop_condition") for c in calls):
+            reasons.append("エントリー条件と撤退条件が揃った見解が無い")
+        if all((c.get("flags") or {}).get("hindsight_only") for c in calls):
+            reasons.append("事後解説のみ")
+        # 単発のサロン告知だけでは外さない (信頼度が -15 されるに留める)。
+        # 「宣伝中心」かどうかは上の promo / promo_mentions で判断する。
+    return (not reasons), reasons
+
+
 # ── gobot シグナルとの照合 ─────────────────────────────────────────────
 def gobot_signals(codes: set[str], workers: int = 4) -> dict[str, list[dict]]:
     """
@@ -318,6 +361,7 @@ def process_one(v: dict, args, verbose: bool = True) -> dict | None:
            "chars": len(tr["text"]), "source_reliability": src_rel,
            "injection_suspected": res.get("injection_suspected", False),
            "injection_hits": res.get("injection_hits", []),
+           "promo_mentions": res.get("promo_mentions", []),
            "backend": res.get("backend", ""), "model": res.get("model", ""),
            "extraction_backend": res.get("extraction_backend", ""),
            "llm_attempts": res.get("llm_attempts", 0),
@@ -551,8 +595,12 @@ def _yt_link(url: str, sec: int) -> str:
 
 
 def build_html(recs: list[dict], days: int | None, sigs: dict[str, list[dict]] | None,
-               matched: bool) -> str:
+               matched: bool, curate: bool = False) -> str:
     now     = datetime.now(JST).strftime("%Y-%m-%d %H:%M")
+    verdicts = {r["video_id"]: curation_verdict(r) for r in recs}
+    dropped  = [r for r in recs if not verdicts[r["video_id"]][0]]
+    if curate:
+        recs = [r for r in recs if verdicts[r["video_id"]][0]]
     calls   = flatten(recs, "calls")
     tips    = flatten(recs, "tips")
     wl      = watchlist_symbols()
@@ -714,6 +762,24 @@ def build_html(recs: list[dict], days: int | None, sigs: dict[str, list[dict]] |
     同じパイプラインで処理できます。</div>
 """ if fail_rows else ""
 
+    # 5.5) 採用基準で外した動画
+    drop_rows = ""
+    for r in dropped:
+        drop_rows += f"""
+        <tr><td><a href="{_esc(r['url'])}" target="_blank">{_esc(r.get('title') or r['video_id'])}</a></td>
+            <td class="muted">{_esc(r.get('channel',''))}</td>
+            <td class="muted">{_esc(r.get('upload_date') or '-')}</td>
+            <td class="muted">{_esc(' / '.join(verdicts[r['video_id']][1]))}</td></tr>"""
+    drop_section = f"""
+  <h2>採用基準で外した動画 ({len(dropped)})</h2>
+  <table><thead><tr><th>動画</th><th>チャンネル</th><th>公開日</th><th>理由</th></tr></thead>
+    <tbody>{drop_rows}</tbody></table>
+  <div class="note">採用条件: LLM 抽出済み / 宣伝・中身なしでない / コードを裏取りできた
+    個別銘柄の見解がある / 方向感がある / エントリー条件と撤退条件が揃った見解がある /
+    事後解説のみでない。{"表からは除外済みです。" if curate else
+    "--curate を付けるとこれらを表から除外します。"}</div>
+""" if drop_rows else ""
+
     # 6) 動画カード
     cards = ""
     for r in sorted(recs, key=lambda r: (r.get("upload_date") or ""), reverse=True):
@@ -726,6 +792,9 @@ def build_html(recs: list[dict], days: int | None, sigs: dict[str, list[dict]] |
         promo = ' <span class="warn">宣伝多め</span>' if r.get("promo") else ""
         inj   = (' <span class="unverified">字幕に指示文を検出</span>'
                  if r.get("injection_suspected") else "")
+        n_promo = len(r.get("promo_mentions") or [])
+        if n_promo:
+            inj += f' <span class="warn">宣伝誘導 {n_promo}箇所</span>' 
         if r.get("llm_failure_reason"):
             inj += (f' <span class="unverified">LLM失敗→heuristic '
                     f'({_esc(r["llm_failure_reason"])}, {r.get("llm_attempts", 0)}回試行)</span>')
@@ -811,7 +880,7 @@ def build_html(recs: list[dict], days: int | None, sigs: dict[str, list[dict]] |
     </tr></thead>
     <tbody id="tips-body">{tip_rows}</tbody>
   </table>
-{stat_section}{fail_section}
+{stat_section}{drop_section}{fail_section}
   <h2>動画別サマリー</h2>
   {cards}
 </body>
@@ -913,6 +982,8 @@ def main() -> None:
                     help='外部エンジンのコマンド 例: "codex exec -"')
     ap.add_argument("--model", default=_ex.DEFAULT_MODEL)
     ap.add_argument("--workers", type=int, default=3, help="並列数")
+    ap.add_argument("--curate", action="store_true",
+                    help="採用基準 (具体的な売買条件がある動画) を満たすものだけ表に出す")
     ap.add_argument("--match-signals", action="store_true",
                     help="gobot の当日シグナルと照合する (株価取得あり)")
     ap.add_argument("--allow-unofficial", action="store_true",
@@ -944,6 +1015,16 @@ def main() -> None:
     target = [r for r in recs.values() if _in_period(r, args.days)]
     target.sort(key=lambda r: (r.get("upload_date") or ""), reverse=True)
 
+    if args.curate:
+        kept = [r for r in target if curation_verdict(r)[0]]
+        print(f"■ 採用基準: {len(kept)}/{len(target)} 本が条件を満たしました")
+        for r in target:
+            ok, why = curation_verdict(r)
+            if not ok:
+                print(f"  - 除外 {r['video_id']} {r.get('title','')[:32]}: {' / '.join(why)}")
+        if args.digest:
+            target = kept
+
     if args.digest:
         print_digest(target, args.category)
         return
@@ -953,14 +1034,15 @@ def main() -> None:
 
     sigs = None
     if args.match_signals:
-        codes = {c["ticker"] for c in flatten(target, "calls") if c.get("ticker")}
+        src = [r for r in target if curation_verdict(r)[0]] if args.curate else target
+        codes = {c["ticker"] for c in flatten(src, "calls") if c.get("ticker")}
         print(f"■ gobot シグナル照合中… ({len(codes)} 銘柄)")
         sigs = gobot_signals(codes, args.workers)
         print(f"  シグナルあり: {len(sigs)} 銘柄")
 
     out = BASE / f"youtube_tips_{datetime.now(JST).strftime('%Y-%m-%d')}.html"
-    out.write_text(build_html(target, args.days or None, sigs, args.match_signals),
-                   encoding="utf-8")
+    out.write_text(build_html(target, args.days or None, sigs, args.match_signals,
+                              args.curate), encoding="utf-8")
     print(f"■ HTML: {out}")
     if not args.no_browser:
         webbrowser.open(out.as_uri())

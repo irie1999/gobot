@@ -23,6 +23,7 @@ Windows / macOS / Linux のいずれでも同じ内容が走る (外部シェル
  14. Windows 互換    … cp932 コンソールで記号を出しても落ちないか
  15. 結合テスト      … 空でない JSONL を実際に読み書きし、本番経路を通す
  16. 静的チェック    … undefined name (関数の消し忘れ等) が無いか ※pyflakes 任意
+ 17. 採用基準        … 材料として使える動画だけを通し、除外理由を残せるか
 """
 
 from __future__ import annotations
@@ -777,6 +778,70 @@ def test_static_check() -> None:
           "; ".join(undefined[:3]))
 
 
+# ── 17. 採用基準 (curation) ──────────────────────────────────────────
+def _good_record() -> dict:
+    """採用条件をすべて満たすレコード。"""
+    return {"video_id": "GOODGOODGOO", "title": "良い動画", "channel": "ch",
+            "upload_date": "20260830", "extraction_backend": "cli",
+            "requires_review": False, "noise": False, "promo": False,
+            "promo_mentions": [], "tips": [],
+            "calls": [{"ticker": "6857", "company": "アドバンテスト",
+                       "code_verified": True, "stance": "強気",
+                       "entry_condition": "9600円台での反発", "stop_condition": "9700円割れ",
+                       "target_price": "10500", "flags": {k: False for k in ex.RUBRIC}}]}
+
+
+def test_curation() -> None:
+    print("17. 採用基準 (材料として使える動画か)")
+    import youtube_tips as ytips
+
+    ok, why = ytips.curation_verdict(_good_record())
+    check("条件を満たす動画は採用", ok and not why, why)
+
+    cases = [
+        ("LLM 抽出でない", {"extraction_backend": "heuristic"}, "LLM 抽出でない"),
+        ("要確認", {"requires_review": True}, "要確認"),
+        ("中身が薄い", {"noise": True}, "中身が薄い"),
+        ("宣伝中心", {"promo": True}, "宣伝中心"),
+        ("宣伝誘導が多い", {"promo_mentions": ["a", "b", "c"]}, "宣伝誘導が多い"),
+    ]
+    for label, patch, expect in cases:
+        ok, why = ytips.curation_verdict({**_good_record(), **patch})
+        check(f"除外: {label}", not ok and any(expect in w for w in why), why)
+
+    rec = _good_record()
+    rec["calls"][0]["code_verified"] = False
+    check("除外: コード未確認のみ", not ytips.curation_verdict(rec)[0])
+
+    rec = _good_record()
+    rec["calls"][0]["stance"] = "中立"
+    check("除外: 方向感が無い", not ytips.curation_verdict(rec)[0])
+
+    rec = _good_record()
+    rec["calls"][0]["stop_condition"] = ""
+    ok, why = ytips.curation_verdict(rec)
+    check("除外: 撤退条件が無い", not ok and any("撤退条件" in w for w in why), why)
+
+    rec = _good_record()
+    rec["calls"][0]["flags"]["hindsight_only"] = True
+    check("除外: 事後解説のみ", not ytips.curation_verdict(rec)[0])
+
+    # 単発のサロン告知は除外しない (信頼度で減点するに留める)
+    rec = _good_record()
+    rec["calls"][0]["flags"]["promotional"] = True
+    rec["promo_mentions"] = ["概要欄のサロンで配信しています"]
+    check("単発の宣伝告知は採用したまま", ytips.curation_verdict(rec)[0])
+    check("ただし信頼度は下がる",
+          ex.score_extraction({"promotional": True}, 0.8)
+          < ex.score_extraction({}, 0.8))
+
+    # 宣伝誘導の決定的検出
+    hits = ex.detect_promotion("詳しくは公式LINEに登録してください 月額3000円のサロンもあります")
+    check("宣伝誘導を検出する", len(hits) >= 2, hits)
+    check("通常の解説では誤検出しない",
+          ex.detect_promotion("9700円割れで損切りします 出来高集中帯は9200円です") == [])
+
+
 def main() -> int:
     for stream in (sys.stdout, sys.stderr):     # Windows cp932 対策
         try:
@@ -788,7 +853,7 @@ def main() -> int:
                test_entry_reference, test_point_in_time, test_symbol_lookup,
                test_providers, test_isolation, test_fallback_marking,
                test_stats_exclusion, test_windows_console, test_integration_jsonl,
-               test_static_check):
+               test_static_check, test_curation):
         fn()
     print()
     if _fails:
