@@ -216,6 +216,13 @@ ap.add_argument("--no-moc-on-exit", action="store_true",
 #     置けない」排他があったが、N は損切りを置かないので衝突が消える。
 #   ⛔ そして _verify の ATR チェックは N では**必ず落ちる**(バリアが無いので
 #     ATR を持たない)。2026-08-31 の記録実行で合格2件が両方止まった。
+ap.add_argument("--n-limit-ticks", type=int, default=2,
+                help="N の保護指値を始値から何ティック下に置くか(既定2)。"
+                     "⛔ bp で固定しない — 呼値は銘柄区分で変わる(§18.31)")
+ap.add_argument("--n-limit-max-bp", type=float, default=10.0,
+                help="N の保護指値の許容幅の上限(bp・既定10)。ティックが粗い"
+                     "銘柄で下げすぎないための頭打ち。N に残るのは +21.9bp なので"
+                     "ここが広いと約定した時点でエッジを失う")
 ap.add_argument("--n-mode", action="store_true",
                 help="新方式N として発注する(§18.54)。候補=n_signals_<日付>.csv"
                      " / +100bp / 100株固定 / バリアなし(引けMOCだけ) /"
@@ -246,39 +253,6 @@ if args.n_mode:
         print(f"[N] J の既定から差し替え: {' / '.join(_nd)}")
     print("[N] ⛔ watcher は起動しません。決済は引け成行(MOC)だけです")
 
-# ⛔⛔ N の実発注は **ブロック中** (2026-08-31 のレビューで no-go)。
-#   dry-run は通す。--execute だけを止める。
-#   6件すべてが「J のコードを N に流用したときの取り残し」で、
-#   ⛔ とくに①⑤は『watcher 不要』と宣言しながら、watcher が実際に
-#     やっていた後始末(未約定の取消 / 部分約定の追随 / 緊急損切り)を
-#     誰も引き継いでいないという設計の穴。
-if args.n_mode and args.execute:
-    raise SystemExit(
-        "⛔ N の実発注はブロックされています (2026-08-31 レビュー: no-go)\n"
-        "\n"
-        "  ① MOC が全建玉を覆えない。未約定の指値を取り消さないまま建玉を\n"
-        "     1回だけ読むので、MOC 数量を確定した後に残りが約定すると\n"
-        "     **その分は無防備**。N には watcher が無いので回収されない。\n"
-        "     要: 未約定を全取消 → 注文が終端になるまで待つ → 建玉を再取得\n"
-        "         → 約定数量と一致する MOC → 受付を確認\n"
-        "  ② MOC の対象が N 限定でない。get_positions() の一般デイトレ売建を\n"
-        "     全部拾うので、**他戦略・手動の建玉にも MOC を出し、その既存の\n"
-        "     返済注文を取り消す**(§18.48 ⑦③)。N の注文ID/銘柄に限定が要る。\n"
-        "  ③ --guard-bp 300 が残っている。N にギャップ上限は無い\n"
-        "     (§18.55 で --max-gap-bp 150 は 月+49,587→+21,075 と棄却済み)。\n"
-        "     09:00 の始値が 1,000〜6,000円 かの再確認も無い(バックテストは見る)。\n"
-        "  ④ 保護指値 50bp が広すぎる。N に残るのは +21.9bp なので、\n"
-        "     始値-50bp で約定した時点で期待値を失う。呼値2ティック相当が筋。\n"
-        "  ⑤ 『watcher 不要』と実装が矛盾。ordered_signals_lss.csv に書き、\n"
-        "     終了時に watcher 起動を促す。⛔ そして atr=0 にしても watcher は\n"
-        "     武装しないのではなく **緊急幅1%の損切りを置く**。別台帳が要る。\n"
-        "  ⑥ .\\nexec の dry-run が --prod でないのでデモ口座を読んでいる。\n"
-        "     発注スクリプトの終了コードも見ていない。\n"
-        "\n"
-        "  ⛔ 直したあと、最低この4ケースを模擬確認してから外すこと:\n"
-        "     部分約定 / 送信タイムアウト後に注文成立 / 他戦略の建玉あり / MOC拒否\n"
-        "\n"
-        "  dry-run(--execute なし)は通ります。")
 
 # ★ 1銘柄の上限を **比率**から解決する (2026-08-21)。
 #   0 = 予算 × --max-yen-pct%。明示した値があればそれを使う。
@@ -724,16 +698,60 @@ cli.connect()
 #       急落しているときだけ約定しない = 掴まされない。
 #     決済は lss_exit_watcher が **実約定価格基準**で OCO を組み直す
 #     (ordered_signals_lss.csv の atr/sm/tm を読む / §18.32)。
+# ★ 送信を試みた銘柄(例外で OrderId が取れなかったものも含む)。N の settle が
+#   「自分の注文だけ」を追うための集合。⛔ get_positions を舐めない根拠。
+_N_SENT: set = set()
 _EX = {"left": args.budget * 1e4, "n": 0, "yen": 0.0, "ng": 0,
        "cap": (args.max_notional or args.budget) * 1e4}
 _ORDER_LOG = None
-if args.execute:
+if args.execute and args.n_mode:
+    # ⛔⛔ N は **別台帳**に書く(2026-08-31 レビュー⑤)。
+    #   ordered_signals_lss.csv に書くと lss_exit_watcher が拾い、
+    #   ATR が無い建玉には **緊急幅1%の損切り**を置く。N はバリアなしが
+    #   確定仕様(§18.55)なので、そもそも watcher の視界に入れない。
+    _N_LEDGER = Path(__file__).resolve().parent / "ordered_signals_n.csv"
+
+    def _ORDER_LOG(_sig, _prod, _qty, entry_mode="", order_price=0.0,
+                   status="", **_kw):
+        _new = not _N_LEDGER.exists()
+        with open(_N_LEDGER, "a", newline="", encoding="utf-8-sig") as _f:
+            _w = _csv.writer(_f)
+            if _new:
+                _w.writerow(["ts", "date", "symbol", "name", "strategy",
+                             "side", "qty", "order_price", "status",
+                             "prod", "entry_mode", "exit"])
+            _w.writerow([f"{_dt.datetime.now():%Y-%m-%d %H:%M:%S}",
+                         f"{_dt.date.today()}", _sig.get("symbol", ""),
+                         _sig.get("name", ""), _sig.get("strategy", "N"),
+                         "sell", _qty, order_price or _sig.get("order_price", 0),
+                         status, 1 if _prod else 0, entry_mode or "n_open",
+                         "MOC"])
+    print(f"[N] 発注記録は **{_N_LEDGER.name}** に書きます"
+          f"(ordered_signals_lss.csv には書かない = watcher の視界に入れない)")
+elif args.execute:
     try:
         from kabu_send_lss import _log_ordered as _ORDER_LOG
     except Exception as _le:
         print(f"  ⚠ _log_ordered を読めません({_le})。"
               f"**発注は行いますが ordered_signals_lss.csv に残りません** "
               f"→ watcher が決済できないので手動決済が必要です", flush=True)
+# ★ N の保護指値に使う **銘柄別の正しい呼値**。
+#   ⛔ floor_to_tick(下) は本文に「実測より 5〜10倍粗い」と書かれた古いテーブル。
+#   §18.31 で「呼値は銘柄区分(TOPIX100か否か)で違うのでハードコードしない」と
+#   確定しているので、銘柄を渡せる版を最優先で使う。
+try:
+    from backtest_limit_entry import floor_to_tick_sym as _ntick_floor
+except Exception:
+    try:
+        from eh_trades import _tick as _et_tick
+
+        def _ntick_floor(p, sym=None):
+            import math as _m
+            _t = _et_tick(float(p))
+            return _m.floor(float(p) / _t) * _t
+    except Exception:
+        def _ntick_floor(p, sym=None):
+            return float(int(p))
 try:
     from backtest_limit_entry import floor_to_tick as _floor_tick
 except Exception:
@@ -773,6 +791,111 @@ def _verify(_r, _lim: float, _qty: int) -> str:
     if not (0 < _lim <= _op):
         return f"保護指値が始値より上({_lim:,.1f} > {_op:,.1f})"
     return ""
+
+
+def _n_settle(_timeout: float = 60.0, _every: float = 3.0) -> bool:
+    """N: 自分の注文を終端まで追い、**確定した約定数量ぶんだけ** 引けMOC を置く。
+
+    ⛔ J のやり方(未約定を取消 → 一部約定は残す → 建玉を舐めて MOC)は N では
+      使えない。watcher が無いので後始末する者がいないため:
+        ① 一部約定を残すと、MOC の数量を決めた**後に**残りが約定して無防備
+        ② 建玉を舐めると、他戦略・手動の売建にも MOC を出し、その既存の
+           返済注文を取り消す(kabu の信用返済は発注時に既存を取消す/§18.48⑦③)
+      (2026-08-31 レビュー ①②)
+
+    ここでは:
+      ① 自分が送信を試みた銘柄(_N_SENT)の新規売り注文だけを対象にする
+      ② 未約定・**一部約定を問わず**全部 取消す
+      ③ 全部が終端(State>=5)になるまで待つ ← ここで数量が動かなくなる
+      ④ 確定した CumQty を銘柄単位で合算して MOC(1銘柄1本)
+      ⑤ 受付(Result==0)を確認。1件でも欠けたら大きく警告する
+
+    戻り: 全銘柄で MOC を置けたら True
+    """
+    print(f"\n  ── N: 注文を終端まで追って引け成行(MOC)を置きます "
+          f"{'─' * 26}", flush=True)
+    if not _N_SENT:
+        print("    (送信した注文がありません)", flush=True)
+        return True
+
+    def _mine_orders() -> list:
+        _out = []
+        for _o in (cli.get_orders() or []):
+            _sy = str(_o.get("Symbol", "")).upper().removesuffix(".T").split(".")[0]
+            if _sy not in _N_SENT:
+                continue
+            if int(_o.get("CashMargin") or 0) != 2:      # 信用新規売りのみ
+                continue
+            _out.append((_sy, _o))
+        return _out
+
+    # ── ②③ 取消して終端まで待つ ─────────────────────────────────
+    _t0, _cxl, _last = time.time(), set(), []
+    while True:
+        try:
+            _last = _mine_orders()
+        except Exception as _ge:
+            print(f"    ⛔ 注文照会に失敗: {_ge}", flush=True)
+            break
+        _open = [(s, o) for s, o in _last
+                 if int(o.get("OrderState") or o.get("State") or 0) < 5]
+        if not _open:
+            break
+        for _sy, _o in _open:
+            _oid = str(_o.get("ID") or "")
+            if not _oid or _oid in _cxl:
+                continue
+            _cxl.add(_oid)
+            try:
+                _rr = cli.cancel_order(_oid)
+                _cq = int(float(_o.get("CumQty") or 0))
+                print(f"    ✂ {_sy} 残りを取消 (約定 {_cq}株 / "
+                      f"Result={_rr.get('Result')})", flush=True)
+            except Exception as _ce:
+                print(f"    ⚠ {_sy} 取消で例外: {_ce}", flush=True)
+        if time.time() - _t0 > _timeout:
+            print(f"    ⛔⛔ {_timeout:.0f}秒たっても終端になりません "
+                  f"({len(_open)}件が未終了)。**数量が確定していないまま**"
+                  f"MOC を置きます。kabu の注文照会で必ず目視してください",
+                  flush=True)
+            break
+        time.sleep(_every)
+
+    # ── ④ 確定した約定数量を銘柄単位で合算 ───────────────────────
+    _fill: dict = {}
+    for _sy, _o in _last:
+        _cq = int(float(_o.get("CumQty") or 0))
+        if _cq > 0:
+            _fill[_sy] = _fill.get(_sy, 0) + _cq
+    if not _fill:
+        print("    (約定した建玉がありません。MOC は不要です)", flush=True)
+        return True
+
+    # ── ⑤ MOC を置いて受付を確認 ─────────────────────────────────
+    _ok = _ng = 0
+    for _sy, _q in sorted(_fill.items()):
+        try:
+            _r = cli.send_moc(_sy, qty=_q, side="buy", cash_margin=3)
+        except Exception as _me:
+            _ng += 1
+            print(f"    ⛔ {_sy} {_q}株 MOC で例外: {_me}", flush=True)
+            continue
+        if _r.get("Result") == 0 or _r.get("_dry_run"):
+            _ok += 1
+            print(f"    ✅ {_sy} {_q}株 引け成行を設置", flush=True)
+        else:
+            _ng += 1
+            print(f"    ⛔ {_sy} {_q}株 MOC 設置失敗: {_r}", flush=True)
+    if _ng:
+        print(f"\n  ⛔⛔ **{_ng}件 は引け成行を置けませんでした**。\n"
+              f"     N には watcher がありません。このままだと**持ち越し**に\n"
+              f"     なります(2026-08-19 は8建玉で -36,800円)。\n"
+              f"     kabu ステーションで手動で引け成行を出してください。",
+              flush=True)
+    else:
+        print(f"    [MOC] {_ok}件すべて設置しました。決済はこれで完結します",
+              flush=True)
+    return _ng == 0
 
 
 def _seed_arm(_sym: str, _open_time: str) -> None:
@@ -863,7 +986,28 @@ def _order_rows(_sel: list) -> None:
             continue
         _qty = _lot * 100
         _op = float(_r.get("open_p") or 0)
-        _lim = float(_floor_tick(_op * (1.0 - args.limit_slip_bp / 1e4)))
+        # ⛔ N の保護指値は **呼値ベース**(2026-08-31 レビュー④)。
+        #   J の 50bp は N には広すぎる — 残っているのは +21.9bp なので、
+        #   始値-50bp で約定した時点で期待値を失う。
+        #   ⚠ bp で固定してはいけない。呼値は銘柄区分で変わる(§18.31)。
+        if args.n_mode:
+            # ⛔ _floor_tick(= backtest_limit_entry.floor_to_tick) は本文に
+            #   「実測より 5〜10倍粗い」と書いてある**古いテーブル**。使わない。
+            #   銘柄別の正しい呼値(_ntick_floor)で1ティックずつ下げ、
+            #   **許容 bp を超えたらそこで止める**。両方とも要る:
+            #     ・ティックだけだと、粗い呼値の銘柄で下げすぎる
+            #     ・bp だけだと、呼値に乗らない値段になる
+            #   ⚠ 1ティックでも許容を超えるなら **指値=始値**。バックテストは
+            #     「始値で建てる」前提なので、それが最も忠実。約定しなければ
+            #     その銘柄を建てないだけで、損はしない。
+            _lim = float(_op)
+            for _ in range(max(0, args.n_limit_ticks)):
+                _nx = float(_ntick_floor(_lim - 1e-7, _r["symbol"]))
+                if _nx <= 0 or (_op - _nx) / _op * 1e4 > args.n_limit_max_bp:
+                    break
+                _lim = _nx
+        else:
+            _lim = float(_floor_tick(_op * (1.0 - args.limit_slip_bp / 1e4)))
         _why = _verify(_r, _lim, _qty)
         if _why:
             _EX["ng"] += 1
@@ -905,6 +1049,10 @@ def _order_rows(_sel: list) -> None:
                       flush=True)
 
         _log("pending")
+        # ⛔ 送信の**前**に「出そうとした銘柄」を記録する(2026-08-31 レビュー①)。
+        #   例外で OrderId が取れなくても、注文が通っている可能性がある。
+        #   N はここを拾えないと settle の対象から漏れて無防備になる。
+        _N_SENT.add(str(_r["symbol"]))
         try:
             _res = cli.send_sell(int(_r["symbol"]), qty=_qty, price=_lim,
                                  cash_margin=2,          # 信用新規(売建)
@@ -942,8 +1090,11 @@ def _order_rows(_sel: list) -> None:
         if args.execute and not args.n_mode:
             _seed_arm(_r["symbol"], _r.get("open_time"))
         print(f"  {'✓ 発注' if args.execute else '(dry-run)'} "
-              f"{_r['symbol']} {_qty:,}株 保護指値 {_lim:,.0f}"
-              f"(始値 {_op:,.1f} / -{args.limit_slip_bp:.0f}bp) "
+              f"{_r['symbol']} {_qty:,}株 保護指値 {_lim:,.1f}"
+              + (f"(始値 {_op:,.1f} / -{(_op - _lim) / _op * 1e4:.1f}bp"
+                 + ("・呼値が粗いので始値ちょうど" if _lim >= _op else "") + ") "
+                 if args.n_mode else
+                 f"(始値 {_op:,.1f} / -{args.limit_slip_bp:.0f}bp) ")
               + ("決済=引けMOCのみ(バリアなし)" if args.n_mode else
                  f"損切 {float(_r['stop_k']):,.1f} / "
                  f"利確 {float(_r['target_k']):,.1f}")
@@ -1053,11 +1204,24 @@ def _mk_row(_s: str, _bd: dict, _ts: str, _grp: int) -> dict:
         if _m and (int(_m.group(1)) * 60 + int(_m.group(2))) > 9 * 60:
             _late = 1
     _gap = ((_op - _pc) / _pc * 1e4) if (_op > 0 and _pc > 0) else None
-    _guard = 1 if (_gap is not None and _gap > args.guard_bp) else 0
+    # ⛔ N にギャップ上限は **無い**(2026-08-31 レビュー③)。
+    #   §18.55 で --max-gap-bp 150 は 月+49,587 → +21,075 と棄却済み。
+    #   J の +300bp ガードを残すとバックテストとライブが食い違う(§18.9)。
+    _guard = 0 if args.n_mode else (
+        1 if (_gap is not None and _gap > args.guard_bp) else 0)
+    # ⛔ N は **09:00 の始値**も価格帯に入っていることを条件にしている
+    #   (バックテスト: x[x.open.between(MIN_PRICE, MAX_PRICE)])。
+    #   前夜の終値で絞っただけではライブと食い違う。
+    _pband = 1 if (args.n_mode and _op > 0
+                   and not (args.min_price <= _op <= args.max_price)) else 0
     # ⛔ --poll では late を不合格にしない(遅寄りを拾うのが目的)。
     _lt_ng = 0 if args.poll else _late
     _pass = 1 if (_gap is not None and _gap >= args.gap_bp
-                  and not _guard and not _lt_ng) else 0
+                  and not _guard and not _lt_ng and not _pband) else 0
+    if _pband:
+        print(f"  ⛔ {_s} 始値 {_op:,.1f} が価格帯 "
+              f"{args.min_price:,.0f}〜{args.max_price:,.0f}円 の外 → 見送り",
+              flush=True)
     return {"date": f"{_dt.date.today()}", "seen_ts": _ts, "grp": _grp,
             "symbol": _s, "in_j": 1 if _s in _jpool else 0,
             "rank_liq": 0, "liquidity": _liq.get(_s, 0),
@@ -1354,7 +1518,9 @@ if args.execute:
     # 無い時刻・無い値段で持つことになる(§18.9 の鉄則違反)。
     # ⛔ 一部約定(CumQty>0)は残す。取り消すと建玉だけ残って watcher が
     #    決済できなくなる。cancel_gap_orders._budget_sweep と同じ方針。
-    if _EX["n"]:
+    if _EX["n"] and args.n_mode:
+        _n_settle()
+    elif _EX["n"]:
         _ACTIVE = {1, 2, 3, 4}          # 5=終了 は対象外
         try:
             _mine = {str(r["symbol"]) for r in _rows if int(r.get("ordered") or 0)}
@@ -1422,7 +1588,11 @@ if args.execute:
     #   (moc_placed 相当の重複は kabu 側で建玉拘束になるだけで無害)。
     # ⚠ 損切り逆指値は置かない。板は1本しか使えないので、**確実に閉じる方**を
     #   優先する(損切りは watcher のポーリングが担う)。
-    if not args.no_moc_on_exit:
+    # ⛔ N は _n_settle() で既に置いた。ここを通すと get_positions を舐めて
+    #   **他戦略・手動の売建にも MOC を出す**(2026-08-31 レビュー②)。
+    if args.n_mode:
+        pass
+    elif not args.no_moc_on_exit:
         print(f"\n  ── 引け成行(MOC)を板に置きます "
               f"{'─' * 40}\n"
               f"  ⛔ ここで置かないと、watcher が起動するまで板は空です。"
@@ -1483,13 +1653,20 @@ if args.execute:
     print(f"""
   🚀 **発注しました** {_EX['n']}件 / 総額 {_EX['yen'] / 1e4:,.1f}万"""
           + (f" / 中止 {_EX['ng']}件" if _EX["ng"] else "")
-          + f"""
+          + ("""
+  ▶ 決済は **引け成行(MOC)だけ**です。上の [MOC] 行で全件そろっているか
+    確認してください。そろっていれば、この PC を閉じても大引けで決済されます。
+  ⛔⛔ **watcher を起動しないでください**（.\\watch / .\\jwatch）。
+     N の建玉を J のルール(delay4 / sm0.5 / tm1.0)で触ります。しかも
+     ATR が無い建玉には **緊急幅1%の損切り**を置きます(§18.55 のN仕様に反する)。
+  ▶ 引け後: .\\fills で実約定と突合（実滑りがここで初めて測れます）
+""" if args.n_mode else f"""
   ▶ 次に **必ず** これを起動して決済させる（J は delay4）:
       python lss_exit_watcher.py --execute {'--prod ' if args.prod else ''}--all-dates --stop-delay-bars 4
     ⛔ 起動しないと **引けまで持ちっぱなし**になります。
     ⛔ kabu の有効トークンは1つ。このスクリプトが終わってから起動すること。
   ▶ 引け後: .\\fills で実約定と突合（実滑りがここで初めて測れます）
-""")
+"""))
     if _EX["ng"]:
         print(f"  ⚠ 中止 {_EX['ng']}件あり。理由は上のログ(⛔行)を確認してください。")
 else:
