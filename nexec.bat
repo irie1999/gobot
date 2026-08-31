@@ -45,6 +45,14 @@ REM        naming our own HoldIDs, and only if they add up exactly
 REM     5. confirm each MOC was accepted; shout loudly if any was not
 REM   Anything short of all five prints a warning and exits non-zero.
 REM
+REM WHAT MAKES IT REFUSE TO TRADE AT ALL
+REM   Before the FIRST sell, it snapshots the existing order ids. That
+REM   snapshot is the only way to recover an order whose send timed out. If
+REM   the snapshot cannot be read, N sends NOTHING for the day - it stops
+REM   before writing the ledger, so no phantom rows are left behind either.
+REM   Per name, it also refuses to send if the ledger row cannot be written:
+REM   an order with no ledger row is a position tomorrow's guard cannot see.
+REM
 REM SEQUENCE
 REM   0. build tonight's candidates (yfinance only, no kabu)
 REM   1. 08:55  register + one warm read (skipping this costs 40-140s at 09:00)

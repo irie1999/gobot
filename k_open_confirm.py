@@ -728,6 +728,10 @@ _N_SETTLE_OK = [True]   # settle が全部そろったか。False なら非ゼ�
 #   全行に同じものを書く。
 _N_ATT = [""]           # 今から出す注文の attempt_id
 _N_ATT_SYM: dict = {}   # 銘柄 -> attempt_id(settle が settled を書くため)
+# ⛔⛔ 発注ライフサイクルの土台が崩れたら **その日はもう発注しない**
+#   (レビュー7巡目)。いまのところ立つのは「送信前の注文一覧が取れない」
+#   = タイムアウト復元の土台が無い場合だけ。立ったら以降の銘柄は全部見送る。
+_N_ABORT = [False]
 _EX = {"left": args.budget * 1e4, "n": 0, "yen": 0.0, "ng": 0,
        "cap": (args.max_notional or args.budget) * 1e4}
 _ORDER_LOG = None
@@ -1280,7 +1284,17 @@ def _order_rows(_sel: list) -> None:
     """このグループの合格銘柄を発注する。--execute のときだけ実発注。"""
     if not _sel:
         return
+    # ⛔ 発注ライフサイクルの土台が崩れた日は、以降のグループも全部見送る
+    #   (レビュー7巡目)。09:00 の1本目で立てば、その日は1件も建てない。
+    if _N_ABORT[0]:
+        print(f"  ⛔ N は発注を中止しています(この {len(_sel)}銘柄も見送り)",
+              flush=True)
+        return
     for _r in sorted(_sel, key=lambda x: -float(x.get("gap_bp") or 0)):
+        if _N_ABORT[0]:
+            print(f"  ⛔ {_r['symbol']} 見送り(N の発注を中止しました)",
+                  flush=True)
+            continue
         if int(_r.get("ordered") or 0):
             continue          # 二重発注の保険(グループは1回しか通らないが念のため)
         _lot = int(_r.get("lots_k") or 0)
@@ -1372,6 +1386,31 @@ def _order_rows(_sel: list) -> None:
         #     ・だが**途中で落ちたら翌朝の起動ガードが気づけない**
         #   = 誰も知らない無防備な建玉になる。書けないなら建てないほうが安全。
         #   ⚠ J は watcher が建玉を見て決済するので、この扱いは N だけ。
+        # ★ 最初の送信の**直前**に、既にある注文IDを控える。送信でタイムアウト
+        #   したとき「増えたID = 自分のもの」で復元するため(レビュー①)。
+        # ⛔⛔ これが取れなければ **N は1件も発注しない**(レビュー7巡目)。
+        #   _N_PRE が無いと _n_adopt_unknown は「増えたID」を判定できず、
+        #   ①送信タイムアウトした自分の注文を復元できない(= 無防備な建玉)
+        #   ②最悪、他人・他戦略の注文を自分のものとして取消・決済する
+        #   のどちらかになる。復元の土台が無いまま実弾を出さない。
+        #   ⚠ 台帳(_log)・_N_SENT より**先に**判定する。ここで抜けるときは
+        #     まだ1件も送っていないので、pending 行も _N_SENT も残さない。
+        if args.n_mode and args.execute and not _N_PRE_TAKEN[0]:
+            try:
+                _N_PRE.update(str(_o.get("ID") or "")
+                              for _o in (cli.get_orders() or []))
+                _N_PRE_TAKEN[0] = True
+            except Exception as _pe:
+                _N_ABORT[0] = True
+                _N_SETTLE_OK[0] = False      # 非ゼロ終了で気づけるように
+                print(f"\n  ⛔⛔ **送信前の注文一覧を取れません**({_pe})\n"
+                      f"     これが無いと、送信がタイムアウトしたときに自分の\n"
+                      f"     注文を復元できません(無防備な建玉になる)。\n"
+                      f"     → **N は本日1件も発注しません**。まだ1件も送って\n"
+                      f"       いないので建玉はありません。kabu の接続を確認\n"
+                      f"       してから、必要なら明日やり直してください。",
+                      flush=True)
+                continue
         if not _log("pending") and args.n_mode and args.execute:
             _EX["ng"] += 1
             print(f"  ⛔ {_r['symbol']} 発注中止: **台帳に書けませんでした**。"
@@ -1382,16 +1421,6 @@ def _order_rows(_sel: list) -> None:
         #   例外で OrderId が取れなくても、注文が通っている可能性がある。
         #   N はここを拾えないと settle の対象から漏れて無防備になる。
         _N_SENT.add(str(_r["symbol"]))
-        # ★ 最初の送信の**直前**に、既にある注文IDを控える。送信でタイムアウト
-        #   したとき「増えたID = 自分のもの」で復元するため(レビュー①)。
-        if args.n_mode and args.execute and not _N_PRE_TAKEN[0]:
-            _N_PRE_TAKEN[0] = True
-            try:
-                _N_PRE.update(str(_o.get("ID") or "")
-                              for _o in (cli.get_orders() or []))
-            except Exception as _pe:
-                print(f"    ⚠ 送信前の注文一覧を取れません({_pe})。"
-                      f"タイムアウト時の復元が効かなくなります", flush=True)
         try:
             _res = cli.send_sell(int(_r["symbol"]), qty=_qty, price=_lim,
                                  cash_margin=2,          # 信用新規(売建)
@@ -1876,7 +1905,9 @@ if args.execute:
     # ⛔ 条件を _EX["n"] にしない(レビュー②)。全件が送信タイムアウトだと
     #   _EX["n"] は0のままで、**不明な実注文を残したまま終了**してしまう。
     if args.n_mode and (_N_ORD or _N_SENT or _N_UNK):
-        _N_SETTLE_OK[0] = _n_settle()
+        # ⛔ 代入で上書きしない(レビュー7巡目)。発注中止で False になって
+        #   いるのを settle の True が消してしまう。
+        _N_SETTLE_OK[0] = _n_settle() and _N_SETTLE_OK[0]
     elif _EX["n"]:
         _ACTIVE = {1, 2, 3, 4}          # 5=終了 は対象外
         try:
