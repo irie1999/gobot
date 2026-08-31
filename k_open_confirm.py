@@ -206,7 +206,45 @@ ap.add_argument("--allow-late-orders", action="store_true",
 ap.add_argument("--no-moc-on-exit", action="store_true",
                 help="⛔ 終了前に引け成行(MOC)を置かない。"
                      "置かないと watcher が起動するまで板が空になる")
+# ★★ 新方式N として発注する (2026-08-31)。既定OFF = 従来どおり J。
+#   N は §18.54/§18.55 で確定した仕様で、J と4点違う:
+#     ① 候補     n_signals_<日付>.csv (前日リターン ≥ +1.753% / 売買代金上位50)
+#     ② 合格     ギャップ ≥ +100bp    (J は +75bp)
+#     ③ 株数     **100株固定**        (J は資金均等 / §18.58 ③・§18.36 で確定)
+#     ④ 決済     **引けMOC だけ**。損切りも利確も置かない (§18.55)
+#   ⛔ ④の帰結として watcher が要らない。J では「MOC が建玉を拘束して損切りを
+#     置けない」排他があったが、N は損切りを置かないので衝突が消える。
+#   ⛔ そして _verify の ATR チェックは N では**必ず落ちる**(バリアが無いので
+#     ATR を持たない)。2026-08-31 の記録実行で合格2件が両方止まった。
+ap.add_argument("--n-mode", action="store_true",
+                help="新方式N として発注する(§18.54)。候補=n_signals_<日付>.csv"
+                     " / +100bp / 100株固定 / バリアなし(引けMOCだけ) /"
+                     " watcher 不要")
 args = ap.parse_args()
+
+# ── N の既定値 ────────────────────────────────────────────────────────
+#   ⛔ J の既定と違う値だけを差し替える。**明示指定はそのまま尊重する**ため、
+#     「J の既定のままなら N の既定にする」という形にしている。
+if args.n_mode:
+    _nd: list = []
+    if args.gap_bp == 75.0:
+        args.gap_bp = 100.0
+        _nd.append("--gap-bp 100")
+    if args.poll_until == "09:30":
+        # ⛔ ポーリングを切ると、その直後に引けMOC が置かれる(下の
+        #   no_moc_on_exit ブロック)。N は watcher が無いので、
+        #   **建ててから MOC までの無防備な時間**をここで決めている。
+        #   09:10 = 遅寄りの93%が寄り終わる(§18.44)一方で、無防備は最大10分。
+        args.poll_until = "09:10"
+        _nd.append("--poll-until 09:10")
+    if args.max_lot == 10:
+        args.max_lot = 1                     # 100株固定(§18.58 ③)
+        _nd.append("--max-lot 1")
+    print("[N] 新方式N として発注します(§18.54)。"
+          "候補=n_signals / +100bp / 100株固定 / バリアなし(引けMOCだけ)")
+    if _nd:
+        print(f"[N] J の既定から差し替え: {' / '.join(_nd)}")
+    print("[N] ⛔ watcher は起動しません。決済は引け成行(MOC)だけです")
 
 # ★ 1銘柄の上限を **比率**から解決する (2026-08-21)。
 #   0 = 予算 × --max-yen-pct%。明示した値があればそれを使う。
@@ -267,7 +305,9 @@ def _codes_from(path: str) -> list[str]:
     return [x for x in _c if not (x in _seen or _seen.add(x))]
 
 
-_sig_csv = args.signals_csv or f"k_signals_{_dt.date.today():%Y%m%d}.csv"
+_sig_csv = args.signals_csv or (
+    f"n_signals_{_dt.date.today():%Y%m%d}.csv" if args.n_mode
+    else f"k_signals_{_dt.date.today():%Y%m%d}.csv")
 # 銘柄 -> ATR。K の OCO は **実約定価格(始値)** を基準に置くので、
 # 損切り/利確は 09:00 に始値が出て初めて確定する。
 _ATR: dict = {}
@@ -679,12 +719,21 @@ def _verify(_r, _lim: float, _qty: int) -> str:
     _tk = float(_r.get("target_k") or 0)
     if _op <= 0:
         return "始値が0"
-    if _atr <= 0:
-        return "ATRが無い(損切りが無効化される)"
-    if not (_sk > 0 and _tk > 0):
-        return "損切/利確が無い"
-    if not (_sk > _op > _tk):
-        return f"ショートの向きが逆(損切{_sk:,.1f} > 約定{_op:,.1f} > 利確{_tk:,.1f} でない)"
+    # ⛔⛔ N は **バリアを持たない**(損切りも利確も置かない / §18.55)。
+    #   したがって ATR / stop_k / target_k が無いのが**正常**で、J のガードを
+    #   そのまま当てると合格銘柄が全件止まる(2026-08-31 の記録実行で実測)。
+    #   代わりに N では「株数が100であること」を必ず見る(下の共通チェック)。
+    if args.n_mode:
+        if _qty != 100:
+            return f"N は100株固定のはずが {_qty}株(§18.58 ③)"
+    else:
+        if _atr <= 0:
+            return "ATRが無い(損切りが無効化される)"
+        if not (_sk > 0 and _tk > 0):
+            return "損切/利確が無い"
+        if not (_sk > _op > _tk):
+            return (f"ショートの向きが逆(損切{_sk:,.1f} > 約定{_op:,.1f} > "
+                    f"利確{_tk:,.1f} でない)")
     if _qty <= 0 or _qty % 100:
         return f"株数が不正({_qty})"
     if not (0 < _lim <= _op):
@@ -802,13 +851,18 @@ def _order_rows(_sel: list) -> None:
             if not (_ORDER_LOG and args.execute):
                 return
             try:
+                # ⛔ N はバリアを持たないので、損切/利確/ATR を **0 で書く**。
+                #   記録自体は残す(§18.48 ⑦「記録を発注より先に書く」)が、
+                #   万一 watcher が起動しても **武装するものが無い**状態にする。
+                _nb = args.n_mode
                 _ORDER_LOG({"symbol": _r["symbol"], "name": _r.get("name", ""),
                             "strategy": _r.get("strategy", ""),
                             "order_price": _lim,
-                            "stop_price": float(_r["stop_k"]),
-                            "target_price": float(_r["target_k"]),
-                            "atr": float(_r["atr"]), "sm": args.sm,
-                            "tm": args.tm},
+                            "stop_price": 0.0 if _nb else float(_r["stop_k"]),
+                            "target_price": 0.0 if _nb else float(_r["target_k"]),
+                            "atr": 0.0 if _nb else float(_r["atr"]),
+                            "sm": 0.0 if _nb else args.sm,
+                            "tm": 0.0 if _nb else args.tm},
                            args.prod, _qty, entry_mode="auction",
                            order_price=_lim, status=_st)
             except Exception as _we:
@@ -848,13 +902,18 @@ def _order_rows(_sel: list) -> None:
         _r["order_limit"] = _lim
         # ★ 損切りの武装の起点を **この銘柄が寄った時刻** に固定する。
         #   発注が通った直後に書く(まとめて書くと途中で落ちたとき失われる)。
-        if args.execute:
+        # ⛔ N は watcher を使わない(バリアが無いので武装するものが無い)。
+        #   .lss_watcher_seen.json に書くと、後で watcher を起動したときに
+        #   N の建玉まで J のルール(delay4 / sm0.5 / tm1.0)で触られる。
+        if args.execute and not args.n_mode:
             _seed_arm(_r["symbol"], _r.get("open_time"))
         print(f"  {'✓ 発注' if args.execute else '(dry-run)'} "
               f"{_r['symbol']} {_qty:,}株 保護指値 {_lim:,.0f}"
               f"(始値 {_op:,.1f} / -{args.limit_slip_bp:.0f}bp) "
-              f"損切 {float(_r['stop_k']):,.1f} / 利確 {float(_r['target_k']):,.1f}"
-              f" / 累計 {_EX['yen'] / 1e4:,.0f}万", flush=True)
+              + ("決済=引けMOCのみ(バリアなし)" if args.n_mode else
+                 f"損切 {float(_r['stop_k']):,.1f} / "
+                 f"利確 {float(_r['target_k']):,.1f}")
+              + f" / 累計 {_EX['yen'] / 1e4:,.0f}万", flush=True)
         # ★ 発注が通ったことを記録する(pending → ordered)。
         #   ⛔ entry_mode="auction" にすると watcher が **実約定価格基準**で
         #     OCO を組み直す(§18.32 / lss_exit_watcher:355-)。J も同じ扱いで正しい。
@@ -1070,6 +1129,12 @@ def _size_groups(_rows: list) -> None:
             if _cap > 0:
                 _lot = min(_lot, int(_cap // _u))
             _lot = max(1, _lot)          # 1件目は最低1単元(現行と同じ)
+            # ⛔ N は **100株固定**。予算は「何銘柄建てるか」だけを決める。
+            #   §18.58 ③(資金均等は100株の床で動けない) / §18.36・2026-08-31
+            #   (1件31万固定も TRAIN +209円 t=0.07 / TEST -1,792円 t=-0.70 で
+            #    差ゼロ)で確定済み。バックテストの +21.9bp もこの前提の値。
+            if args.n_mode:
+                _lot = 1
             # 残り予算を超えないところで打ち切る
             while _lot > 0 and _used + _lot * _u > _R:
                 _lot -= 1
