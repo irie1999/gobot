@@ -988,6 +988,153 @@ def capture_report(panel_all: pd.DataFrame, side: str, watch: int = TOPN) -> Non
     print("      **必ず予算シミュまで通すこと** (§18.10 の教訓)")
 
 
+# ---------------------------------------------------------------- worst 傾向
+#
+# ⛔ ここは **探索** です。10個以上の特徴量を同じデータで比べているので、
+#    「t が2を超えた」だけでは何も言えません (10個なら偶然1個は超える)。
+#    出せるのは「次に事前宣言して試す候補」までです。
+#
+# ★ そして特徴量は **いつ分かるか** で3段に分けます。段が違えば使い道が違う:
+#      前夜   … 監視枠・予算を落とせる。唯一「建てない」判断ができる
+#      09:00  … 寄ってから建てるまでの間。件数上限などで使える
+#      事後   … **どう頑張っても使えない。** 機構の説明にしかならない
+#    §16.15.8 で「前夜に選ぶものを当日のデータで選ぶ」欠陥を3人が同時に
+#    出したので、段を混ぜないことをコード側で強制します。
+
+_TIER = {"前夜": [], "09:00": [], "事後": []}
+
+
+def _feat(tier: str, name: str) -> str:
+    _TIER[tier].append(name)
+    return name
+
+
+def _welch(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
+    a = a[np.isfinite(a)]
+    b = b[np.isfinite(b)]
+    if len(a) < 3 or len(b) < 3:
+        return float("nan"), float("nan")
+    d = float(a.mean() - b.mean())
+    se = float(np.sqrt(a.var(ddof=1) / len(a) + b.var(ddof=1) / len(b)))
+    return d, (d / se if se > 0 else float("nan"))
+
+
+def day_features(panel: pd.DataFrame, trades: pd.DataFrame,
+                 side: str, n225) -> pd.DataFrame:
+    """建てた日ごとに、日単位の特徴量を作る。"""
+    _TIER["前夜"].clear(); _TIER["09:00"].clear(); _TIER["事後"].clear()
+
+    # --- 監視枠50銘柄から作る「市場」の代理 (前夜に確定する量だけ) -----
+    #   ⚠ ユニバース全体ではなく監視枠50なので、大型株寄りの代理です。
+    p = panel.copy()
+    p["day_ret"] = (1 + p["gap"]) * (1 + p["o2c"]) - 1.0
+    uni = p.groupby("date").agg(uni_ret=("day_ret", "mean"),
+                                uni_atr=("atr", "median"),
+                                uni_n=("symbol", "size"))
+    uni["uni_ret_prev"] = uni["uni_ret"].shift(1)          # D-1 の市場
+    uni["uni_vol20"] = uni["uni_ret"].rolling(20).std().shift(1)
+    uni["uni_atr_prev"] = uni["uni_atr"].shift(1)
+
+    # --- 前夜に分かる候補数 (前日条件を満たした銘柄が監視枠に何件あるか) ---
+    sgn = 1 if side == "short" else -1
+    cand = (p["prev_ret"] * sgn >= PREV_THR).groupby(p["date"]).sum()
+
+    g = trades.groupby("date")
+    f = pd.DataFrame({
+        "pnl": g["pnl"].sum(),
+        _feat("09:00", "件数"): g.size(),
+        _feat("09:00", "建玉合計"): g["notional"].sum(),
+        _feat("09:00", "|gap|中央"): g["gap"].apply(lambda s: s.abs().median()) * 100,
+        _feat("09:00", "|gap|最大"): g["gap"].apply(lambda s: s.abs().max()) * 100,
+        _feat("09:00", "建値中央"): g["open"].median(),
+        _feat("09:00", "ATR中央"): g["atr"].median() * 100,
+        _feat("09:00", "前日R中央"): g["prev_ret"].apply(lambda s: s.abs().median()) * 100,
+    })
+    f[_feat("前夜", "候補数")] = cand.reindex(f.index)
+    f[_feat("前夜", "枠ATR中央")] = uni["uni_atr_prev"].reindex(f.index) * 100
+    f[_feat("前夜", "枠の前日R%")] = uni["uni_ret_prev"].reindex(f.index) * 100
+    f[_feat("前夜", "枠20日σ%")] = uni["uni_vol20"].reindex(f.index) * 100
+    f[_feat("前夜", "曜日(0=月)")] = f.index.dayofweek
+    f[_feat("前夜", "月")] = f.index.month
+    # 直近5営業日の戦略損益 (D-1 まで)。連敗のあとに大負けが来るか
+    f[_feat("前夜", "直近5日損益")] = f["pnl"].rolling(5).sum().shift(1)
+    if n225 is not None:
+        f[_feat("09:00", "N225寄り%")] = (n225["gap"].reindex(f.index) * 100)
+        f[_feat("事後", "N225日中%")] = (n225["o2c"].reindex(f.index) * 100)
+    f[_feat("事後", "負け比率%")] = g["pnl"].apply(lambda s: (s < 0).mean()) * 100
+    f[_feat("事後", "枠の当日R%")] = uni["uni_ret"].reindex(f.index) * 100
+    return f
+
+
+def worst_profile(panel: pd.DataFrame, trades: pd.DataFrame,
+                  side: str, n225, q: float = 0.10) -> None:
+    f = day_features(panel, trades, side, n225)
+    thr = f["pnl"].quantile(q)
+    bad = f["pnl"] <= thr
+    print("\n" + "=" * 78)
+    print(f"■ 大負け日の傾向 (下位{q:.0%} = {int(bad.sum())}日 vs 残り {int((~bad).sum())}日)")
+    print(f"   しきい値 日損益 <= {thr:,.0f}円   "
+          f"下位群の合計 {f.loc[bad,'pnl'].sum():,.0f}円 / "
+          f"全体 {f['pnl'].sum():,.0f}円")
+    print("\n   ⛔ これは探索です。特徴量を十数個ぶん同じデータで比べているので、")
+    print("      |t|>2 が1〜2個出るのは偶然の範囲です。**採用しないこと。**")
+    print("      使えるのは『次に事前宣言して OOS で試す候補』としてだけ。")
+
+    for tier in ("前夜", "09:00", "事後"):
+        names = [n for n in _TIER[tier] if n in f.columns]
+        if not names:
+            continue
+        note = {"前夜": "★ 建てない判断ができる唯一の段",
+                "09:00": "件数上限などで使える段",
+                "事後": "⛔ 使えません。機構の説明用"}[tier]
+        print(f"\n  [{tier}] {note}")
+        print(f"      {'特徴量':<14}{'大負け日':>12}{'残り':>12}"
+              f"{'差':>12}{'t':>8}")
+        rows = []
+        for nm in names:
+            a = f.loc[bad, nm].to_numpy(dtype=float)
+            b = f.loc[~bad, nm].to_numpy(dtype=float)
+            d, t = _welch(a, b)
+            rows.append((nm, np.nanmean(a), np.nanmean(b), d, t))
+        for nm, ma, mb, d, t in sorted(rows, key=lambda r: -abs(r[4] if r[4] == r[4] else 0)):
+            mark = " ←" if abs(t) >= 2 else ""
+            print(f"      {nm:<14}{ma:>12,.2f}{mb:>12,.2f}{d:>12,.2f}{t:>8.2f}{mark}")
+
+    # --- 前夜の量だけ、5分位で単調性を見る -------------------------------
+    print("\n  [前夜の量の5分位別 日損益]  ⚠ 単調でなければ、差は形になっていません")
+    for nm in _TIER["前夜"]:
+        if nm not in f.columns or nm in ("曜日(0=月)", "月"):
+            continue
+        v = f[nm]
+        if v.notna().sum() < 50 or v.nunique() < 5:
+            continue
+        try:
+            qs = pd.qcut(v, 5, labels=False, duplicates="drop")
+        except ValueError:
+            continue
+        m = f.groupby(qs)["pnl"].mean()
+        c = f.groupby(qs)["pnl"].size()
+        cells = "  ".join(f"{x:>8,.0f}({n})" for x, n in zip(m, c))
+        print(f"      {nm:<14}{cells}")
+
+    # --- 曜日と月は件数が偏るので別に出す --------------------------------
+    for nm, lab in (("曜日(0=月)", "曜日"), ("月", "月")):
+        if nm not in f.columns:
+            continue
+        m = f.groupby(f[nm])["pnl"].agg(["mean", "size"])
+        print(f"\n  [{lab}別]  " + "  ".join(
+            f"{int(k)}:{r['mean']:,.0f}({int(r['size'])})" for k, r in m.iterrows()))
+
+    print("\n  ★ 読み方: 『事後』の段に強い差が出るのは当然です (負け比率・市場の")
+    print("     日中の動きは損益そのものの言い換え)。**見るのは『前夜』の段だけ**で、")
+    print("     そこに単調な形が無ければ、大負け日は事前には見分けられません。")
+    print("\n  \u26d4 『建玉合計』『建値中央』が大きく出るのは **ほぼ機械的** です。")
+    print("     建玉が大きい日は損益の分散も大きいので、上位10%にも下位10%にも")
+    print("     入りやすくなります。エッジ0の合成データでも t=5.5 が出ました")
+    print("     (self-test で確認済み)。**大負けの原因ではありません。**")
+    print("     判別するには 建玉で割った日次収益 (bp) で測り直すこと。")
+
+
 def _smoke_build_panel() -> None:
     """⛔ build_panel を実際に通す。
 
@@ -1046,6 +1193,8 @@ def self_test() -> int:
     print(f"SELF-TEST: 発火 {len(sig):,} 件 / {sig['date'].nunique():,} 日")
     args = argparse.Namespace(corr=False)
     run(sig, None, args)
+    # ⛔ 通らない経路は壊れていても気づけません (§16.17.1)。必ず1回通す。
+    worst_profile(panel, apply_sizing(sig, "fixed"), "short", None)
     ok = len(sig) > 100
     print("SELF-TEST:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
@@ -1078,6 +1227,10 @@ def main() -> int:
                     help="サイズを決めるための ES と、ボラ回帰を1本出す")
     ap.add_argument("--both", action="store_true",
                     help="N と鏡像を同時に建てた場合を測る")
+    ap.add_argument("--worst-profile", dest="worst_profile",
+                    action="store_true",
+                    help="大負け日の傾向を、特徴量が『いつ分かるか』で3段に"
+                         "分けて出す (探索。採用の根拠にはできません)")
     ap.add_argument("--corr", action="store_true",
                     help="セクターの代理として、その日の銘柄どうしの"
                          "過去60日リターン平均相関を出す")
@@ -1117,6 +1270,11 @@ def main() -> int:
         if args.stop_test:
             stop_test(panel, args.side, args.train_from, te)
         return 0
+    if args.worst_profile:
+        n225 = load_n225()
+        worst_profile(panel, apply_sizing(sig, "fixed"), args.side, n225)
+        return 0
+
     if args.both:
         combined(panel)
         return 0
