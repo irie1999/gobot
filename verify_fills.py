@@ -284,7 +284,13 @@ def main():
             "recv": _hhmm(_order_date(o)),
             # ★ 秒つきを別列で保存する(2026-09-01)。表示は分のままでよいが、
             #   「板寄せから何秒後に約定したか」は秒が無いと測れない。
+            # ⚠ 部分約定に備えて **最初と最後を分ける**(2026-09-01 レビュー)。
+            #   100株が複数回に分かれて約定すると、first と last が離れる。
+            #   「板寄せから何秒で建ったか」は first、「全数量がそろったのは
+            #   いつか」は last で見る。今日の 5301 は1約定なので同値。
             "fill_time_s": _hms(min(_ex)) if _ex else "",
+            "fill_time_last_s": _hms(max(_ex)) if _ex else "",
+            "n_exec": len(_ex),
             "recv_s": _hms(_order_date(o)),
         })
 
@@ -370,8 +376,13 @@ def main():
             et = f"{_d[4:6]}/{_d[6:8]}"       # 建てた日を出す(当日でないと分かるように)
         xt = _hhmm(max(b["times"])) if (b and b["times"]) else "—"   # 買戻し=決済時刻
         # ★ 秒つき(CSV用)。表示は上の分表記を使う。
+        # ⚠ 部分約定に備えて最初と最後の両方を持つ(2026-09-01 レビュー)。
         et_s = _hms(min(s["times"])) if (s and s["times"]) else ""
+        et_last_s = _hms(max(s["times"])) if (s and s["times"]) else ""
+        xt_first_s = _hms(min(b["times"])) if (b and b["times"]) else ""
         xt_s = _hms(max(b["times"])) if (b and b["times"]) else ""
+        n_exec_s = len(s["times"]) if s else 0
+        n_exec_b = len(b["times"]) if b else 0
         if qty > 0:                                # 往復完了(lssショート: 売り→買戻し)
             gross = (avg_sell - avg_buy) * qty
             fee = (avg_sell + avg_buy) * qty * FEE
@@ -386,7 +397,9 @@ def main():
                      "pct": round(pct, 2), "carried": int(_carried),
                      # ★ 秒つき(2026-09-01)。「板寄せから何秒後に約定したか」は
                      #   分の解像度では測れない。表示は上の et/xt のまま。
-                     "entry_t_s": et_s, "exit_t_s": xt_s})
+                     "entry_t_s": et_s, "entry_t_last_s": et_last_s,
+                     "exit_t_first_s": xt_first_s, "exit_t_s": xt_s,
+                     "n_exec_entry": n_exec_s, "n_exec_exit": n_exec_b})
 
     # 表示
     print("=== 結果 (上の注文のうち 約定して決済まで済んだ取引の実損益) ===")
