@@ -192,6 +192,24 @@ def _hhmm(t: str) -> str:
     return s[-8:-3] if len(s) >= 8 else s
 
 
+def _hms(t: str) -> str:
+    """約定時刻から **HH:MM:SS** を抜く(CSV保存用)。
+
+    ⛔⛔ 表示は分までで十分だが、**保存で秒を捨ててはいけない**(2026-09-01)。
+      kabu は ExecutionDay を yyyyMMddHHMMSS で返すので秒がある。ところが
+      orders_*.csv / fills_*.csv は _hhmm() の結果を書いており、
+      **秒が永久に失われていた**。
+      N でいま測っているのは「板寄せから何秒後に約定したか」で、
+      分の解像度では 09:00 と 09:00:59 が区別できない = 測定にならない。
+    """
+    s = str(t)
+    if len(s) >= 14 and s[:8].isdigit():          # yyyyMMddHHMMSS
+        return f"{s[8:10]}:{s[10:12]}:{s[12:14]}"
+    if "T" in s and len(s) >= 19:                  # ISO
+        return s[11:19]
+    return s[-8:] if len(s) >= 8 else s
+
+
 def _load_expected(path):
     exp = {}
     try:
@@ -264,6 +282,10 @@ def main():
             "status": _order_status(o), "cum_qty": cq,
             "fill_price": round(fill_p, 1), "fill_time": fill_t,
             "recv": _hhmm(_order_date(o)),
+            # ★ 秒つきを別列で保存する(2026-09-01)。表示は分のままでよいが、
+            #   「板寄せから何秒後に約定したか」は秒が無いと測れない。
+            "fill_time_s": _hms(min(_ex)) if _ex else "",
+            "recv_s": _hms(_order_date(o)),
         })
 
     order_rows.sort(key=lambda r: (r["code"], r["side"]))
@@ -347,6 +369,9 @@ def main():
             _d = _digits(min(s["times"]))[:8]
             et = f"{_d[4:6]}/{_d[6:8]}"       # 建てた日を出す(当日でないと分かるように)
         xt = _hhmm(max(b["times"])) if (b and b["times"]) else "—"   # 買戻し=決済時刻
+        # ★ 秒つき(CSV用)。表示は上の分表記を使う。
+        et_s = _hms(min(s["times"])) if (s and s["times"]) else ""
+        xt_s = _hms(max(b["times"])) if (b and b["times"]) else ""
         if qty > 0:                                # 往復完了(lssショート: 売り→買戻し)
             gross = (avg_sell - avg_buy) * qty
             fee = (avg_sell + avg_buy) * qty * FEE
@@ -358,7 +383,10 @@ def main():
         rows.append({"symbol": sym, "name": names.get(sym, ""), "qty": int(qty),
                      "entry(売)": round(avg_sell, 1), "exit(買戻)": round(avg_buy, 1),
                      "entry_t": et, "exit_t": xt, "pnl": round(net, 0),
-                     "pct": round(pct, 2), "carried": int(_carried)})
+                     "pct": round(pct, 2), "carried": int(_carried),
+                     # ★ 秒つき(2026-09-01)。「板寄せから何秒後に約定したか」は
+                     #   分の解像度では測れない。表示は上の et/xt のまま。
+                     "entry_t_s": et_s, "exit_t_s": xt_s})
 
     # 表示
     print("=== 結果 (上の注文のうち 約定して決済まで済んだ取引の実損益) ===")
