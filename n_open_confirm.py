@@ -888,6 +888,10 @@ def _order_rows(_sel: list) -> None:
 #     50件のまま『登録しなければ何秒になるか』を測ること。そこが速ければ
 #     2バッチぶんの時間が空く。
 _REGISTERED: list = []
+# ★ 銘柄ごとの /board 送信・受信時刻(2026-09-01 レビュー)。1周に約6秒かかる
+#   ので、周回の時刻を全銘柄に付けると秒単位の減衰が測れない。
+#   symbol -> (req_ts, resp_ts)。各スレッドが自分のキーだけを書く。
+_BOARD_TS: dict = {}
 
 
 def _read_all(tag: str, pending: list | None = None) -> dict:
@@ -926,10 +930,18 @@ def _read_all(tag: str, pending: list | None = None) -> dict:
                 _REGISTERED.clear()       # 失敗したら次回やり直す
 
         def _one(s):
+            # ★★ **銘柄ごとの** 送信/受信時刻を残す(2026-09-01 レビュー)。
+            #   50件の1周に約6秒かかるので、周回終了時の1つの時刻を全銘柄に
+            #   付けると、いま測りたい **秒単位の減衰がぼやける**。
+            #   ⚠ 各スレッドは自分の銘柄キーだけを書くので競合しない。
+            _q0 = _dt.datetime.now()
             try:
-                return s, cli.get_board(s)
+                _b_ = cli.get_board(s)
             except Exception:
-                return s, {}
+                _b_ = {}
+            _BOARD_TS[s] = (f"{_q0:%H:%M:%S.%f}"[:-3],
+                            f"{_dt.datetime.now():%H:%M:%S.%f}"[:-3])
+            return s, _b_
         with ThreadPoolExecutor(max_workers=max(1, args.workers)) as ex:
             for _s, _bd in ex.map(_one, _b):
                 if _bd:
@@ -1021,7 +1033,11 @@ def _mk_row(_s: str, _bd: dict, _ts: str, _grp: int) -> dict:
 #   1周ごとに全銘柄を追記する。9,000行/日 程度で軽い。
 #   ⛔ このファイルは **記録専用**。発注には一切使わない。
 _QPATH = Path(__file__).resolve().parent / f"n_quotes_{_dt.date.today():%Y%m%d}.csv"
-_QCOLS = ["date", "ts", "poll", "symbol", "prev_close", "open_p", "open_time",
+# ⛔ ts(周回の時刻)を秒単位の分析に使わないこと。1周に約6秒かかるので、
+#   1銘柄目と50銘柄目では6秒ずれる。**req_ts / resp_ts を使う**(ミリ秒つき)。
+#   cur_ts は板が返す最終約定時刻で、気配がどれだけ古いかが分かる。
+_QCOLS = ["date", "ts", "req_ts", "resp_ts", "cur_ts", "poll", "symbol",
+          "prev_close", "open_p", "open_time",
           "current_price", "bid", "ask", "bid_qty", "ask_qty", "gap_bp",
           "pass_gap", "late", "stale_open"]
 
@@ -1039,7 +1055,10 @@ def _qdump(_bd_all: dict, _ts: str, _poll: int) -> None:
                 _r = _mk_row(_s, _bd, _ts, 0)
                 if float(_r.get("open_p") or 0) <= 0:
                     continue                      # まだ寄っていない
+                _q0, _q1 = _BOARD_TS.get(_s, ("", ""))
                 _r["ts"], _r["poll"] = _ts, _poll
+                _r["req_ts"], _r["resp_ts"] = _q0, _q1
+                _r["cur_ts"] = str(_bd.get("CurrentPriceTime") or "")
                 _w.writerow(_r)
                 _n += 1
         if _poll == 1:
