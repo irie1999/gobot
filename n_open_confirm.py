@@ -1059,7 +1059,36 @@ _QCOLS = ["date", "ts", "req_ts", "resp_ts", "poll", "symbol",
     _c for _lv in range(1, 11) for _c in (
         f"buy{_lv}_price", f"buy{_lv}_qty",
         f"sell{_lv}_price", f"sell{_lv}_qty")] + [
-    "buy1_time", "buy1_sign", "sell1_time", "sell1_sign"]
+    "buy1_time", "buy1_sign", "sell1_time", "sell1_sign",
+    # ★ 成行100株の加重平均(Buy1から消化)。「成行 vs 指値」の成行側の値。
+    #   ⚠ 生の板(buy1..10)が正本。この列は日々の目視と定義の統一のため。
+    "mkt100_px", "mkt100_qty", "mkt100_lv"]
+
+
+def _mkt100(_bd: dict, _qty: int = 100) -> tuple:
+    """**成行で _qty 株 売ったときの加重平均**。Buy1 から高値側に消化する。
+
+    ★ これが「成行 vs 指値」の成行側の値。最良気配1本では
+      「100株そこで取れるか」すら分からなかった(§18.44 の宿題)。
+    ⛔ kabu の命名では Buy1 が最良"買い"気配(=こちらが売れる一番高い値)。
+      板が薄くて届かなければ got < qty になり、平均は取れたぶんだけの値。
+    返り値 (加重平均, 取れた株数, 使った段数)。
+    """
+    _got, _cost, _lv = 0, 0.0, 0
+    for _i in range(1, 11):
+        _d = _bd.get(f"Buy{_i}")
+        _d = _d if isinstance(_d, dict) else {}
+        _p = float(_d.get("Price") or 0)
+        _q = int(float(_d.get("Qty") or 0))
+        if _p <= 0 or _q <= 0:
+            break                       # 板がそこで尽きている
+        _take = min(_qty - _got, _q)
+        _cost += _p * _take
+        _got += _take
+        _lv = _i
+        if _got >= _qty:
+            break
+    return (round(_cost / _got, 4) if _got else 0.0), _got, _lv
 
 
 def _qdump(_bd_all: dict, _ts: str, _poll: int) -> None:
@@ -1104,6 +1133,8 @@ def _qdump(_bd_all: dict, _ts: str, _poll: int) -> None:
                         if _lv == 1:
                             _r[f"{_p}_time"] = str(_d.get("Time") or "")
                             _r[f"{_p}_sign"] = str(_d.get("Sign") or "")
+                (_r["mkt100_px"], _r["mkt100_qty"],
+                 _r["mkt100_lv"]) = _mkt100(_bd, 100)
                 _w.writerow(_r)
                 _n += 1
         if _poll == 1:
