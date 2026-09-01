@@ -878,6 +878,19 @@ def _newgap_build(days: int, min_price: float, max_price: float,
     if side == "long":
         _rows = _newgap_mirror_rows(_rows)
     _sim = _newgap_sim(_rows, _NG_BUDGET, _NG_WATCH, _NG_GAP_BP, _NG_RET1)
+    # ★ 日次の損益をCSVに出す(2026-09-01)。レジーム別の検定など、外の
+    #   スクリプトから使うため。既定OFF。
+    #     $env:LSS_NEWGAP_DAYS_CSV = "n_days.csv"
+    #   列: date / cand(前夜の候補) / watched(板を読んだ) / hit(合格) /
+    #       built(予算内で建てた) / used(投入額) / pnl / missed(50件の壁で逃した)
+    _ngc = os.environ.get("LSS_NEWGAP_DAYS_CSV", "").strip()
+    if _ngc and side == "short" and not (_sim.get("days") is None
+                                         or _sim["days"].empty):
+        try:
+            _sim["days"].to_csv(_ngc, index=False, encoding="utf-8-sig")
+            print(f"  [N] 日次損益 {len(_sim['days']):,}日 → {_ngc}", flush=True)
+        except Exception as _ne:
+            print(f"  ⚠ 日次損益の書き出しに失敗({_ne})", flush=True)
     if not _sim or _sim["days"].empty:
         return {"head": '<div style="color:#94a3b8">新方式N: 対象データがありません</div>',
                 "trades": []}
