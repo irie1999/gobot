@@ -1053,9 +1053,13 @@ _QCOLS = ["date", "ts", "req_ts", "resp_ts", "poll", "symbol",
           "current_price", "cur_ts",
           "bid", "bid_qty", "bid_time", "bid_sign",
           "ask", "ask_qty", "ask_time", "ask_sign",
-          "buy1_price", "buy1_qty", "buy1_time", "buy1_sign",
-          "sell1_price", "sell1_qty",
-          "gap_bp", "pass_gap", "late", "stale_open"]
+          "gap_bp", "pass_gap", "late", "stale_open"] + [
+    # ★ 板10段。sell1 は最良"売り"気配なので buy1 との差がスプレッド。
+    #   累積数量で「100株の成行がいくらで約定するか」が確定する。
+    _c for _lv in range(1, 11) for _c in (
+        f"buy{_lv}_price", f"buy{_lv}_qty",
+        f"sell{_lv}_price", f"sell{_lv}_qty")] + [
+    "buy1_time", "buy1_sign", "sell1_time", "sell1_sign"]
 
 
 def _qdump(_bd_all: dict, _ts: str, _poll: int) -> None:
@@ -1082,14 +1086,24 @@ def _qdump(_bd_all: dict, _ts: str, _poll: int) -> None:
                     _r[_c] = str(_bd.get(_k) or "")
                 # ★ Buy1/Sell1 の写し。ask_* と突き合わせて命名の向きを
                 #   データ側で検証するため(AskPrice == Buy1.Price のはず)。
-                for _k, _p in (("Buy1", "buy1"), ("Sell1", "sell1")):
-                    _d = _bd.get(_k)
-                    _d = _d if isinstance(_d, dict) else {}
-                    _r[f"{_p}_price"] = _d.get("Price") or ""
-                    _r[f"{_p}_qty"] = _d.get("Qty") or ""
-                    if _p == "buy1":
-                        _r["buy1_time"] = str(_d.get("Time") or "")
-                        _r["buy1_sign"] = str(_d.get("Sign") or "")
+                # ★★ **板の厚みを10段ぶん残す**(2026-09-01)。これまで最良気配
+                #   1本しか保存しておらず、板の応答には入っていたのに捨てていた。
+                #   これがあると 1件の観測から次が出せる:
+                #     ・100株を成行で売ったら **いくらで約定するか**(累積数量で確定)
+                #     ・スプレッド(buy1 と sell1 の差)
+                #     ・気配が厚いのか薄いのか(=その値段が本物か)
+                #     ・株数を増やしたときの滑り(将来 予算を上げる判断に使える)
+                #   発火数(1日2〜6件)は増やせないので、**1件あたりの情報量**を上げる。
+                for _lv in range(1, 11):
+                    for _k, _p in ((f"Buy{_lv}", f"buy{_lv}"),
+                                   (f"Sell{_lv}", f"sell{_lv}")):
+                        _d = _bd.get(_k)
+                        _d = _d if isinstance(_d, dict) else {}
+                        _r[f"{_p}_price"] = _d.get("Price") or ""
+                        _r[f"{_p}_qty"] = _d.get("Qty") or ""
+                        if _lv == 1:
+                            _r[f"{_p}_time"] = str(_d.get("Time") or "")
+                            _r[f"{_p}_sign"] = str(_d.get("Sign") or "")
                 _w.writerow(_r)
                 _n += 1
         if _poll == 1:
