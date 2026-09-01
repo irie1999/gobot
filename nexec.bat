@@ -19,12 +19,15 @@ REM                                      top 50 by 20-day turnover)
 REM   pass        open >= prev close + 100bp, NO UPPER GAP LIMIT,
 REM               and the 09:00 open must itself be 1,000-6,000 yen
 REM   size        100 SHARES, FIXED
-REM   entry       protective limit AT THE OPEN (--n-limit-ticks 0). N only
-REM               has ~21.9bp and the round-trip tolerance is 7.5bp, so any
-REM               wider limit gives the edge away the moment it fills. The
-REM               backtest assumes a fill AT the open, so this is the
-REM               faithful choice; a name that does not fill is simply not
-REM               traded, which costs nothing.
+REM   entry       protective limit WELL BELOW the open:
+REM                 --n-limit-ticks 100 --n-limit-max-bp 300
+REM               The limit is a FLOOR, not a target. A sell limit fills at or
+REM               above its price, so in a normal book it executes at the best
+REM               buy quote (near the open) and only refuses when the book has
+REM               collapsed more than 3 pct. Do NOT use a limit AT the open:
+REM               it only fills when the price came back up, i.e. exactly on
+REM               the names N loses on (2026-09-01: 3110 fell and never
+REM               filled, 5301 rose and did).
 REM   exit        CLOSING MOC ONLY. no stop, no target, NO WATCHER.
 REM
 REM HOW THE EXIT IS MADE SAFE (this is the part that took two rounds)
@@ -54,11 +57,14 @@ REM   Per name, it also refuses to send if the ledger row cannot be written:
 REM   an order with no ledger row is a position tomorrow's guard cannot see.
 REM
 REM SEQUENCE
-REM   0. build tonight's candidates (yfinance only, no kabu)
-REM   1. 08:55  register + one warm read (skipping this costs 40-140s at 09:00)
-REM   2. 09:00  poll every 10s, sell each name that opens and passes
-REM   3. 09:10  polling ends -> the settle sequence above runs
-REM   4. after the close:  .\fills
+REM   0. wait for the window if we are outside it (clock only, no kabu).
+REM      Start it whenever you like - the night before is fine. It waits for
+REM      the next 08:40, skipping weekends, and only then builds the list.
+REM   1. build the candidates (yfinance only, no kabu)
+REM   2. 08:55  register + one warm read (skipping this costs 40-140s at 09:00)
+REM   3. 09:00  poll every 10s, sell each name that opens and passes
+REM   4. 09:10  polling ends -> the settle sequence above runs
+REM   5. after the close:  .\fills
 REM
 REM AFTERWARDS
 REM   Do NOT start .\watch or .\jwatch. They read ordered_signals_lss.csv;
@@ -92,14 +98,28 @@ if defined NGO (
   echo  N DRY RUN - live book, nothing is sent
   echo  add --go to send real orders
 )
-echo    start this by 08:40; it waits for 08:55 and 09:00 by itself
+echo    start it whenever you like - it waits for the next 08:40 by itself
 echo    do NOT run .\norder, .\jorder, .\watch or the order server
 echo    at the same time (kabu allows exactly one live token)
 echo    do NOT start a watcher afterwards - N needs none, and a watcher
 echo    would arm J's rules on N positions
 echo ============================================================
 echo.
-echo [0/2] building the candidate list (no kabu)
+REM Wait for the order window BEFORE anything else. It must come before the
+REM candidate list, because Python freezes today's date at import: waiting
+REM inside the main script across midnight leaves every symbol flagged
+REM stale_open and nothing qualifies. Waiting here means the collect and the
+REM main script both start on the correct day.
+REM This step touches no kabu API and sends nothing - it only sleeps.
+echo [0/3] waiting for the order window if we are outside it
+python wait_window.py --until 08:40 --window-end 09:30
+if errorlevel 1 (
+  echo.
+  echo *** STOPPED BEFORE STARTING - NO ORDERS WERE SENT ***
+  exit /b 2
+)
+echo.
+echo [1/3] building the candidate list (no kabu)
 python n_paper.py --collect --no-mirror
 if errorlevel 1 (
   echo.
@@ -107,7 +127,7 @@ if errorlevel 1 (
   exit /b 1
 )
 echo.
-echo [1/2] warm read at 08:55, then [2/2] poll from 09:00 to 09:10
+echo [2/3] warm read at 08:55, then [3/3] poll from 09:00 to 09:10
 python k_open_confirm.py --n-mode --prod --poll %NGO% %NBUD%%NARGS%
 REM Exit 2 means the script stopped BEFORE connecting to kabu (outside the
 REM order window, or last run left an unsettled order). Nothing was sent, so
