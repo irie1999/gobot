@@ -1013,6 +1013,43 @@ def _mk_row(_s: str, _bd: dict, _ts: str, _grp: int) -> dict:
             "ordered": 0, "order_limit": ""}
 
 
+# ★★ 気配の推移を残す (2026-09-01)。
+#   k_paper_*.csv は **銘柄ごとに1行**(寄った瞬間のスナップショット)しか
+#   持たないので、次の2つが判定できなかった:
+#     ・その指値が 09:10 までに約定したか(最初の1枚では不約定でも後で約定する)
+#     ・成行なら いくらで売れたか(= その瞬間の最良買い気配)
+#   1周ごとに全銘柄を追記する。9,000行/日 程度で軽い。
+#   ⛔ このファイルは **記録専用**。発注には一切使わない。
+_QPATH = Path(__file__).resolve().parent / f"n_quotes_{_dt.date.today():%Y%m%d}.csv"
+_QCOLS = ["date", "ts", "poll", "symbol", "prev_close", "open_p", "open_time",
+          "current_price", "bid", "ask", "bid_qty", "ask_qty", "gap_bp",
+          "pass_gap", "late", "stale_open"]
+
+
+def _qdump(_bd_all: dict, _ts: str, _poll: int) -> None:
+    """この周に読んだ板を1行ずつ追記する。まだ寄っていない銘柄は書かない。"""
+    try:
+        _new = not _QPATH.exists()
+        with open(_QPATH, "a", newline="", encoding="utf-8-sig") as _f:
+            _w = _csv.DictWriter(_f, fieldnames=_QCOLS, extrasaction="ignore")
+            if _new:
+                _w.writeheader()
+            _n = 0
+            for _s, _bd in (_bd_all or {}).items():
+                _r = _mk_row(_s, _bd, _ts, 0)
+                if float(_r.get("open_p") or 0) <= 0:
+                    continue                      # まだ寄っていない
+                _r["ts"], _r["poll"] = _ts, _poll
+                _w.writerow(_r)
+                _n += 1
+        if _poll == 1:
+            print(f"  [気配] {_QPATH.name} に毎周 追記します"
+                  f"(この周 {_n}件)", flush=True)
+    except Exception as _qe:
+        # ⚠ 記録だけの機能なので、失敗しても本処理は止めない。
+        print(f"  ⚠ 気配の記録に失敗({_qe})", flush=True)
+
+
 def _dump(_rows: list) -> None:
     """途中で落ちてもデータを失わないよう、毎周 書き出す。"""
     try:
@@ -1186,9 +1223,22 @@ if args.poll:
     while True:
         _t0 = time.time()
         _n_poll += 1
-        _pend = [x for x in _syms if x not in _seen]
-        _bd_all = _read_all(f"poll{_n_poll}", pending=_pend)
+        _pend = [x for x in _syms if x not in _seen]      # 表示用(本当に未取得)
+        # ★★ 合格銘柄は **寄った後も読み続ける**(2026-09-01)。
+        #   これまでは寄った瞬間の1枚しか残っていなかったので、
+        #   「その指値が 09:10 までに約定したか」を後から判定できなかった。
+        #   実例: 5301(2026-09-01)は最初の気配 1,835.5 では w=0(指値1,836)が
+        #   約定不能だったのに、**その後 実際に約定**している。1枚だけ見ると
+        #   約定率を過小に見積もる。
+        #   ⛔ 1バッチに収まるなら pending を渡さない。_b が毎周おなじになり
+        #     **登録し直しが起きない**(ライブ実測: 登録0回 / 50件 6.2秒)。
+        #     pending が要るのは候補が50件を超えるとき(多バッチの切替削減)。
+        _track = [r["symbol"] for r in _rows if int(r.get("pass_gap") or 0)]
+        _tgt = (None if len(_syms) <= args.batch
+                else _pend + [x for x in _track if x not in _pend])
+        _bd_all = _read_all(f"poll{_n_poll}", pending=_tgt)
         _now_s = f"{_dt.datetime.now():%H:%M:%S}"
+        _qdump(_bd_all, _now_s, _n_poll)
         _new = []
         for _s, _bd in _bd_all.items():
             if _s in _seen:
