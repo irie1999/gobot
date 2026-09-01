@@ -1504,6 +1504,10 @@ def _order_rows(_sel: list) -> None:
 #     50件のまま『登録しなければ何秒になるか』を測ること。そこが速ければ
 #     2バッチぶんの時間が空く。
 _REGISTERED: list = []
+# ★ 銘柄ごとの /board 送信・受信時刻(2026-09-01)。1周に約6秒かかるので、
+#   周回の時刻を全銘柄に付けると秒単位の減衰が測れない。
+#   symbol -> (req_ts, resp_ts)。各スレッドが自分のキーだけを書く。
+_BOARD_TS: dict = {}
 
 
 def _read_all(tag: str) -> dict:
@@ -1529,10 +1533,16 @@ def _read_all(tag: str) -> dict:
                 _REGISTERED.clear()       # 失敗したら次回やり直す
 
         def _one(s):
+            # ★★ **銘柄ごとの** 送信/受信時刻を残す(2026-09-01)。
+            #   ⚠ 各スレッドは自分の銘柄キーだけを書くので競合しない。
+            _q0 = _dt.datetime.now()
             try:
-                return s, cli.get_board(s)
+                _b_ = cli.get_board(s)
             except Exception:
-                return s, {}
+                _b_ = {}
+            _BOARD_TS[s] = (f"{_q0:%H:%M:%S.%f}"[:-3],
+                            f"{_dt.datetime.now():%H:%M:%S.%f}"[:-3])
+            return s, _b_
         with ThreadPoolExecutor(max_workers=max(1, args.workers)) as ex:
             for _s, _bd in ex.map(_one, _b):
                 if _bd:
@@ -1627,6 +1637,162 @@ def _mk_row(_s: str, _bd: dict, _ts: str, _grp: int) -> dict:
             "stop_k": round(_op + _atr * args.sm, 1) if (_atr and _op > 0) else "",
             "target_k": round(_op - _atr * args.tm, 1) if (_atr and _op > 0) else "",
             "ordered": 0, "order_limit": ""}
+
+
+# ★★ 気配の推移を残す (2026-09-01)。
+#   k_paper_*.csv は **銘柄ごとに1行**(寄った瞬間のスナップショット)しか
+#   持たないので、次の2つが判定できなかった:
+#     ・その指値が 09:10 までに約定したか(最初の1枚では不約定でも後で約定する)
+#     ・成行なら いくらで売れたか(= その瞬間の最良買い気配)
+#   1周ごとに全銘柄を追記する。9,000行/日 程度で軽い。
+#   ⛔ このファイルは **記録専用**。発注には一切使わない。
+_QPATH = Path(__file__).resolve().parent / f"n_quotes_{_dt.date.today():%Y%m%d}.csv"
+# ⛔ ts(周回の時刻)を秒単位の分析に使わないこと。1周に約6秒かかるので、
+#   1銘柄目と50銘柄目では6秒ずれる。**req_ts / resp_ts を使う**(ミリ秒つき)。
+#
+# ★ 各列の意味 (2026-09-01 レビュー2巡目で訂正)
+#   req_ts/resp_ts … こちらがいつ読んだか。**通信品質は resp_ts − req_ts** で見る
+#   ask_*          … kabu の命名では **AskPrice が最良"買い"気配**(=売れる値段)。
+#                    ask_time はその気配自身の時刻、ask_sign は気配フラグ
+#                    (特別気配などの状態はここで分離する)
+#   ⛔ cur_ts (CurrentPriceTime) は **最終"約定"の時刻**であって気配の時刻ではない。
+#     resp_ts − cur_ts が数秒でも、最良買い気配は有効に存在し 100株 売れうる。
+#     **これを鮮度ゲートに使って行を落としてはいけない**(私の誤り。補助列として残す)
+#   ⛔ resp_ts − ask_time が大きい行も自動除外しない。気配が動いていないだけで
+#     そのまま有効な場合がある
+#   ★ buy1_*/sell1_* は Buy1/Sell1 の写し。ask_* と突き合わせれば
+#     **命名の向きをデータ側で検証できる**(コメントが1年間 逆だった前例がある)
+_QCOLS = ["date", "ts", "req_ts", "resp_ts", "poll", "symbol",
+          "prev_close", "open_p", "open_time",
+          "current_price", "cur_ts",
+          "bid", "bid_qty", "bid_time", "bid_sign",
+          "ask", "ask_qty", "ask_time", "ask_sign",
+          "gap_bp", "pass_gap", "late", "stale_open"] + [
+    # ★ 板10段。sell1 は最良"売り"気配なので buy1 との差がスプレッド。
+    #   累積数量で「100株の成行がいくらで約定するか」が確定する。
+    _c for _lv in range(1, 11) for _c in (
+        f"buy{_lv}_price", f"buy{_lv}_qty",
+        f"sell{_lv}_price", f"sell{_lv}_qty")] + [
+    "buy1_time", "buy1_sign", "sell1_time", "sell1_sign",
+    # ★ 成行100株の加重平均(Buy1から消化)。「成行 vs 指値」の成行側の値。
+    #   ⚠ 生の板(buy1..10)が正本。この列は日々の目視と定義の統一のため。
+    "mkt100_px", "mkt100_qty", "mkt100_lv"]
+
+
+# ★ mkt100 の自己検査カウンタ。ask_qty>=100 の行のうち、100株が1段で
+#   埋まらなかった件数。0 でなければ板の読み方にバグがある。
+_QCHK = {"n": 0, "bad": 0}
+
+
+def _mkt100(_bd: dict, _qty: int = 100) -> tuple:
+    """**成行で _qty 株 売ったときの加重平均**。Buy1 から高値側に消化する。
+
+    ★ これが「成行 vs 指値」の成行側の値。最良気配1本では
+      「100株そこで取れるか」すら分からなかった(§18.44 の宿題)。
+    ⛔ kabu の命名では Buy1 が最良"買い"気配(=こちらが売れる一番高い値)。
+      板が薄くて届かなければ got < qty になり、平均は取れたぶんだけの値。
+    返り値 (加重平均, 取れた株数, 使った段数)。
+    ⛔⛔ got < qty は **「成行でも建てられない」ではない**(2026-09-01 レビュー)。
+      板は10段しか配信されないので、これは「**上位10段だけでは100株の値段を
+      算定できない**」という意味。11段目以下で約定しうる。
+      → そのときは加重平均を **欠損("")** にする。途中までの平均を書くと
+        実際より有利な値になり、成行の評価を甘くする。
+    """
+    _got, _cost, _lv = 0, 0.0, 0
+    for _i in range(1, 11):
+        _d = _bd.get(f"Buy{_i}")
+        _d = _d if isinstance(_d, dict) else {}
+        _p = float(_d.get("Price") or 0)
+        _q = int(float(_d.get("Qty") or 0))
+        if _p <= 0 or _q <= 0:
+            break                       # 板がそこで尽きている
+        _take = min(_qty - _got, _q)
+        _cost += _p * _take
+        _got += _take
+        _lv = _i
+        if _got >= _qty:
+            break
+    # ⛔ 100株に届かなければ価格は **欠損**。途中までの平均は書かない。
+    _px = round(_cost / _got, 4) if _got >= _qty else ""
+    return _px, _got, _lv
+
+
+def _qdump(_bd_all: dict, _ts: str, _poll: int) -> None:
+    """この周に読んだ板を1行ずつ追記する。まだ寄っていない銘柄は書かない。"""
+    try:
+        _new = not _QPATH.exists()
+        with open(_QPATH, "a", newline="", encoding="utf-8-sig") as _f:
+            _w = _csv.DictWriter(_f, fieldnames=_QCOLS, extrasaction="ignore")
+            if _new:
+                _w.writeheader()
+            _n = 0
+            for _s, _bd in (_bd_all or {}).items():
+                _r = _mk_row(_s, _bd, _ts, 0)
+                if float(_r.get("open_p") or 0) <= 0:
+                    continue                      # まだ寄っていない
+                _q0, _q1 = _BOARD_TS.get(_s, ("", ""))
+                _r["ts"], _r["poll"] = _ts, _poll
+                _r["req_ts"], _r["resp_ts"] = _q0, _q1
+                # ⛔ cur_ts は最終**約定**の時刻。鮮度ゲートに使わない(上の注記)
+                _r["cur_ts"] = str(_bd.get("CurrentPriceTime") or "")
+                # ★ 気配自身の時刻とフラグ。特別気配の分離は ask_sign で行う
+                for _k, _c in (("AskTime", "ask_time"), ("AskSign", "ask_sign"),
+                               ("BidTime", "bid_time"), ("BidSign", "bid_sign")):
+                    _r[_c] = str(_bd.get(_k) or "")
+                # ★ Buy1/Sell1 の写し。ask_* と突き合わせて命名の向きを
+                #   データ側で検証するため(AskPrice == Buy1.Price のはず)。
+                # ★★ **板の厚みを10段ぶん残す**(2026-09-01)。これまで最良気配
+                #   1本しか保存しておらず、板の応答には入っていたのに捨てていた。
+                #   これがあると 1件の観測から次が出せる:
+                #     ・100株を成行で売ったら **いくらで約定するか**(累積数量で確定)
+                #     ・スプレッド(buy1 と sell1 の差)
+                #     ・気配が厚いのか薄いのか(=その値段が本物か)
+                #     ・株数を増やしたときの滑り(将来 予算を上げる判断に使える)
+                #   発火数(1日2〜6件)は増やせないので、**1件あたりの情報量**を上げる。
+                for _lv in range(1, 11):
+                    for _k, _p in ((f"Buy{_lv}", f"buy{_lv}"),
+                                   (f"Sell{_lv}", f"sell{_lv}")):
+                        _d = _bd.get(_k)
+                        _d = _d if isinstance(_d, dict) else {}
+                        _r[f"{_p}_price"] = _d.get("Price") or ""
+                        _r[f"{_p}_qty"] = _d.get("Qty") or ""
+                        if _lv == 1:
+                            _r[f"{_p}_time"] = str(_d.get("Time") or "")
+                            _r[f"{_p}_sign"] = str(_d.get("Sign") or "")
+                (_r["mkt100_px"], _r["mkt100_qty"],
+                 _r["mkt100_lv"]) = _mkt100(_bd, 100)
+                # ★★ 自己検査(2026-09-01 レビュー提案)。最良買い気配の数量が
+                #   100株以上あるなら、100株は **1段目だけ**で埋まるはず。
+                #   2段目以降を消化していたら、板の展開か数量の読み方がバグ。
+                #   既存25件は全部 ask_qty>=100 だったので、初日に必ず効く。
+                if float(_r.get("ask_qty") or 0) >= 100:
+                    _QCHK["n"] += 1
+                    if int(_r["mkt100_lv"] or 0) > 1:
+                        _QCHK["bad"] += 1
+                        if _QCHK["bad"] == 1:
+                            print(f"  ⛔⛔ **板の読み方がおかしい**: {_s} は"
+                                  f" 最良買い気配 {_r['ask']} × {_r['ask_qty']}株"
+                                  f"(100株以上)なのに、100株の消化に"
+                                  f" {_r['mkt100_lv']}段 使っています。\n"
+                                  f"     buy1={_r.get('buy1_price')}"
+                                  f"×{_r.get('buy1_qty')} / "
+                                  f"buy2={_r.get('buy2_price')}"
+                                  f"×{_r.get('buy2_qty')}\n"
+                                  f"     → Buy1..Buy10 の展開か数量の単位を"
+                                  f"疑ってください", flush=True)
+                _w.writerow(_r)
+                _n += 1
+        if _poll == 1:
+            print(f"  [気配] {_QPATH.name} に毎周 追記します"
+                  f"(この周 {_n}件)", flush=True)
+            if _QCHK["n"]:
+                print(f"  [検査] 最良気配に100株以上ある {_QCHK['n']}件のうち、"
+                      f"100株が1段で埋まらなかった **{_QCHK['bad']}件**"
+                      + ("  ← 0 が正常" if not _QCHK["bad"]
+                         else "  ⛔ **板の読み方を疑うこと**"), flush=True)
+    except Exception as _qe:
+        # ⚠ 記録だけの機能なので、失敗しても本処理は止めない。
+        print(f"  ⚠ 気配の記録に失敗({_qe})", flush=True)
 
 
 def _dump(_rows: list) -> None:
@@ -1765,6 +1931,8 @@ if args.poll:
         _n_poll += 1
         _bd_all = _read_all(f"poll{_n_poll}")
         _now_s = f"{_dt.datetime.now():%H:%M:%S}"
+        # ★ 気配の推移を記録する(記録専用。発注には一切使わない)
+        _qdump(_bd_all, _now_s, _n_poll)
         _new = []
         for _s, _bd in _bd_all.items():
             if _s in _seen:
