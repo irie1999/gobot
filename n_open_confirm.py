@@ -1035,11 +1035,27 @@ def _mk_row(_s: str, _bd: dict, _ts: str, _grp: int) -> dict:
 _QPATH = Path(__file__).resolve().parent / f"n_quotes_{_dt.date.today():%Y%m%d}.csv"
 # ⛔ ts(周回の時刻)を秒単位の分析に使わないこと。1周に約6秒かかるので、
 #   1銘柄目と50銘柄目では6秒ずれる。**req_ts / resp_ts を使う**(ミリ秒つき)。
-#   cur_ts は板が返す最終約定時刻で、気配がどれだけ古いかが分かる。
-_QCOLS = ["date", "ts", "req_ts", "resp_ts", "cur_ts", "poll", "symbol",
+#
+# ★ 各列の意味 (2026-09-01 レビュー2巡目で訂正)
+#   req_ts/resp_ts … こちらがいつ読んだか。**通信品質は resp_ts − req_ts** で見る
+#   ask_*          … kabu の命名では **AskPrice が最良"買い"気配**(=売れる値段)。
+#                    ask_time はその気配自身の時刻、ask_sign は気配フラグ
+#                    (特別気配などの状態はここで分離する)
+#   ⛔ cur_ts (CurrentPriceTime) は **最終"約定"の時刻**であって気配の時刻ではない。
+#     resp_ts − cur_ts が数秒でも、最良買い気配は有効に存在し 100株 売れうる。
+#     **これを鮮度ゲートに使って行を落としてはいけない**(私の誤り。補助列として残す)
+#   ⛔ resp_ts − ask_time が大きい行も自動除外しない。気配が動いていないだけで
+#     そのまま有効な場合がある
+#   ★ buy1_*/sell1_* は Buy1/Sell1 の写し。ask_* と突き合わせれば
+#     **命名の向きをデータ側で検証できる**(コメントが1年間 逆だった前例がある)
+_QCOLS = ["date", "ts", "req_ts", "resp_ts", "poll", "symbol",
           "prev_close", "open_p", "open_time",
-          "current_price", "bid", "ask", "bid_qty", "ask_qty", "gap_bp",
-          "pass_gap", "late", "stale_open"]
+          "current_price", "cur_ts",
+          "bid", "bid_qty", "bid_time", "bid_sign",
+          "ask", "ask_qty", "ask_time", "ask_sign",
+          "buy1_price", "buy1_qty", "buy1_time", "buy1_sign",
+          "sell1_price", "sell1_qty",
+          "gap_bp", "pass_gap", "late", "stale_open"]
 
 
 def _qdump(_bd_all: dict, _ts: str, _poll: int) -> None:
@@ -1058,7 +1074,22 @@ def _qdump(_bd_all: dict, _ts: str, _poll: int) -> None:
                 _q0, _q1 = _BOARD_TS.get(_s, ("", ""))
                 _r["ts"], _r["poll"] = _ts, _poll
                 _r["req_ts"], _r["resp_ts"] = _q0, _q1
+                # ⛔ cur_ts は最終**約定**の時刻。鮮度ゲートに使わない(上の注記)
                 _r["cur_ts"] = str(_bd.get("CurrentPriceTime") or "")
+                # ★ 気配自身の時刻とフラグ。特別気配の分離は ask_sign で行う
+                for _k, _c in (("AskTime", "ask_time"), ("AskSign", "ask_sign"),
+                               ("BidTime", "bid_time"), ("BidSign", "bid_sign")):
+                    _r[_c] = str(_bd.get(_k) or "")
+                # ★ Buy1/Sell1 の写し。ask_* と突き合わせて命名の向きを
+                #   データ側で検証するため(AskPrice == Buy1.Price のはず)。
+                for _k, _p in (("Buy1", "buy1"), ("Sell1", "sell1")):
+                    _d = _bd.get(_k)
+                    _d = _d if isinstance(_d, dict) else {}
+                    _r[f"{_p}_price"] = _d.get("Price") or ""
+                    _r[f"{_p}_qty"] = _d.get("Qty") or ""
+                    if _p == "buy1":
+                        _r["buy1_time"] = str(_d.get("Time") or "")
+                        _r["buy1_sign"] = str(_d.get("Sign") or "")
                 _w.writerow(_r)
                 _n += 1
         if _poll == 1:
