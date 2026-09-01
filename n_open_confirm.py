@@ -1065,6 +1065,11 @@ _QCOLS = ["date", "ts", "req_ts", "resp_ts", "poll", "symbol",
     "mkt100_px", "mkt100_qty", "mkt100_lv"]
 
 
+# ★ mkt100 の自己検査カウンタ。ask_qty>=100 の行のうち、100株が1段で
+#   埋まらなかった件数。0 でなければ板の読み方にバグがある。
+_QCHK = {"n": 0, "bad": 0}
+
+
 def _mkt100(_bd: dict, _qty: int = 100) -> tuple:
     """**成行で _qty 株 売ったときの加重平均**。Buy1 から高値側に消化する。
 
@@ -1073,6 +1078,11 @@ def _mkt100(_bd: dict, _qty: int = 100) -> tuple:
     ⛔ kabu の命名では Buy1 が最良"買い"気配(=こちらが売れる一番高い値)。
       板が薄くて届かなければ got < qty になり、平均は取れたぶんだけの値。
     返り値 (加重平均, 取れた株数, 使った段数)。
+    ⛔⛔ got < qty は **「成行でも建てられない」ではない**(2026-09-01 レビュー)。
+      板は10段しか配信されないので、これは「**上位10段だけでは100株の値段を
+      算定できない**」という意味。11段目以下で約定しうる。
+      → そのときは加重平均を **欠損("")** にする。途中までの平均を書くと
+        実際より有利な値になり、成行の評価を甘くする。
     """
     _got, _cost, _lv = 0, 0.0, 0
     for _i in range(1, 11):
@@ -1088,7 +1098,9 @@ def _mkt100(_bd: dict, _qty: int = 100) -> tuple:
         _lv = _i
         if _got >= _qty:
             break
-    return (round(_cost / _got, 4) if _got else 0.0), _got, _lv
+    # ⛔ 100株に届かなければ価格は **欠損**。途中までの平均は書かない。
+    _px = round(_cost / _got, 4) if _got >= _qty else ""
+    return _px, _got, _lv
 
 
 def _qdump(_bd_all: dict, _ts: str, _poll: int) -> None:
@@ -1135,11 +1147,35 @@ def _qdump(_bd_all: dict, _ts: str, _poll: int) -> None:
                             _r[f"{_p}_sign"] = str(_d.get("Sign") or "")
                 (_r["mkt100_px"], _r["mkt100_qty"],
                  _r["mkt100_lv"]) = _mkt100(_bd, 100)
+                # ★★ 自己検査(2026-09-01 レビュー提案)。最良買い気配の数量が
+                #   100株以上あるなら、100株は **1段目だけ**で埋まるはず。
+                #   2段目以降を消化していたら、板の展開か数量の読み方がバグ。
+                #   既存25件は全部 ask_qty>=100 だったので、初日に必ず効く。
+                if float(_r.get("ask_qty") or 0) >= 100:
+                    _QCHK["n"] += 1
+                    if int(_r["mkt100_lv"] or 0) > 1:
+                        _QCHK["bad"] += 1
+                        if _QCHK["bad"] == 1:
+                            print(f"  ⛔⛔ **板の読み方がおかしい**: {_s} は"
+                                  f" 最良買い気配 {_r['ask']} × {_r['ask_qty']}株"
+                                  f"(100株以上)なのに、100株の消化に"
+                                  f" {_r['mkt100_lv']}段 使っています。\n"
+                                  f"     buy1={_r.get('buy1_price')}"
+                                  f"×{_r.get('buy1_qty')} / "
+                                  f"buy2={_r.get('buy2_price')}"
+                                  f"×{_r.get('buy2_qty')}\n"
+                                  f"     → Buy1..Buy10 の展開か数量の単位を"
+                                  f"疑ってください", flush=True)
                 _w.writerow(_r)
                 _n += 1
         if _poll == 1:
             print(f"  [気配] {_QPATH.name} に毎周 追記します"
                   f"(この周 {_n}件)", flush=True)
+            if _QCHK["n"]:
+                print(f"  [検査] 最良気配に100株以上ある {_QCHK['n']}件のうち、"
+                      f"100株が1段で埋まらなかった **{_QCHK['bad']}件**"
+                      + ("  ← 0 が正常" if not _QCHK["bad"]
+                         else "  ⛔ **板の読み方を疑うこと**"), flush=True)
     except Exception as _qe:
         # ⚠ 記録だけの機能なので、失敗しても本処理は止めない。
         print(f"  ⚠ 気配の記録に失敗({_qe})", flush=True)
