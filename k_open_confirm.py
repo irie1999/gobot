@@ -275,23 +275,58 @@ if args.max_yen <= 0 and args.max_yen_pct > 0:
           f"(--max-yen で固定値を明示できます)", flush=True)
 
 # ── 実発注は 09:00 前後の窓の中だけ ───────────────────────────────────
-#   窓 = [--open-at の20分前, --poll-until の20分後]。外なら **起動時に落とす**
-#   (読み終わってから気づくのでは遅い)。記録だけ取りたいなら --execute を外す。
+#   窓 = [--open-at の20分前, --poll-until の20分後]。
+#   ★ **早すぎるときは落とさず待つ**(2026-09-01)。08:36 に起動して4分足りず
+#     落ちる、という事故が実際にあった。早い = 待てばいいだけ。
+#   ⛔ **遅すぎるときは落とす**。/board は引け後も当日の始値を返し続けるので、
+#     時間外に走らせると『朝と同じ判定』で注文が飛ぶ(2026-08-18 15:30 に
+#     実際に4件試みた)。ここは非対称に扱う。
+#   ⛔ 日付をまたぐ待機はしない。候補リスト(n_signals_<日付>.csv)は起動前に
+#     作られているので、翌朝まで待つとその日のものではなくなる。
 if args.execute and not args.allow_late_orders:
     def _hm2m(_s: str) -> int:
         _h, _m = (int(x) for x in str(_s).split(":"))
         return _h * 60 + _m
-    _now_m = _dt.datetime.now().hour * 60 + _dt.datetime.now().minute
+    _now0 = _dt.datetime.now()
+    _now_m = _now0.hour * 60 + _now0.minute
     _lo, _hi = _hm2m(args.open_at) - 20, _hm2m(args.poll_until) + 20
-    if not (_lo <= _now_m <= _hi):
-        sys.exit(
-            f"[error] いま {_dt.datetime.now():%H:%M} は発注の窓の外です"
-            f"（{_lo // 60:02d}:{_lo % 60:02d}〜{_hi // 60:02d}:{_hi % 60:02d}）。\n"
-            f"  ⛔ **実発注しません**。/board は引け後も当日の始値を返し続けるので、\n"
-            f"     時間外に走らせると『朝と同じ判定』で注文が飛びます"
-            f"（2026-08-18 15:30 に実際に4件試みた）。\n"
+    _wtxt = f"{_lo // 60:02d}:{_lo % 60:02d}〜{_hi // 60:02d}:{_hi % 60:02d}"
+    if _now_m > _hi:
+        # ⛔ 窓の後。**注文は1件も出していない**ので exit 2(起動前に停止)。
+        print(
+            f"\n[error] いま {_now0:%H:%M} は発注の窓（{_wtxt}）を**過ぎて**います。\n"
+            f"  ⛔ **実発注しません。注文は1件も出ていません。**\n"
+            f"     /board は引け後も当日の始値を返し続けるので、時間外に走らせると\n"
+            f"     『朝と同じ判定』で注文が飛びます（2026-08-18 15:30 に実際に4件）。\n"
+            f"  ⛔ 翌朝まで待つこともしません。候補リストは起動前に作られていて、\n"
+            f"     翌朝にはその日のものではなくなるからです。明朝あらためて\n"
+            f"     実行してください。\n"
             f"  ・記録だけ取り直す → --execute を外してください\n"
-            f"  ・それでも出す     → --allow-late-orders（自己責任）")
+            f"  ・それでも出す     → --allow-late-orders（自己責任）", flush=True)
+        sys.exit(2)
+    if _now_m < _lo:
+        # ★ 窓の前 = 待つ。ここではまだ kabu に接続していないので
+        #   トークンを掴んだまま待つことにはならない。
+        _tgt = _now0.replace(hour=_lo // 60, minute=_lo % 60,
+                             second=0, microsecond=0)
+        _left = (_tgt - _now0).total_seconds()
+        print(f"\n[待機] いま {_now0:%H:%M:%S} は発注の窓（{_wtxt}）の**前**です。\n"
+              f"       {_tgt:%H:%M} まで **{_left / 60:.0f}分** 待ちます"
+              f"（落とさずに待機します / 中断は Ctrl+C）。\n"
+              f"       ⚠ 候補リストはこの実行の最初に作ったものを使います。",
+              flush=True)
+        while True:
+            _left = (_tgt - _dt.datetime.now()).total_seconds()
+            if _left <= 0:
+                break
+            # 残り10分を切ったら1分ごと、それ以外は5分ごとに残りを出す
+            _step = 60.0 if _left <= 600 else 300.0
+            time.sleep(min(_step, _left))
+            _r2 = (_tgt - _dt.datetime.now()).total_seconds()
+            if _r2 > 0:
+                print(f"       … 残り {_r2 / 60:.0f}分", flush=True)
+        print(f"[待機] {_dt.datetime.now():%H:%M:%S} — 窓に入りました。続行します",
+              flush=True)
 
 _COLS = ["date", "seen_ts", "grp", "symbol", "in_j", "rank_liq", "liquidity",
          "prev_close", "open_p", "open_time", "current_price",

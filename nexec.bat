@@ -109,6 +109,16 @@ if errorlevel 1 (
 echo.
 echo [1/2] warm read at 08:55, then [2/2] poll from 09:00 to 09:10
 python k_open_confirm.py --n-mode --prod --poll %NGO% %NBUD%%NARGS%
+REM Exit 2 means the script stopped BEFORE connecting to kabu (outside the
+REM order window, or last run left an unsettled order). Nothing was sent, so
+REM do not send the operator hunting for naked shorts.
+REM Check errorlevel 2 first: "if errorlevel N" means ">= N" in cmd.
+if errorlevel 2 (
+  echo.
+  echo *** STOPPED BEFORE STARTING - NO ORDERS WERE SENT ***
+  echo     The reason is printed above. Nothing to clean up.
+  exit /b 2
+)
 if errorlevel 1 (
   echo.
   echo *** THE ORDER SCRIPT EXITED WITH AN ERROR ***
