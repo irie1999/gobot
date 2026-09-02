@@ -58,6 +58,7 @@ import argparse
 import csv as _csv
 import re as _re
 import os
+import subprocess
 import sys
 import time as _time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -98,11 +99,11 @@ ap.add_argument("--board-workers", type=int, default=2,
 ap.add_argument("--ret1", type=float, default=RET1_MIN, help="前日リターン下限(%%)")
 ap.add_argument("--gap-bp", type=float, default=GAP_BP, help="ギャップ下限(bp)")
 ap.add_argument("--watch", type=int, default=WATCH, help="朝読める上限(0=無制限)")
-ap.add_argument("--mirror", action="store_true", default=True,
-                help="★ 鏡像(前日下げ × ギャップダウンを**買う**)の候補も入れる"
-                     "(既定ON)。板読みは1回で済み、判定は後から3通りに分けられる")
+ap.add_argument("--mirror", action="store_true", default=False,
+                help="鏡像(前日下げ × ギャップダウンを買う)も記録する。"
+                     "既定OFF。Nの秒単位順序を1バッチで測るときは使わない")
 ap.add_argument("--no-mirror", dest="mirror", action="store_false",
-                help="鏡像を入れない(N と J だけ)")
+                help="鏡像を入れない(既定。norder もこの形)")
 ap.add_argument("--merge-j", action="store_true",
                 help="★ J の候補(k_signals_<日付>.csv)も取り込んでマージする。"
                      "⛔ kabu の有効トークンは1つなので J と N を別々には"
@@ -113,9 +114,10 @@ ap.add_argument("--sequence", action="store_true",
                      "(kabu 不要。引け前でも見られる)")
 ap.add_argument("--budget", type=float, default=400.0,
                 help="--sequence の予算(万円)")
-ap.add_argument("--seq-sides", type=str, default="nm",
+ap.add_argument("--seq-sides", type=str, default="n",
                 help="--sequence で1つの予算を共有する側。"
-                     "n=N のみ / m=鏡像のみ / nm=両建て(既定)")
+                     "n=N のみ(既定) / m=鏡像のみ / nm=両建て。"
+                     "鏡像は記録するが予算はN単独へ配る")
 ap.add_argument("--paper-csv", type=str, default="",
                 help="--close が読む板読み結果。"
                      "既定 k_paper_<日付>.csv (n_open_confirm.py の出力)")
@@ -130,6 +132,70 @@ _TODAY = a.date or datetime.now(JST).strftime("%Y-%m-%d")
 _YMD = _TODAY.replace("-", "")
 _SIG_CSV = Path(f"n_signals_{_YMD}.csv")
 _PAPER_CSV = Path(f"n_paper_{_YMD}.csv")
+
+
+def _repo_provenance() -> dict[str, str]:
+    """この記録・採点を作ったコードの出所を返す。
+
+    未追跡のCSVは実行のたびに増えるため dirty 判定から除き、追跡済みコードの
+    変更だけを ``+dirty`` として残す。
+    """
+    _cwd = Path(__file__).resolve().parent
+
+    def _git(*args: str) -> str:
+        try:
+            _p = subprocess.run(
+                ["git", *args], cwd=_cwd, capture_output=True, text=True,
+                timeout=5, check=False)
+            return _p.stdout.strip() if _p.returncode == 0 else ""
+        except Exception:
+            return ""
+
+    _commit = _git("rev-parse", "--short", "HEAD") or "unknown"
+    _branch = _git("branch", "--show-current") or "unknown"
+    if _git("status", "--porcelain", "--untracked-files=no"):
+        _commit += "+dirty"
+    return {"src_commit": _commit, "src_branch": _branch}
+
+
+def _csv_provenance(rows: list[dict]) -> dict[str, str]:
+    """CSVの先頭行から出所を読む。旧CSVは空文字のまま扱う。"""
+    if not rows:
+        return {"src_commit": "", "src_branch": ""}
+    return {"src_commit": str(rows[0].get("src_commit") or "").strip(),
+            "src_branch": str(rows[0].get("src_branch") or "").strip()}
+
+
+def _show_close_provenance(label: str, src: dict[str, str],
+                           current: dict[str, str], *, selecting: bool) -> None:
+    """--close の出所照合を表示する。観測CSVは不一致でも利用を続ける。"""
+    _sc, _sb = src.get("src_commit", ""), src.get("src_branch", "")
+    _cc, _cb = current["src_commit"], current["src_branch"]
+    if not _sc:
+        _msg = "出所列なし"
+        if selecting:
+            print(f"  ⚠ {label}: {_msg}。候補選定コードを特定できません（採点は続行）",
+                  flush=True)
+        else:
+            print(f"  [出所] {label}: {_msg}。板の観測値として利用します", flush=True)
+        return
+    _diff = _sc.removesuffix("+dirty") != _cc.removesuffix("+dirty")
+    _branch_diff = bool(_sb and _cb and _sb != _cb)
+    _dirty = _sc.endswith("+dirty")
+    _detail = f"{_sb or '?'}@{_sc} / 採点 {_cb}@{_cc}"
+    if selecting and (_diff or _branch_diff or _dirty):
+        _why = []
+        if _diff:
+            _why.append("commit不一致")
+        if _branch_diff:
+            _why.append("branch不一致")
+        if _dirty:
+            _why.append("候補作成時dirty")
+        print(f"  ⚠ {label}: {', '.join(_why)} — {_detail}（採点は続行）",
+              flush=True)
+    else:
+        _suffix = "（不一致でも観測値として利用）" if not selecting else ""
+        print(f"  [出所] {label}: {_detail}{_suffix}", flush=True)
 
 
 def _jq_to_yf(code: str) -> str:
@@ -357,12 +423,16 @@ def do_collect() -> None:
         r["order_price"] = 0.0       # N は寄りで判定するので注文価格を持たない
         r["atr"] = 0.0               # N はバリアが無いので ATR を使わない
         r["liquidity"] = r["liq"]
+    _prov = _repo_provenance()
+    for r in _cand:
+        r.update(_prov)
     with open(_SIG_CSV, "w", newline="", encoding="utf-8-sig") as fh:
         w = _csv.DictWriter(fh, fieldnames=[
             "symbol", "name", "strategy", "order_price", "prev_close", "atr",
             "liquidity", "prev_date", "ret1", "liq", "rank_liq", "watched",
             "in_j", "in_n", "in_m", "rank_n", "watched_n",
-            "rank_m", "watched_m", "rank_j", "watched_j"])
+            "rank_m", "watched_m", "rank_j", "watched_j",
+            "src_commit", "src_branch"])
         w.writeheader()
         w.writerows(_cand)
     _nw = sum(r["watched"] for r in _cand)
@@ -572,6 +642,12 @@ def do_close() -> None:
         sys.exit(f"[error] {_pcsv} が空です")
     print(f"[close] {_pcsv} を読みました ({len(rows)}件)", flush=True)
 
+    # 板CSVは観測値なので出所が違っても利用する。候補CSVは選定結果なので、
+    # 作成コードが違う/dirtyなら警告する。ただし過去記録を失わないよう弾かない。
+    _current_prov = _repo_provenance()
+    _show_close_provenance(_pcsv.name, _csv_provenance(rows), _current_prov,
+                           selecting=False)
+
     # ★ 先に「どの銘柄が合格し、どの順で発注が走ったか」を出す(2026-08-27)。
     #   --sequence と同じもの。CSV を読むだけなので引け後に1回でまとまる。
     #   ⛔ ここで落ちても損益の集計は続ける(表示のための機能なので)。
@@ -586,8 +662,12 @@ def do_close() -> None:
 
     # ── 候補CSVから in_j / in_n を復元 ────────────────────────────
     _flag: dict = {}
+    _sig_rows = []
     if _SIG_CSV.exists():
-        for r in _csv.DictReader(open(_SIG_CSV, encoding="utf-8-sig")):
+        _sig_rows = list(_csv.DictReader(open(_SIG_CSV, encoding="utf-8-sig")))
+        _show_close_provenance(_SIG_CSV.name, _csv_provenance(_sig_rows),
+                               _current_prov, selecting=True)
+        for r in _sig_rows:
             _sy = str(r.get("symbol") or "").strip()
             _sy = _sy if _sy.endswith(".T") else f"{_sy}.T"
             _flag[_sy.replace(".T", "")] = {
