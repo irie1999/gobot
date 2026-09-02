@@ -915,6 +915,20 @@ def _newgap_build(days: int, min_price: float, max_price: float,
     _cand_med = float(_dd["cand"].median())
     _cand_max = int(_dd["cand"].max())
 
+    # ── 実際に測れた期間（--days の指定と食い違うことがある） ──
+    # ⛔ _newgap_scan_one は fetch に min_start_date を渡していない。
+    #    そのため --days を伸ばしても、日足キャッシュが短ければ
+    #    **静かに短い期間だけ**集計される。analyze_gap_edge が同じ形で
+    #    事故を起こしている（データが無いのに「不合格」と出た / §18.53）。
+    #    指定と実測を必ず並べ、足りなければ赤で警告する。
+    _d_lo, _d_hi = str(_dd["date"].min()), str(_dd["date"].max())
+    try:
+        _span_d = int((pd.to_datetime(_d_hi) - pd.to_datetime(_d_lo)).days)
+    except Exception:
+        _span_d = 0
+    _span_y = _span_d / 365.25
+    _short_data = days > 0 and _span_d < days * 0.9
+
     _shortside = side != "long"
     _h = [
         f'<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;'
@@ -949,7 +963,17 @@ def _newgap_build(days: int, min_price: float, max_price: float,
         f'あちらは eh_trades（lss のバックテストが作る銘柄日）、'
         f'こちらは <b>全銘柄日を日足から直接</b>（{len(symbols):,}銘柄 / '
         f'{len(_rows):,}銘柄日 / {_el:.1f}秒）。5分足を使いません<br>'
-        f'⚠ <b style="color:#fbbf24">slip=0 の理論値</b>。'
+        f'★ 期間 <b style="color:#e2e8f0">{_d_lo} 〜 {_d_hi}</b>'
+        f'（<b style="color:#e2e8f0">{_span_y:.1f}年</b> / {len(_dd):,}営業日）'
+        f' ← <code>--days {days:,}</code> の指定<br>'
+        + ('' if not _short_data else
+           f'⛔ <b style="color:#f87171">指定 {days:,}日 に対し、実データは '
+           f'{_span_d:,}日（{_span_y:.1f}年）しかありません</b>。日足キャッシュが'
+           f'そこまで遡っておらず、<code>_newgap_scan_one</code> は '
+           f'<code>fetch</code> に <code>min_start_date</code> を渡さないので'
+           f'自動では取り直しません。伸ばすには日足を取り直す必要があります'
+           f'（§18.53 と同型の事故）<br>')
+        + f'⚠ <b style="color:#fbbf24">slip=0 の理論値</b>。'
         f'09:00に板を読む方式は読み取りに36秒かかる（§18.44 実測）ぶん不利になります'
         f'</div></div>',
         f'<div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:12px">',
