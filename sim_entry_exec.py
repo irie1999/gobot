@@ -40,7 +40,10 @@ ap = argparse.ArgumentParser(
 ap.add_argument("--since", default="", help="この日以降だけ (YYYY-MM-DD)")
 ap.add_argument("--dir", default=".", help="CSV のあるフォルダ")
 ap.add_argument("--bps", default="0,50,100,300,500",
-                help="試す指値幅(始値からの下げ幅 bp)。カンマ区切り")
+                help="試す指値幅。始値からの**下げ幅** bp。カンマ区切り。"
+                     "**負なら始値より上**(例 -50 は始値+50bp の指値)。"
+                     "⚠ 上に置くと『寄り後に上がった銘柄』でだけ約定する"
+                     "逆選択になる(N は下げる銘柄に賭けているので不利のはず)")
 ap.add_argument("--qty", type=int, default=100, help="株数(既定100)")
 ap.add_argument("--save", default="exec_sim.csv",
                 help="銘柄ごとの明細を保存する先（'' で保存しない）")
@@ -220,43 +223,59 @@ for r in sorted(_recs, key=lambda x: (x["date"], x["code"])):
 
 # ── ★ 指値幅ごとの比較 ────────────────────────────────────────
 print()
-print("■ ★ 指値幅ごと（始値からの下げ幅）")
-print(f"{'幅':>8}{'約定':>6}{'約定率':>8}{'約定bp':>9}"
-      f"{'逃した':>7}{'逃し損益bp':>11}{'実装差bp':>10}")
+print("■ ★ 指値幅ごと（始値を基準に、下が有利・上が不利）")
+print(f"{'幅':>9}{'約定':>5}{'約定率':>7}{'約定bp':>8}"
+      f"{'実装差bp':>9}{'★実損益/日':>11}{'★合計':>11}")
 print("-" * 62)
 
 
-def _line(lbl: str, hits: list, miss: list) -> None:
-    """約定したぶんの滑りと、逃したぶんの理想を分けて出す。"""
+def _line(lbl: str, hits: list, miss: list, yen: list) -> None:
+    """約定したぶんの滑り・実装差・**実際に取れた損益**を出す。
+
+    ⛔ 実装差だけで選ぶと『1件も建てない幅』が最良になる。
+       「建てなかったので損しなかった」と「儲かった」を区別できないため。
+       ★実損益 は約定した件の (売値 − 終値) × 株数 なので、
+       建てなければ 0 になり、この罠にかからない。**判定はこちらで行う。**
+    """
     _n = len(hits) + len(miss)
-    _hb = sum(h for h in hits) / len(hits) if hits else None
-    # 逃した銘柄は「始値で売って終値で買い戻せたら」を理想とする
-    _mb = sum(m for m in miss) / len(miss) if miss else None
+    _hb = sum(hits) / len(hits) if hits else None
     _impl = ((sum(hits) - sum(miss)) / _n) if _n else None
-    print(f"{lbl:>8}{len(hits):>6}{len(hits) / _n * 100 if _n else 0:>7.0f}%"
-          f"{(f'{_hb:+.1f}' if _hb is not None else '—'):>9}"
-          f"{len(miss):>7}"
-          f"{(f'{_mb:+.1f}' if _mb is not None else '—'):>11}"
-          f"{(f'{_impl:+.1f}' if _impl is not None else '—'):>10}")
+    _tot = sum(yen)
+    print(f"{lbl:>9}{len(hits):>5}{len(hits) / _n * 100 if _n else 0:>6.0f}%"
+          f"{(f'{_hb:+.1f}' if _hb is not None else '—'):>8}"
+          f"{(f'{_impl:+.1f}' if _impl is not None else '—'):>9}"
+          f"{_tot / max(len(_days), 1):>+11,.0f}{_tot:>+11,.0f}")
+
+
+def _yen_of(px, close_p) -> float:
+    """ショート: 売値 − 終値。約定しなければ 0（建てていないので）。"""
+    return (px - close_p) * a.qty if (px and close_p > 0) else 0.0
 
 
 # 成行
 _h = [r["mkt_bp"] for r in _recs if r["mkt_bp"] is not None]
 _m = [((r["open_p"] - r["close_p"]) / r["open_p"] * 1e4)
       for r in _recs if r["mkt_bp"] is None and r["close_p"] > 0]
-_line("成行", _h, _m)
+_y = [_yen_of(r["mkt_px"], r["close_p"]) for r in _recs]
+_line("成行", _h, _m, _y)
 for _bp in _BPS:
     _k = int(_bp)
     _h = [r[f"lim{_k}_bp"] for r in _recs if r.get(f"lim{_k}_hit")]
     _m = [((r["open_p"] - r["close_p"]) / r["open_p"] * 1e4)
           for r in _recs if not r.get(f"lim{_k}_hit") and r["close_p"] > 0]
-    _line(f"-{_k}bp", _h, _m)
+    # 始値を基準に、下に置いたら「始値-Nbp」、上なら「始値+Nbp」
+    _y = [_yen_of(r.get(f"lim{_k}_px"), r["close_p"]) for r in _recs]
+    _line(("始値" if _k == 0 else
+           (f"始値-{_k}" if _k > 0 else f"始値+{-_k}")), _h, _m, _y)
 
 print()
-print("  ⚠ **『実装差bp』で比べること**。約定bp だけ見ると、")
-print("     『約定しにくい幅ほど良い』という誤読をします（下げた銘柄が落ちるので）")
-print("  ⚠ 『逃し損益bp』= 逃した銘柄を始値で売って終値で買い戻せた場合。")
-print("     プラスなら『取り逃した利益』、マイナスなら『避けられた損失』")
+print("  ⛔ **判定は『★実損益/日』で行うこと。実装差bp では選ばない。**")
+print("     実装差は『建てなかったので損しなかった』と『儲かった』を区別できず、")
+print("     **1件も約定しない幅が最良に見えます**（実際にそう出ます）")
+print("  ⚠ 約定bp だけ見るのも誤り。『約定しにくい幅ほど良い』と読めてしまう")
+print("     （下げた銘柄＝勝つはずだった銘柄が落ちるので）")
+print("  ⚠ ★実損益 = 約定した件の (売値 − 終値) × 株数。建てなければ 0。")
+print("     ⛔ これは **slip=0・手数料0** の理論値で、決済側の滑りも入っていません")
 
 # ── 保存 ────────────────────────────────────────────────────
 if a.save:
