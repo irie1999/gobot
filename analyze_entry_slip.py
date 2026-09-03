@@ -69,17 +69,40 @@ def _code4(s: str) -> str:
 
 
 def _secs(hms: str) -> int:
-    """'09:00:50' や '090050' → 秒。取れなければ -1。"""
-    s = re.sub(r"[^0-9]", "", str(hms))
-    if len(s) >= 6:
-        s = s[-6:] if len(s) > 6 else s
+    """時刻文字列 → 秒。取れなければ -1。
+
+    ⛔ 数字だけ抜いて末尾6桁を取る、はダメ(2026-09-03 に踏んだ)。
+       kabu の OpeningPriceTime は **タイムゾーン付き ISO**
+       `2026-09-03T09:00:50+09:00` で来るので、末尾6桁は `+09:00` を
+       含んだ `500900` になり、`50:09:00` という有り得ない時刻が出る。
+       時刻の**位置**を正規表現で当てること。
+    """
+    s = str(hms).strip()
+    if not s:
+        return -1
+    # 1) ISO: ...T09:00:50... / 空白区切り "... 09:00:50"
+    m = re.search(r"[T ](\d{1,2}):(\d{2}):(\d{2})", s)
+    if m:
+        return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+    # 2) 先頭が時刻: "09:00:50" / "09:00"
+    m = re.match(r"^(\d{1,2}):(\d{2})(?::(\d{2}))?", s)
+    if m:
+        return (int(m.group(1)) * 3600 + int(m.group(2)) * 60
+                + int(m.group(3) or 0))
+    # 3) 数字だけ: yyyyMMddHHmmss / HHmmss / HHmm
+    d = re.sub(r"[^0-9]", "", s)
+    if len(d) == 14:                       # yyyyMMddHHmmss
+        d = d[8:14]
+    elif len(d) == 12:                     # yyyyMMddHHmm
+        d = d[8:12]
+    if len(d) == 6:
         try:
-            return int(s[0:2]) * 3600 + int(s[2:4]) * 60 + int(s[4:6])
+            return int(d[0:2]) * 3600 + int(d[2:4]) * 60 + int(d[4:6])
         except Exception:
             return -1
-    if len(s) == 4:
+    if len(d) == 4:
         try:
-            return int(s[0:2]) * 3600 + int(s[2:4]) * 60
+            return int(d[0:2]) * 3600 + int(d[2:4]) * 60
         except Exception:
             return -1
     return -1
@@ -101,7 +124,7 @@ for p in sorted(glob.glob(os.path.join(a.dir, "orders_2*.csv"))):
 if not _od:
     raise SystemExit("orders_<日付>.csv が見つかりません。先に .\\fills を実行してください")
 
-_recs, _no_board = [], []
+_recs, _no_board, _bad_ts = [], [], []
 for _ymd in sorted(_od):
     _iso = f"{_ymd[0:4]}-{_ymd[4:6]}-{_ymd[6:8]}"
     if a.since and _iso < a.since:
@@ -135,7 +158,14 @@ for _ymd in sorted(_od):
             continue
         # ショートなので「高く売れていればプラス」
         _slip = (_fill - _open) / _open * 1e4
-        _ot = _secs(_pick(_b, "open_time", "OpeningPriceTime", "寄り時刻"))
+        _raw_t = _pick(_b, "open_time", "OpeningPriceTime", "寄り時刻")
+        _ot = _secs(_raw_t)
+        # ⛔ 板寄せは9時。場外の値が出たら**パース失敗**とみなして落とす。
+        #   黙って通すと 00:09:00 のような値が「09:00:00 ちょうど」の側に
+        #   混ざり、比較そのものが壊れる(2026-09-03 に実際に起きた)。
+        if _ot >= 0 and not (9 * 3600 <= _ot <= 15 * 3600 + 30 * 60):
+            _bad_ts.append((_iso, _cd, _raw_t))
+            _ot = -1
         _recs.append({
             "date": _iso, "code": _cd, "open_sec": _ot,
             "open_p": _open, "fill": _fill, "slip": _slip,
@@ -211,4 +241,10 @@ if _no_board:
     print()
     print(f"  ⚠ 板の記録が無くて突合できなかった注文 {len(_no_board)}件: "
           f"{', '.join(f'{d} {c}' for d, c in _no_board[:6])}")
+if _bad_ts:
+    print()
+    print(f"  ⛔ 場外の寄り時刻 {len(_bad_ts)}件 — 時刻の列を読み違えています。"
+          f"『時刻が取れない』に回しました")
+    for _d, _c, _v in _bad_ts[:5]:
+        print(f"       {_d} {_c}: {_v!r}")
 print()
