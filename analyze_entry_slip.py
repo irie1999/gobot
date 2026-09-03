@@ -45,6 +45,8 @@ ap.add_argument("--since", default="", help="この日以降だけ (YYYY-MM-DD)"
 ap.add_argument("--dir", default=".", help="CSV のあるフォルダ")
 ap.add_argument("--no-ledger", action="store_true",
                 help="台帳での N 判別をやめる（⛔ J が混ざる。検証用）")
+ap.add_argument("--save", default="entry_slip.csv",
+                help="1件1行で保存する先（'' で保存しない）")
 a = ap.parse_args()
 
 
@@ -357,6 +359,63 @@ print(f"  ⛔ 点推定は **件数加重**（§18.49 で先に宣言済み）�
 print(f"     1件の日と7件の日を同じ重みにするので使いません")
 print(f"  ⚠ 同日相関があるので、信頼区間の実効サンプルは**件数ではなく日数**です")
 
+# ── ★ 保存則の検査（合わなければ失敗終了） ───────────────────────
+# ⛔ 台帳の候補は、必ず「約定した」か「約定しなかった理由がある」かの
+#    どちらかに落ちるはず。落ちない件があるなら集計が欠けている。
+#    2026-09-03 の「台帳5件なのに採用4件」は、これがあれば即分かった。
+_rc = 0
+if _ledger_ok:
+    _keys = {k for k in _n_keys if not a.since or k[0] >= a.since}
+    _cov = ({(r["date"], r["code"]) for r in _recs}
+            | {(m["date"], m["code"]) for m in _missed}
+            | {(d, c) for d, c in _no_board})
+    _unex = sorted(_keys - _cov)
+    print()
+    print("■ ★ 保存則  台帳 = 約定 + 不約定(理由あり) + 板なし")
+    print(f"    台帳 {len(_keys)}件 = 約定 {len(_recs)} + 不約定 {len(_missed)}"
+          f" + 板なし {len(_no_board)} → 説明できない **{len(_unex)}件**")
+    if _unex:
+        _rc = 1
+        print(f"    ⛔⛔ **{len(_unex)}件が説明できません。集計が欠けています**")
+        for _d, _c in _unex[:8]:
+            print(f"         {_d} {_c}")
+    else:
+        print(f"    ✅ すべて説明できています")
+else:
+    print()
+    print("■ ★ 保存則  ⛔ **台帳が無いので検査できません**"
+          "（ordered_signals_n.csv が要ります）")
+
+# ── 毎日CSVに保存（画面出力だけだと定義が変わる） ────────────────────
+if a.save:
+    _cols = ["date", "code", "kind", "open_p", "fill_p", "close_p",
+             "slip_bp", "ideal_bp", "yen", "why",
+             "open_sec", "seen_lag", "fill_lag", "gap_bp"]
+    _out = []
+    for r in _recs:
+        _out.append({"date": r["date"], "code": r["code"], "kind": "filled",
+                     "open_p": r["open_p"], "fill_p": r["fill"],
+                     "slip_bp": round(r["slip"], 2), "gap_bp": round(r["gap_bp"], 1),
+                     "open_sec": r["open_sec"],
+                     "seen_lag": r["seen_lag"] if r["seen_lag"] > -9000 else "",
+                     "fill_lag": r["fill_lag"] if r["fill_lag"] > -9000 else ""})
+    for m in _missed:
+        _out.append({"date": m["date"], "code": m["code"], "kind": "missed",
+                     "open_p": m["open_p"], "close_p": m["close_p"],
+                     "ideal_bp": (round(m["ideal_bp"], 2)
+                                  if m["ideal_bp"] is not None else ""),
+                     "yen": (round(m["yen"]) if m["yen"] is not None else ""),
+                     "why": m["why"]})
+    try:
+        with open(a.save, "w", newline="", encoding="utf-8-sig") as f:
+            w = _csv.DictWriter(f, fieldnames=_cols, extrasaction="ignore")
+            w.writeheader()
+            w.writerows(sorted(_out, key=lambda x: (x["date"], x["code"])))
+        print()
+        print(f"  → {a.save}（{len(_out)}行）")
+    except Exception as _e:
+        print(f"  ⚠ 保存に失敗: {_e}")
+
 if _not_n:
     print()
     print(f"  [除外] N の台帳に無い売り注文 {len(_not_n)}件: "
@@ -371,3 +430,7 @@ if _bad_ts:
     for _d, _c, _v in _bad_ts[:5]:
         print(f"       {_d} {_c}: {_v!r}")
 print()
+
+# ⛔ 保存則が合わないときは **失敗終了**する。黙って通すと、欠けた集計の
+#    まま数字が独り歩きする(2026-09-03 に実際に「選択損失0件」と誤報した)。
+raise SystemExit(_rc)
