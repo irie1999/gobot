@@ -274,8 +274,9 @@ print(f"{'日付':<12}{'銘柄':>6}{'寄り':>10}{'検知遅れ':>9}{'約定遅�
       f"{'ギャップ':>8}{'始値':>10}{'実約定':>10}{'滑りbp':>9}")
 print("-" * 82)
 for r in sorted(_recs, key=lambda x: (x["date"], x["open_sec"])):
-    _sl = f"{r['seen_lag']:+d}s" if r["seen_lag"] > -9000 else "—"
-    _fl = f"{r['fill_lag']:+d}s" if r["fill_lag"] > -9000 else "—"
+    # 「—」は不約定ではなく**秒が記録に無い**という意味。約定はしている。
+    _sl = f"{r['seen_lag']:+d}s" if r["seen_lag"] > -9000 else "秒なし"
+    _fl = f"{r['fill_lag']:+d}s" if r["fill_lag"] > -9000 else "秒なし"
     print(f"{r['date']:<12}{r['code']:>6}{_hms(r['open_sec']):>10}"
           f"{_sl:>9}{_fl:>9}{r['gap_bp']:>+8.0f}"
           f"{r['open_p']:>10,.1f}{r['fill']:>10,.1f}{r['slip']:>+9.1f}")
@@ -302,10 +303,13 @@ def _group(lbl: str, key: str, edges: list) -> None:
         _lo = _hi
     _u = [r for r in _recs if r[key] <= -9000]
     if _u:
-        print(f"{'取れない':>18}{len(_u):>6}"
+        # ⛔ 「不約定」ではない。**約定はしたが時刻の秒が記録に無い**だけ。
+        #    ここを『取れない』とだけ書くと不約定と読まれる(2026-09-03 の指摘)。
+        print(f"{'時刻不明(約定済)':>18}{len(_u):>6}"
               f"{sum(x['slip'] for x in _u) / len(_u):>+12.1f}"
               f"{min(x['slip'] for x in _u):>+9.1f}"
               f"{max(x['slip'] for x in _u):>+9.1f}")
+        print(f"{'':>18}  ⚠ 約定はしている。秒の列が無いだけ（不約定は②に出る）")
 
 
 _group("検知の遅れ（seen_ts − 寄り時刻）", "seen_lag", [0, 10, 30, 60])
