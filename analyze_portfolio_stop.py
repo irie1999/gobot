@@ -76,6 +76,12 @@ ap.add_argument("--levels-pct", default="0.5,0.75,1.0,1.5,2.0",
                 help="★★ **投入額比**の損切り(%%)。固定円は投入額で意味が"
                      "変わるので、③(満額のみ)が効く理由が『満額だから』なのか"
                      "『投入額比で浅いから』なのかを分離するために要る")
+ap.add_argument("--gate-n", default="0,4,6,8,10,12",
+                help="★★ **N件以上 建てた日だけ**損切りを有効化する(件数の閾値)。"
+                     "0 は全日(比較の基準)。投入率(--gate-pct)と違い、"
+                     "予算を変えても『何件建てたか』は変わらないので直感的")
+ap.add_argument("--gate-n-pcts", default="0.8,1.0",
+                help="⑥ で使う損切り水準(投入額比%%)。件数×水準の総当たり")
 ap.add_argument("--gate-pct", type=float, default=90.0,
                 help="★★ **満額投資日だけ損切りを有効化**する閾値(投入率%%)。"
                      "無条件の損切りは『悪い日は戻す』で失敗した(§18.62)が、"
@@ -113,6 +119,11 @@ except Exception as e:                                    # pragma: no cover
 
 _LV = [float(x) for x in a.levels.split(",") if x.strip()]
 _TR = [float(x) for x in a.trail.split(",") if x.strip()]
+# ⛔ 使う場所より前で定義する。表の直前に置いていたら、その手前の
+#   件数分布の print で NameError になった(2026-09-04)。
+_LP = [float(x) for x in a.levels_pct.split(",") if x.strip()]
+_GN = [int(x) for x in a.gate_n.split(",") if x.strip()]
+_GNP = [float(x) for x in a.gate_n_pcts.split(",") if x.strip()]
 
 try:
     P = pd.read_csv(a.picks)
@@ -232,16 +243,21 @@ def _paths_for_day(day: str, grp: pd.DataFrame):
     _ent.sort(key=lambda x: x[0])
     _idx = _m.index
     _cum = np.zeros(len(_idx), dtype="float64")
-    _run = 0.0
+    _cn = np.zeros(len(_idx), dtype="float64")
+    _run, _rn = 0.0, 0
     for _t, _nt in _ent:
         _run += _nt
+        _rn += 1
         _p = int(_idx.searchsorted(_t))
         if _p < len(_cum):
             _cum[_p:] = _run
+            _cn[_p:] = _rn
+    _CUMN[day] = _cn
     return _idx, _m.sum(axis=1).to_numpy(dtype="float64"), _fin, _n, _cum
 
 
 _OPEN: dict = {}          # 次のバー始値ベースの経路
+_CUMN: dict = {}          # 累積 **件数**(グリッド上)。件数ゲート用
 _BAD: list = []                # 分割汚染などで弾いた (日, 銘柄, 倍率)
 _MISS: list = []               # 5分足が無くて外した (日, 銘柄)
 
@@ -296,6 +312,26 @@ if min(len(_tr), len(_te)) < a.min_days:
 _BUD = a.budget * 1e4
 # 投入率 = その日の建玉 ÷ 予算。satisfied なら「満額投資日」
 _FULL = {d: (_NOTIONAL.get(d, 0.0) / _BUD * 100.0) for d in _days}
+
+
+_NPOS = P.groupby("date").size().to_dict()     # その日 picks で建てた件数
+
+
+def _armed_n(day: str, gate_n: int) -> int:
+    """**N件目が建った時点**のバー。到達しなければ len(グリッド)。
+
+    ⛔ _CUMN は 5分足で再現できた銘柄だけの累積なので、picks の件数より
+      少ない。絶対数で切ると再現の悪い日が落ちる(_armed_idx と同じ罠)。
+      → **建った割合**に直して切る。
+    """
+    _idx = _days[day][0]
+    _cn = _CUMN.get(day)
+    _np = int(_NPOS.get(day, 0))
+    if _cn is None or len(_cn) == 0 or _np <= 0:
+        return len(_idx)
+    _need = float(_cn[-1]) * (gate_n / _np)
+    _w = np.where(_cn >= _need - 1e-9)[0]
+    return int(_w[0]) if len(_w) else len(_idx)
 
 
 def _armed_idx(day: str, gate: float = 0.0) -> int:
@@ -493,7 +529,7 @@ def _cvar(vals: list, q: float = 0.05) -> float:
 
 
 def _arm(days: list, level: float, gate: float, use_start: bool,
-         pct: float = 0.0):
+         pct: float = 0.0, gate_n: int = 0):
     """1本の腕を評価する。gate>0 なら投入率がそれ以上の日だけ損切りを効かせる。
 
     ★ pct>0 なら損切り水準を **その日の投入額の pct%** にする。
@@ -512,10 +548,14 @@ def _arm(days: list, level: float, gate: float, use_start: bool,
         _ts, _path, _fin, _n, _cum = _days[_d]
         _nt = float(_NOTIONAL.get(_d, 0.0))
         _lv = (_nt * pct / 100.0) if pct > 0 else level
-        _st = _armed_idx(_d, gate) if use_start else 0
-        # 対象日か = **その日の建玉(picks全体)が予算の gate% 以上**。
-        #   ⛔ 経路で再現できた分(_cum)で判定すると欠損の多い日が落ちる。
-        _elig = (gate <= 0) or (_FULL.get(_d, 0.0) >= gate)
+        if gate_n > 0:
+            _st = _armed_n(_d, gate_n) if use_start else 0
+            _elig = int(_NPOS.get(_d, 0)) >= gate_n
+        else:
+            _st = _armed_idx(_d, gate) if use_start else 0
+            # 対象日か = **その日の建玉(picks全体)が予算の gate% 以上**。
+            #   ⛔ 経路で再現できた分(_cum)で判定すると欠損の多い日が落ちる。
+            _elig = (gate <= 0) or (_FULL.get(_d, 0.0) >= gate)
         _on = (_lv > 0) and _elig and (_st < len(_ts))
         _v = _fin
         if _on:
@@ -677,12 +717,20 @@ if _over > len(_ks) * 0.05:
     print(f"  ⛔⛔ **投入率が100%を超える日が {_over}/{len(_ks)}日 あります。**")
     print(f"     picks.csv を作った analyze_gap_edge の --budget-man と "
           f"--budget {a.budget:,.0f}万 が食い違っています。満額判定は無意味です")
+# ★ 件数の分布。N の閾値を読む前にこれが要る(何件の日がどれだけあるか)
+_npv = sorted(int(_NPOS.get(d, 0)) for d in _ks)
+print(f"  ★ 1日の建玉件数: 中央 **{_npv[len(_npv) // 2]}件** / "
+      f"平均 {sum(_npv) / max(len(_npv), 1):.1f}件 / "
+      f"最小 {_npv[0]} 〜 最大 {_npv[-1]}")
+print("     " + " / ".join(
+    f"{_g}件以上 {sum(1 for v in _npv if v >= _g)}日"
+    f"({sum(1 for v in _npv if v >= _g) / max(len(_npv), 1) * 100:.0f}%)"
+    for _g in _GN if _g > 0))
 _ftr = sum(1 for d in _tr if _FULL.get(d, 0.0) >= a.gate_pct)
 _fte = sum(1 for d in _te if _FULL.get(d, 0.0) >= a.gate_pct)
 print(f"  ★ 満額日の内訳: TRAIN **{_ftr}日** / TEST **{_fte}日** "
       f"(③⑤ の『対象』列がこれと大きく違うなら、武装できていない日があります)")
 
-_LP = [float(x) for x in a.levels_pct.split(",") if x.strip()]
 
 for _wn, _wd in (("TRAIN", _tr), ("TEST", _te)):
     print(f"\n  ── {_wn} {_wd[0]}〜{_wd[-1]} ({len(_wd)}営業日) ──")
@@ -713,6 +761,14 @@ for _wn, _wd in (("TRAIN", _tr), ("TEST", _te)):
         _row2(f"⑤ 満額のみ −投入の{_p:.1f}%",
               _arm(_wd, 0.0, a.gate_pct, True, pct=_p), _wd, _base,
               boot=True)
+    # ★★ ⑥ **件数**で切る。投入率と違い、予算を変えても意味が変わらない。
+    #   N=0 は全日(=④)なので、そこからどう動くかで『件数に意味があるか』が分かる。
+    for _p in _GNP:
+        for _gn in _GN:
+            _lbl = (f"⑥ {_gn:>2}件以上 −投入の{_p:.1f}%" if _gn > 0
+                    else f"⑥ 全日(基準) −投入の{_p:.1f}%")
+            _row2(_lbl, _arm(_wd, 0.0, 0.0, True, pct=_p, gate_n=_gn),
+                  _wd, _base, boot=(_gn > 0))
 
 print(f"\n  ★ 『等価f』= その腕と同じ CVaR にするために予算を何倍にするか。")
 print(f"     『等価月平均』= そのとき残る月平均利益(= 現行 × f)。")
