@@ -110,7 +110,8 @@ ap.add_argument("--exit-same-close", dest="exit_next_open",
                 help="旧挙動(発火したバーの終値で決済)に戻す。差を見るとき用")
 ap.add_argument("--boot", type=int, default=1000,
                 help="CVaR差の月ブロック・ブートストラップの本数(既定1000)")
-ap.add_argument("--exit-times", default="14:00,15:00,15:10,15:15,15:20,15:25",
+ap.add_argument("--exit-times",
+                default="09:15,09:30,10:00,11:30,13:00,14:00,15:00,15:15,15:20",
                 help="★ **引け成行より早く畳んだらどうか** を掃く時刻。"
                      "§18.55 の決済時刻スイープは 5分→11:05→引け しか見ておらず、"
                      "**引け直前の10〜30分は一度も測っていない**")
@@ -370,7 +371,13 @@ def _armed_n(day: str, gate_n: int) -> int:
     #   **7件目で『10件到達』**にしてしまう。まだ10件建っていない。
     #   再現できないなら『いつ10件目が建ったか』は分からない → **その日は判定不能**。
     if float(_cn[-1]) < gate_n:
-        _NG_N.add(day)
+        # ⛔ **対象外の日と判定不能の日を混ぜない**(2026-09-04)。
+        #   picks が gate_n 件に届かない日は単に条件を満たさないだけ。
+        #   『再現できないので分からない』のは **picks は届いているのに
+        #   5分足で再現しきれない日**だけ。混ぜると 473日中435日が
+        #   判定不能に見えた(実際はほとんどが対象外)。
+        if _np >= gate_n:
+            _NG_N.add(day)
         return len(_idx)
     _w = np.where(_cn >= gate_n)[0]
     return max(int(_w[0]), _clock_idx(day)) if len(_w) else len(_idx)
@@ -403,7 +410,8 @@ def _armed_idx(day: str, gate: float = 0.0) -> int:
     if gate > 0:
         _need = _BUD * gate / 100.0
         if float(_cum[-1]) < _need:
-            _NG_N.add(day)
+            if _NOTIONAL.get(day, 0.0) >= _need:
+                _NG_N.add(day)      # 条件は満たすのに再現できない日だけ
             return len(_idx)
     else:
         _need = float(_cum[-1])
