@@ -241,15 +241,21 @@ def _paths_for_day(day: str, grp: pd.DataFrame):
     #   半分以上欠けた日は『合計』として意味を持たない。
     if not _series or _n < max(1, int(len(grp) * a.min_cover)):
         return None
-    _m = pd.concat(_series, axis=1).ffill().bfill()
-    if _m.isna().any().any():
-        return None
-    _mo = pd.concat(_sero, axis=1).ffill().bfill()
-    _OPEN[day] = (_mo.sum(axis=1).to_numpy(dtype="float64")
-                  if not _mo.isna().any().any() else None)
+    # ⛔⛔ **bfill してはいけない**(2026-09-04 に Codex が指摘、実在した)。
+    #   09:06 に寄る銘柄の系列は 09:00〜09:05 が NaN。bfill すると 09:06 の
+    #   含み損益が 09:00 まで遡って埋まり、**まだ建てていない銘柄の損失**が
+    #   朝の経路に混ざる。そこで損切りが発火すると「建てていない損を助けた」
+    #   ことになり、強い好転が出る。私の ⑥10件 の +70,678 はこれが主因。
+    #   → 建てる前は **損益ゼロ**。ffill は建てた後の欠測にだけ効かせる。
+    _m = pd.concat(_series, axis=1).ffill().fillna(0.0)
+    _mo = pd.concat(_sero, axis=1).ffill().fillna(0.0)
+    _OPEN[day] = _mo.sum(axis=1).to_numpy(dtype="float64")
     # 累積建玉の推移(グリッド上)。「いま何円建っているか」= 武装判定の材料
     _ent.sort(key=lambda x: x[0])
     _idx = _m.index
+    # ★ 遅寄り = その日の最初のバーより後に寄った銘柄。**bfill はここに効いていた**
+    _LATE[0] += sum(1 for _t, _ in _ent if _t > _idx[0])
+    _LATE[1] += len(_ent)
     _cum = np.zeros(len(_idx), dtype="float64")
     _cn = np.zeros(len(_idx), dtype="float64")
     _run, _rn = 0.0, 0
@@ -265,6 +271,8 @@ def _paths_for_day(day: str, grp: pd.DataFrame):
 
 
 _OPEN: dict = {}          # 次のバー始値ベースの経路
+_NG_N: set = set()        # 建玉を再現しきれず判定不能にした日
+_LATE = [0, 0]            # [遅寄りの銘柄日, 全銘柄日]
 _CUMN: dict = {}          # 累積 **件数**(グリッド上)。件数ゲート用
 _BAD: list = []                # 分割汚染などで弾いた (日, 銘柄, 倍率)
 _MISS: list = []               # 5分足が無くて外した (日, 銘柄)
@@ -349,8 +357,14 @@ def _armed_n(day: str, gate_n: int) -> int:
     _np = int(_NPOS.get(day, 0))
     if _cn is None or len(_cn) == 0 or _np <= 0:
         return len(_idx)
-    _need = float(_cn[-1]) * (gate_n / _np)
-    _w = np.where(_cn >= _need - 1e-9)[0]
+    # ⛔⛔ **比例縮小してはいけない**(2026-09-04 指摘、実在した)。
+    #   12件中8件しか再現できない日に gate_n=10 を 8×10/12=6.7 と読み替えると、
+    #   **7件目で『10件到達』**にしてしまう。まだ10件建っていない。
+    #   再現できないなら『いつ10件目が建ったか』は分からない → **その日は判定不能**。
+    if float(_cn[-1]) < gate_n:
+        _NG_N.add(day)
+        return len(_idx)
+    _w = np.where(_cn >= gate_n)[0]
     return max(int(_w[0]), _clock_idx(day)) if len(_w) else len(_idx)
 
 
@@ -376,7 +390,15 @@ def _armed_idx(day: str, gate: float = 0.0) -> int:
     #   しかも残る日が「5分足が揃った日」に偏る。
     #   → 武装時刻は **再現できた建玉の中での割合**で決める。
     #     『その日が満額日か』の判定は _FULL(picks全体)で別に行う。
-    _need = float(_cum[-1]) * (gate / 100.0 if gate > 0 else 1.0)
+    # ⛔ 件数ゲートと同じ理由で、投入率も **絶対額** で切る。
+    #   再現できた建玉が閾値に届かない日は「いつ到達したか」が分からない。
+    if gate > 0:
+        _need = _BUD * gate / 100.0
+        if float(_cum[-1]) < _need:
+            _NG_N.add(day)
+            return len(_idx)
+    else:
+        _need = float(_cum[-1])
     _w = np.where(_cum >= _need - 1e-6)[0]
     return max(int(_w[0]), _clock_idx(day)) if len(_w) else len(_idx)
 
@@ -567,7 +589,6 @@ def _arm(days: list, level: float, gate: float, use_start: bool,
     for _d in days:
         _ts, _path, _fin, _n, _cum = _days[_d]
         _nt = float(_NOTIONAL.get(_d, 0.0))
-        _lv = (_nt * pct / 100.0) if pct > 0 else level
         if gate_n > 0:
             _st = _armed_n(_d, gate_n) if use_start else 0
             _elig = int(_NPOS.get(_d, 0)) >= gate_n
@@ -576,6 +597,13 @@ def _arm(days: list, level: float, gate: float, use_start: bool,
             # 対象日か = **その日の建玉(picks全体)が予算の gate% 以上**。
             #   ⛔ 経路で再現できた分(_cum)で判定すると欠損の多い日が落ちる。
             _elig = (gate <= 0) or (_FULL.get(_d, 0.0) >= gate)
+        # ⛔⛔ **その日の最終投入額を使ってはいけない**(2026-09-04 指摘、実在した)。
+        #   武装した時点ではまだ全部建っていない。最終額で損切り幅を作ると
+        #   実際に持っている額より広い閾値になり、決済コストも建てていない分まで
+        #   払うことになる。→ **武装時点の建玉**で幅を、**発火時点の建玉**で
+        #   コストを計算する。
+        _held = float(_cum[_st]) if _st < len(_cum) else _nt
+        _lv = (_held * pct / 100.0) if pct > 0 else level
         _on = (_lv > 0) and _elig and (_st < len(_ts))
         _v = _fin
         if _on:
@@ -585,7 +613,8 @@ def _arm(days: list, level: float, gate: float, use_start: bool,
                 _pv = _OPEN.get(_d)
                 if a.exit_next_open and _pv is not None and _i + 1 < len(_pv):
                     _v2 = float(_pv[_i + 1])      # 次のバーの始値で決済
-                _v = _v2 - _nt * a.slip_pct
+                _cost = float(_cum[_i]) if _i < len(_cum) else _nt
+                _v = _v2 - _cost * a.slip_pct
                 _fire += 1
                 _cut += _v
                 _hold += _fin
@@ -781,6 +810,13 @@ print(f"  決済は **{'次のバーの始値' if a.exit_next_open else '発火�
 print(f"  ★ 累積建玉は **5分足の最初のバー = その銘柄が寄った時刻** から"
       f"組み立てています(picks.csv に約定時刻が無いための代理)")
 print(f"  ★ 主指標は **CVaR5%(円)** = 下位5%の日の平均。最悪1日ではなく裾の平均")
+print(f"  ★ 遅寄り(その日の最初のバーより後に寄った) "
+      f"**{_LATE[0]:,}/{_LATE[1]:,}銘柄日 "
+      f"({_LATE[0] / max(_LATE[1], 1) * 100:.0f}%)** — "
+      f"建てる前は損益ゼロで扱っています(bfill しない)")
+if _NG_N:
+    print(f"  ⚠ **{len(_NG_N)}日は判定不能**(5分足で建玉を再現しきれず、"
+          f"『いつ閾値に到達したか』が分からない)。比例縮小で埋めません")
 # ★ 経路で扱えた満額日の数を必ず出す。ここが激減していたら判定は成立しない
 # ⛔ picks.csv を作った予算と --budget が食い違うと投入率が壊れる。
 #   analyze_gap_edge の --budget-man と揃っていないと、満額日の判定が
