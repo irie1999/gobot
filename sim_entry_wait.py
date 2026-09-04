@@ -100,6 +100,11 @@ if not _qd:
 
 _recs: list = []
 _drop: list = []          # (日付, 銘柄, 落とした理由) — 保存則の検査に使う
+# ★ 板を1周読むのにかかった秒数。(日付, 周) -> [最初の req_ts, 最後の resp_ts]
+#   これが数秒なら「読み取り」は律速ではない = 遅れは判定〜発注の側にある。
+#   §18.44 の実測: 場外ウォーム 6.3秒 / 本番 09:00 は 36.5秒(中央)〜95.9秒
+_pollspan: dict = {}
+_pollcnt: dict = {}
 
 
 def _yen(px, close_p) -> float:
@@ -123,6 +128,15 @@ for _ymd in sorted(_qd):
         _s = _code4(r.get("symbol") or "")
         if _s:
             _by.setdefault(_s, []).append(r)
+        # 1周の所要時間。**合格銘柄だけでなく読んだ全銘柄**で測る
+        # (実運用で待たされるのは全体を読み切るまでなので)
+        _pk = str(r.get("poll") or "").strip()
+        _rq, _rp = _secs(r.get("req_ts")), _secs(r.get("resp_ts"))
+        if _pk and _rq >= 0 and _rp >= 0:
+            _key = (_iso, _pk)
+            _sp = _pollspan.setdefault(_key, [_rq, _rp])
+            _sp[0], _sp[1] = min(_sp[0], _rq), max(_sp[1], _rp)
+            _pollcnt[_key] = _pollcnt.get(_key, 0) + 1
 
     for _s, _rs in _by.items():
         # 寄った後の行だけ（始値が入っていて、前日の始値でない）
@@ -232,6 +246,25 @@ def _lagline(lbl: str, key: str, nominal: float, pool: list) -> None:
 _lagline("即時", "imm_lag_s", 0.0, _recs)
 for _w in _WAITS:
     _lagline(f"{int(_w)}秒", f"w{int(_w)}_lag_s", _w, _recs)
+
+# ── 表A-2: 板を1周読むのにかかった秒数 ────────────────────────────
+print()
+print("■ 表A-2 ★ 板を1周読むのにかかった秒数（読んだ全銘柄で測る）")
+print("     数秒なら『読み取り』は律速ではない = 遅れは判定〜発注の側にあります")
+print(f"{'日付':<12}{'周':>4}{'銘柄/周':>8}{'1周 中央':>10}{'最小':>8}"
+      f"{'最大':>8}{'初周':>8}")
+print("-" * 58)
+for _d in sorted({k[0] for k in _pollspan}):
+    _sp = [(int(_p) if str(_p).isdigit() else 0, _pollspan[(_d, _p)][1] - _pollspan[(_d, _p)][0])
+           for (_dd, _p) in _pollspan if _dd == _d]
+    _sp.sort()
+    _v = sorted(s for _, s in _sp)
+    _cn = [_pollcnt[k] for k in _pollcnt if k[0] == _d]
+    _first = _sp[0][1] if _sp else 0.0
+    print(f"{_d:<12}{len(_v):>4}{int(_st.median(_cn)) if _cn else 0:>8}"
+          f"{_st.median(_v):>9.1f}s{_v[0]:>7.1f}s{_v[-1]:>7.1f}s{_first:>7.1f}s")
+print("  ⚠ 『初周』が 09:00 の1周目。**ここが実運用で効く数字**です")
+print("     §18.44 の実測: 場外ウォーム 6.3秒 / 本番09:00 は 36.5秒(中央)〜95.9秒")
 
 _immlag = [r["imm_lag_s"] for r in _recs if r.get("imm_lag_s") is not None]
 if _immlag:
