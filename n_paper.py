@@ -682,6 +682,12 @@ def do_close() -> None:
               f"全件を N として集計します", flush=True)
 
     import backtest_limit_entry as ble
+    # ── 終値が確定値か暫定値かを必ず言う (2026-09-04 の事故対策) ──────
+    #   大引け 15:30 直後に叩くと yfinance は 15:29 頃の最終約定値を返すことが
+    #   あり、それが「今日のバー」としてキャッシュに焼き付く。9/4 は 6銘柄
+    #   すべてが実際の MOC 約定値と 3〜11円ずれ、ペーパー損益を +3,450円
+    #   (17.4bp) 水増ししていた。**黙って使わない。必ず件数を出す。**
+    _prov_syms: list = []
     _out = []
     for r in rows:
         _sy = str(r.get("symbol") or "").strip().replace(".T", "")
@@ -708,9 +714,24 @@ def do_close() -> None:
                     r["close_p"] = round(_cl, 1)
                     r["pnl"] = round(_pnl, 0)
                     r["bp"] = round(_pnl / (_op * QTY) * 1e4, 1)
+                    if ble.is_close_provisional(_yf, _TODAY):
+                        _prov_syms.append(_sy)
             except Exception:
                 pass
         _out.append(r)
+
+    if _prov_syms:
+        _fa = ble.cache_fetched_at(f"{_prov_syms[0]}.T")
+        _hh, _mm = ble._close_settle_hhmm()
+        print(f"\n  ⛔⛔ **終値が暫定値です** — {len(_prov_syms)}件 / "
+              f"{len(_out)}件中", flush=True)
+        print(f"     キャッシュ取得 {_fa:%H:%M} < 確定 {_hh:02d}:{_mm:02d} JST。"
+              f"大引け直後の値なので MOC 約定値と数円ずれます", flush=True)
+        print(f"     → **以下の損益はすべて暫定**。"
+              f"{_hh:02d}:{_mm:02d} 以降に再実行すると自動で確定値に直ります",
+              flush=True)
+        print(f"     いま直すなら: $env:GOBOT_REFRESH_DATA=\"1\"; "
+              f"python n_paper.py --close --date {_TODAY}", flush=True)
 
     _fld = list(_out[0].keys())
     _o2 = Path(f"n_close_{_YMD}.csv")

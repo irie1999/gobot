@@ -64,21 +64,44 @@ args = ap.parse_args()
 
 
 def _try_call(method, start, now):
-    """メソッドの引数形が不明なので複数パターンを試す(TypeErrorは次へ、他は上位で処理)。"""
+    """メソッドの引数形が不明なので複数パターンを試す(TypeErrorは次へ、他は上位で処理)。
+
+    ⛔ 最後の `dict()` は **日付指定なし**。ここに落ちると「760日ぶん取った」
+       つもりが直近しか返っていない、ということが起こる。どの形で通ったかを
+       必ず返し、呼び出し側で実際の最古日・最新日を表示すること
+       (2026-09-04 指摘)。
+    """
     fr = start.strftime("%Y%m%d")
     to = now.strftime("%Y%m%d")
-    for kwargs in (
-        dict(start_dt=start, end_dt=now),
-        dict(from_yyyymmdd=fr, to_yyyymmdd=to),
-        dict(from_date=fr, to_date=to),
-        dict(),
+    for label, kwargs in (
+        ("start_dt/end_dt",         dict(start_dt=start, end_dt=now)),
+        ("from_yyyymmdd/to_yyyymmdd", dict(from_yyyymmdd=fr, to_yyyymmdd=to)),
+        ("from_date/to_date",       dict(from_date=fr, to_date=to)),
+        ("**引数なし(日付指定が効いていない)**", dict()),
     ):
         try:
-            return method(**kwargs)
+            return method(**kwargs), label
         except TypeError:
             continue
     # どの形も TypeError の場合、最後にもう一度素で呼んで実エラーを出す
-    return method()
+    return method(), "**引数なし(日付指定が効いていない)**"
+
+
+def _date_span(df) -> str:
+    """データの実際の最古日・最新日を返す。日付らしい列を総当たりで探す。"""
+    for c in df.columns:
+        if not any(k in str(c).lower() for k in ("date", "day", "日")):
+            continue
+        try:
+            s = pd.to_datetime(df[c], errors="coerce").dropna()
+        except Exception:
+            continue
+        if len(s) == 0:
+            continue
+        lo, hi = s.min(), s.max()
+        return (f"{c}: {lo:%Y-%m-%d} 〜 {hi:%Y-%m-%d} "
+                f"({(hi - lo).days}日ぶん)")
+    return "**日付列が見つからない** — 期間を確認できません"
 
 
 def main():
@@ -109,7 +132,7 @@ def main():
             ng += 1
             continue
         try:
-            df = _try_call(method, start, now)
+            df, _form = _try_call(method, start, now)
             if df is None or (hasattr(df, "empty") and df.empty):
                 print(f"  [warn] {name}({mname}): **データ空** "
                       f"— プラン不足でも空が返ることがあります"
@@ -120,6 +143,12 @@ def main():
             df.to_csv(fp, index=False, encoding="utf-8-sig")
             cols = list(df.columns)[:8]
             print(f"  [ok] {name}: {len(df)}行 → {fp.name}  cols={cols}", flush=True)
+            # ★ 「760日ぶん」を信じないための2行。引数の形と実際の期間を出す。
+            print(f"        引数の形: {_form}", flush=True)
+            print(f"        実際の期間: {_date_span(df)}", flush=True)
+            if "引数なし" in _form:
+                print(f"        ⛔ **--days {args.days} は効いていません。**"
+                      f"上の期間が実際に取れた範囲です", flush=True)
             ok += 1
         except Exception as e:
             _m = str(e).lower()

@@ -387,6 +387,93 @@ def _expected_latest_bar_date():
     return today - timedelta(days=1)
 
 
+def _close_settle_hhmm() -> tuple:
+    """yfinance の日足終値が **確定値** に落ち着く時刻 (JST)。既定 16:10。
+
+    ⛔ `_expected_latest_bar_date()` の 15:40 とは別物。役割が違う:
+      15:40 = 「今日のバーを使ってよいか」の境界 (早く見たいので短め)
+      16:10 = 「その値がもう動かないか」の境界 (焼き付けてよいかの判断)
+
+    2026-09-04 に 6銘柄すべてで、キャッシュの終値が実際の大引け(MOC)約定値と
+    3〜11円ずれていた (ペーパー損益を +3,450円 = 17.4bp 水増し)。15:30 の
+    大引け直後に叩くと yfinance は 15:29 頃の最終約定値を返すことがあり、
+    それが 15:40 を過ぎた時点で「今日のバー」として **恒久的に焼き付いた**。
+    `GOBOT_CLOSE_SETTLE=HHMM` で調整可。
+    """
+    s = str(os.environ.get("GOBOT_CLOSE_SETTLE", "1610")).strip()
+    try:
+        return int(s[:2]), int(s[2:4])
+    except Exception:
+        return 16, 10
+
+
+def _is_provisional_cache(latest_date, fetched_at) -> bool:
+    """キャッシュ最新バーが『引け直後の暫定終値』で焼き付いていないか。
+
+    True を返すと fetch() は再ダウンロードする。判定は3つだけ:
+      1. まだ確定時刻前 → False (取り直しても同じ値なので無駄)
+      2. 取得時刻の印が最新バーと同じ日で、確定時刻より前 → **True (暫定)**
+      3. 別の日に取ったバー → False (確定済み)
+
+    印の無い旧キャッシュは、最新バーが今日のときだけ1回取り直す
+    (取り直せば印が付くので繰り返さない)。
+    """
+    now = datetime.now(JST)
+    hh, mm = _close_settle_hhmm()
+    # ⛔ 「まだ確定していないので取り直しても無駄」と言えるのは **今日のバー**
+    #    についてだけ。過去日のバーは、いま何時であっても確定時刻を過ぎている。
+    #    ここを時刻だけで見ると、翌日以降の再採点で暫定値を検出できない
+    #    (= 9/4 の値を 9/6 に直せない)。
+    if latest_date == now.date() and (now.hour, now.minute) < (hh, mm):
+        return False
+    if fetched_at is None:
+        return latest_date == now.date()
+    try:
+        fa = datetime.fromisoformat(str(fetched_at))
+    except Exception:
+        return latest_date == now.date()
+    if fa.tzinfo is None:
+        fa = fa.replace(tzinfo=JST)
+    fa = fa.astimezone(JST)
+    if fa.date() != latest_date:
+        return False
+    return (fa.hour, fa.minute) < (hh, mm)
+
+
+def cache_fetched_at(symbol: str):
+    """その銘柄のキャッシュを **いつ取ったか** を返す (無ければ None)。
+
+    「表示している終値が確定値か暫定値か」を呼び出し側が判定するための窓口。
+    fetch() の返り値は加工後なので .attrs が落ちうる → pickle を直接見る。
+    """
+    persistent = _CACHE_DIR / f"{symbol.replace('.', '_')}.pkl"
+    if not persistent.exists():
+        return None
+    try:
+        with open(persistent, "rb") as f:
+            _df = pickle.load(f)
+        _fa = _df.attrs.get("fetched_at")
+        if not _fa:
+            return None
+        _dt = datetime.fromisoformat(str(_fa))
+        return _dt.replace(tzinfo=JST) if _dt.tzinfo is None else _dt.astimezone(JST)
+    except Exception:
+        return None
+
+
+def is_close_provisional(symbol: str, bar_date) -> bool:
+    """`symbol` の `bar_date` の終値が **暫定値のまま焼き付いている** か。
+
+    True = 引け直後(確定時刻前)に取った値がキャッシュに残っている。
+    None(印なし) は判定不能なので False を返す — 警告を出しすぎないため。
+    """
+    _fa = cache_fetched_at(symbol)
+    if _fa is None:
+        return False
+    hh, mm = _close_settle_hhmm()
+    return _fa.date() == bar_date and (_fa.hour, _fa.minute) < (hh, mm)
+
+
 def _trim_incomplete_bar(df: pd.DataFrame) -> pd.DataFrame:
     """未確定バーを末尾から除去する。
 
@@ -451,6 +538,13 @@ def fetch(symbol: str, backtest_days: int = BACKTEST_DAYS,
         try:
             with open(persistent, "rb") as f:
                 df = pickle.load(f)
+            # ⛔ 取得時刻の印は **トリミングの前** に読む
+            #   (スライスで .attrs が落ちる版があるため)
+            _fetched_at = None
+            try:
+                _fetched_at = df.attrs.get("fetched_at")
+            except Exception:
+                pass
             # 未確定バー (場中の今日のバー) を除去 → 前営業日確定終値までで判定
             df = _trim_incomplete_bar(df)
             if len(df) >= 210:
@@ -459,7 +553,11 @@ def fetch(symbol: str, backtest_days: int = BACKTEST_DAYS,
                 expected    = _expected_latest_bar_date()
                 price_range = float(df["close"].max() - df["close"].min())
                 valid_range = price_range > 0.01 * float(df["close"].mean())
-                if (latest_date >= expected or _offline) and valid_range:
+                # 引け直後に焼き付いた暫定終値 → 確定時刻を過ぎていれば取り直す
+                _provisional = (not _offline
+                                and _is_provisional_cache(latest_date, _fetched_at))
+                if (latest_date >= expected or _offline) and valid_range \
+                        and not _provisional:
                     # min_start_date チェック: キャッシュが十分遡っているか確認
                     if min_start_date is not None:
                         oldest_bar  = df.index[0]
@@ -533,6 +631,12 @@ def fetch(symbol: str, backtest_days: int = BACKTEST_DAYS,
         df_out = _trim_incomplete_bar(df_out)
         if len(df_out) < 210:
             return None
+        try:
+            # ★ 取得時刻を刻む。これが無いと「引け直後に取った暫定終値」と
+            #   「翌日以降に取った確定終値」を区別できない (2026-09-04 の事故)。
+            df_out.attrs["fetched_at"] = datetime.now(JST).isoformat()
+        except Exception:
+            pass
         try:
             _CACHE_DIR.mkdir(exist_ok=True)
             with open(persistent, "wb") as f:
