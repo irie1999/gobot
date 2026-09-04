@@ -750,7 +750,13 @@ def _row2(lbl: str, r: dict, days: list, base: dict, boot: bool = False) -> None
     elif _mu <= _eq:
         _mk = "  ⛔予算縮小が上"
     else:
-        _mk = "  ✅" + ("" if _rt > base["rt"] else "(÷σは横ばい)")
+        # ⛔ 0.56 vs 0.63 を「横ばい」と書いていた(2026-09-04)。±5%で分ける。
+        if _rt >= base["rt"]:
+            _mk = "  ✅"
+        elif _rt >= base["rt"] * 0.95:
+            _mk = "  ✅(÷σ横ばい)"
+        else:
+            _mk = "  ✅⚠÷σ悪化"
     _ft = "—" if _f >= 1.0 else f"{_f:.2f}"
     _et = "—" if _f >= 1.0 else f"{_eq:+,.0f}"
     print(f"  {lbl:<22}{_tot:>+12,.0f}{_mu:>+10,.0f}{_rt:>6.2f}"
@@ -814,9 +820,6 @@ print(f"  ★ 遅寄り(その日の最初のバーより後に寄った) "
       f"**{_LATE[0]:,}/{_LATE[1]:,}銘柄日 "
       f"({_LATE[0] / max(_LATE[1], 1) * 100:.0f}%)** — "
       f"建てる前は損益ゼロで扱っています(bfill しない)")
-if _NG_N:
-    print(f"  ⚠ **{len(_NG_N)}日は判定不能**(5分足で建玉を再現しきれず、"
-          f"『いつ閾値に到達したか』が分からない)。比例縮小で埋めません")
 # ★ 経路で扱えた満額日の数を必ず出す。ここが激減していたら判定は成立しない
 # ⛔ picks.csv を作った予算と --budget が食い違うと投入率が壊れる。
 #   analyze_gap_edge の --budget-man と揃っていないと、満額日の判定が
@@ -881,6 +884,9 @@ for _wn, _wd in (("TRAIN", _tr), ("TEST", _te)):
             if _gn > 0 and a.gate_nulls > 0:
                 _gate_band(_wd, _p, _r, _base)
 
+if _NG_N:
+    print(f"\n  ⚠ **{len(_NG_N)}日は判定不能**(5分足で建玉を再現しきれず、"
+          f"『いつ閾値に到達したか』が分からない)。比例縮小で埋めません")
 print(f"\n  ★ 『等価f』= その腕と同じ CVaR にするために予算を何倍にするか。")
 print(f"     『等価月平均』= そのとき残る月平均利益(= 現行 × f)。")
 print(f"  ★ 『降−引』= **発火した日だけ**で「降りた損益 − 引けまで持った損益」。")
