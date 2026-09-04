@@ -76,6 +76,14 @@ ap.add_argument("--levels-pct", default="0.5,0.75,1.0,1.5,2.0",
                 help="★★ **投入額比**の損切り(%%)。固定円は投入額で意味が"
                      "変わるので、③(満額のみ)が効く理由が『満額だから』なのか"
                      "『投入額比で浅いから』なのかを分離するために要る")
+ap.add_argument("--arm-not-before", default="",
+                help="★ 武装を **この時刻以降** に限る(例 09:10)。空なら建玉が"
+                     "揃った時点から。⛔ 『10件目が建った瞬間』だと寄り直後の"
+                     "最もボラが高い帯で発火する。時刻を足すと何が変わるかを"
+                     "**推測せず測る**ためのつまみ(2026-09-04)")
+ap.add_argument("--gate-nulls", type=int, default=200,
+                help="⑥ の帰無較正の本数。**同じ日数をランダムに選んで**"
+                     "同じ損切りを当て、『件数条件そのもの』が特別かを見る")
 ap.add_argument("--gate-n", default="0,4,6,8,10,12",
                 help="★★ **N件以上 建てた日だけ**損切りを有効化する(件数の閾値)。"
                      "0 は全日(比較の基準)。投入率(--gate-pct)と違い、"
@@ -317,6 +325,18 @@ _FULL = {d: (_NOTIONAL.get(d, 0.0) / _BUD * 100.0) for d in _days}
 _NPOS = P.groupby("date").size().to_dict()     # その日 picks で建てた件数
 
 
+def _clock_idx(day: str) -> int:
+    """--arm-not-before で指定した時刻の最初のバー。未指定なら0。"""
+    if not a.arm_not_before:
+        return 0
+    _idx = _days[day][0]
+    _h, _m = (int(x) for x in str(a.arm_not_before).split(":"))
+    for _i, _t in enumerate(_idx):
+        if (_t.hour, _t.minute) >= (_h, _m):
+            return _i
+    return len(_idx)
+
+
 def _armed_n(day: str, gate_n: int) -> int:
     """**N件目が建った時点**のバー。到達しなければ len(グリッド)。
 
@@ -331,7 +351,7 @@ def _armed_n(day: str, gate_n: int) -> int:
         return len(_idx)
     _need = float(_cn[-1]) * (gate_n / _np)
     _w = np.where(_cn >= _need - 1e-9)[0]
-    return int(_w[0]) if len(_w) else len(_idx)
+    return max(int(_w[0]), _clock_idx(day)) if len(_w) else len(_idx)
 
 
 def _armed_idx(day: str, gate: float = 0.0) -> int:
@@ -358,7 +378,7 @@ def _armed_idx(day: str, gate: float = 0.0) -> int:
     #     『その日が満額日か』の判定は _FULL(picks全体)で別に行う。
     _need = float(_cum[-1]) * (gate / 100.0 if gate > 0 else 1.0)
     _w = np.where(_cum >= _need - 1e-6)[0]
-    return int(_w[0]) if len(_w) else len(_idx)
+    return max(int(_w[0]), _clock_idx(day)) if len(_w) else len(_idx)
 
 
 def _apply(day: str, level: float = 0.0, trail: float = 0.0, start: int = 0):
@@ -626,6 +646,57 @@ _PASS = ("CVaR5% が改善 かつ 月平均が現行の90%以上 "
          "かつ 同じCVaRになる単純予算縮小より月平均が高い")
 
 
+def _gate_band(days: list, pct: float, real: dict, base: dict) -> None:
+    """★★ **同じ日数をランダムに選んで**同じ損切りを当てた帯と比べる。
+
+    ⛔ 件数で絞れば必ず何かは変わる。『N件以上』という条件そのものが特別かを
+      見るには、**同じ日数をランダムに選んだ場合**と比べるしかない
+      (§18.24 / 2026-09-04 に Codex から指摘。私の ⑥ には無かった)。
+    帯の中なら「日数を減らしただけ」で、件数条件に固有の価値は無い。
+    """
+    _cov = real["cov"]
+    if _cov <= 0 or _cov >= len(days):
+        return
+    _bt, _bc = [], []
+    for _s in range(a.gate_nulls):
+        _g = _rnd.Random(_s)
+        _pick = set(_g.sample(days, _cov))
+        _y = []
+        for _d in days:
+            _ts, _path, _fin, _n, _cum = _days[_d]
+            _nt = float(_NOTIONAL.get(_d, 0.0))
+            if _d not in _pick:
+                _y.append(_fin)
+                continue
+            _st = _armed_idx(_d, 0.0)
+            if _st >= len(_ts):
+                _y.append(_fin)
+                continue
+            _v2, _f, _i = _apply(_d, level=_nt * pct / 100.0, start=_st)
+            if not _f:
+                _y.append(_fin)
+                continue
+            _pv = _OPEN.get(_d)
+            if a.exit_next_open and _pv is not None and _i + 1 < len(_pv):
+                _v2 = float(_pv[_i + 1])
+            _y.append(_v2 - _nt * a.slip_pct)
+        _bt.append(sum(_y) - sum(base["yen"]))
+        _bc.append(_cvar(_y) - base["cv"])
+    _bt.sort()
+    _bc.sort()
+    _rt = sum(real["yen"]) - sum(base["yen"])
+    _rc = _cvar(real["yen"]) - base["cv"]
+    _pt = sum(1 for v in _bt if v >= _rt) / len(_bt)
+    _pc = sum(1 for v in _bc if v >= _rc) / len(_bc)
+    _mk = ("  ★帯の外(上位5%)" if _pt <= 0.05
+           else ("  ⚠帯の中 = 日数を減らしただけ" if _pt >= 0.20 else ""))
+    print(f"  {'':<22}└ 同日数ランダム{a.gate_nulls}本 … 合計差 実測"
+          f"{_rt:>+11,.0f} / 帯 {_bt[0]:>+10,.0f}〜{_bt[-1]:>+10,.0f}"
+          f" (上位{_pt * 100:.0f}%){_mk}")
+    print(f"  {'':<22}{'':<2}  CVaR差 実測{_rc:>+11,.0f} / 帯 "
+          f"{_bc[0]:>+10,.0f}〜{_bc[-1]:>+10,.0f} (上位{_pc * 100:.0f}%)")
+
+
 def _row2(lbl: str, r: dict, days: list, base: dict, boot: bool = False) -> None:
     """1行。主判定は _PASS。÷σ は**副判定**として併記するだけ。"""
     _tot = sum(r["yen"])
@@ -704,7 +775,9 @@ print(f"  予算 {a.budget:,.0f}万円 / 投入率 ≥ {a.gate_pct:.0f}% の日 
       f"**{_nfull}日 / 全{len(_ks)}日 ({_nfull / max(len(_ks), 1) * 100:.0f}%)**")
 print(f"  武装は **累積建玉がその水準に達した時点から**"
       f"(⑤は予算の{a.gate_pct:.0f}%、②④はその日の建玉が全部入った時点)")
-print(f"  決済は **{'次のバーの始値' if a.exit_next_open else '発火バーの終値'}**")
+print(f"  決済は **{'次のバーの始値' if a.exit_next_open else '発火バーの終値'}**"
+      + (f" / 武装は **{a.arm_not_before} 以降**に限定" if a.arm_not_before
+         else " / 武装の時刻制限なし"))
 print(f"  ★ 累積建玉は **5分足の最初のバー = その銘柄が寄った時刻** から"
       f"組み立てています(picks.csv に約定時刻が無いための代理)")
 print(f"  ★ 主指標は **CVaR5%(円)** = 下位5%の日の平均。最悪1日ではなく裾の平均")
@@ -767,8 +840,10 @@ for _wn, _wd in (("TRAIN", _tr), ("TEST", _te)):
         for _gn in _GN:
             _lbl = (f"⑥ {_gn:>2}件以上 −投入の{_p:.1f}%" if _gn > 0
                     else f"⑥ 全日(基準) −投入の{_p:.1f}%")
-            _row2(_lbl, _arm(_wd, 0.0, 0.0, True, pct=_p, gate_n=_gn),
-                  _wd, _base, boot=(_gn > 0))
+            _r = _arm(_wd, 0.0, 0.0, True, pct=_p, gate_n=_gn)
+            _row2(_lbl, _r, _wd, _base, boot=(_gn > 0))
+            if _gn > 0 and a.gate_nulls > 0:
+                _gate_band(_wd, _p, _r, _base)
 
 print(f"\n  ★ 『等価f』= その腕と同じ CVaR にするために予算を何倍にするか。")
 print(f"     『等価月平均』= そのとき残る月平均利益(= 現行 × f)。")
