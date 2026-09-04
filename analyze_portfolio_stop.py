@@ -67,6 +67,10 @@ ap.add_argument("--trail", default="",
                      "例 30000,50000,80000。空で無効")
 ap.add_argument("--split-date", default="",
                 help="TRAIN/TEST の境界(yyyy-mm-dd)。空なら5分足のある期間の真ん中")
+ap.add_argument("--exit-times", default="14:00,15:00,15:10,15:15,15:20,15:25",
+                help="★ **引け成行より早く畳んだらどうか** を掃く時刻。"
+                     "§18.55 の決済時刻スイープは 5分→11:05→引け しか見ておらず、"
+                     "**引け直前の10〜30分は一度も測っていない**")
 ap.add_argument("--slip-pct", type=float, default=0.0005,
                 help="発火時の決済スリッページ(0.0005=5bp)。全銘柄を成行で畳むので"
                      "個別損切りより不利に見積もる")
@@ -375,6 +379,141 @@ for _l in _LV:
           f"{_win / _f * 100:>7.0f}%")
 print(f"  ⚠ 『正解率』= 降りたほうが良かった日の割合。50%前後なら**コイン投げ**")
 print(f"  ⚠ 全期間(TRAIN+TEST)の集計。採否は上の TRAIN/TEST 表で判断すること")
+
+# ══════════════════════════════════════════════════════════════════════
+# ★★ 決済時刻 — 引け成行より早く畳んだらどうか (2026-09-04 ユーザー発案)
+# ══════════════════════════════════════════════════════════════════════
+#   「明らかに、引け成行より 15:20 とかに売る方が多く利益が出てる気がする」
+#
+#   ⛔ これは損切りではない。**発火条件が無く、毎日必ず その時刻に畳む**。
+#     上の損切り表と混ぜないこと(あちらは条件付き)。
+#
+#   ⚠ 非対称なコストがある。**引け成行(MOC)は板寄せなのでスプレッドを払わない**
+#     (約定値 = その日の終値 = バックテストの基準そのもの)。早く畳むのは
+#     ザラ場の成行なので **必ずスプレッドを払う**。--slip-pct を掛けるのは
+#     早い側だけ。ここを揃えると早い側が不当に有利に出る。
+_ET = [t.strip() for t in a.exit_times.split(",") if t.strip()]
+
+
+def _tod(x):
+    return pd.Timestamp(x).time()
+
+
+# ★ 5分足の時刻ラベルが『バーの開始』か『終了』かを**実データで**確かめる。
+#   開始ラベルなら 15:20 のバーの終値は **15:25 の価格**。ここを取り違えると
+#   「15:20 に売る」が実際には別の時刻になる(§18.32 の教訓)。
+_lastlab: dict = {}
+for _d in _ks:
+    _k = _days[_d][0][-1].strftime("%H:%M")
+    _lastlab[_k] = _lastlab.get(_k, 0) + 1
+_lab = sorted(_lastlab.items(), key=lambda x: -x[1])
+print(f"\n{'=' * 78}")
+print(f"■ ★★ 決済時刻 — 引け成行より早く畳んだらどうか")
+print(f"{'=' * 78}")
+print(f"  5分足の最終バーのラベル: "
+      + " / ".join(f"{k} ({v}日)" for k, v in _lab[:3]))
+print(f"    → 最終バーの終値 = その日の終値。**このラベル以降を指定しても"
+      f"引けと同じ**になります")
+
+
+def _exit_stat(days: list, hhmm: str = ""):
+    """毎日 hhmm に全部畳んだときの集計。hhmm が空なら引け(=現行)。"""
+    _tot, _same, _late = 0.0, 0, 0
+    _daily, _labs = [], {}
+    for _d in days:
+        _ts, _path, _fin, _n = _days[_d]
+        if not hhmm:
+            _v = _fin
+        else:
+            _t = _tod(f"2000-01-01 {hhmm}")
+            _idx = [k for k, x in enumerate(_ts) if x.time() <= _t]
+            if not _idx:
+                _late += 1                      # その時刻より前のバーが無い
+                _v = _fin
+            else:
+                _j = _idx[-1]
+                _labs[_ts[_j].strftime("%H:%M")] = \
+                    _labs.get(_ts[_j].strftime("%H:%M"), 0) + 1
+                if _j == len(_ts) - 1:
+                    _same += 1                  # 実質 引けと同じ
+                _v = float(_path[_j]) \
+                    - float(_NOTIONAL.get(_d, 0.0)) * a.slip_pct
+        _tot += _v
+        _daily.append((_d, _v))
+    _m: dict = {}
+    for _d, _v in _daily:
+        _m[_d[:7]] = _m.get(_d[:7], 0.0) + _v
+    _mv = np.array([_m[k] for k in sorted(_m)], float)
+    _mu = float(_mv.mean()) if len(_mv) else 0.0
+    _sd = float(_mv.std(ddof=1)) if len(_mv) > 1 else 0.0
+    _bar = max(_labs.items(), key=lambda x: x[1])[0] if _labs else "—"
+    return {"tot": _tot, "mu": _mu, "sd": _sd,
+            "ratio": (_mu / _sd if _sd else 0.0),
+            "pos": int((_mv > 0).sum()), "nm": len(_mv),
+            "worst": float(_mv.min()) if len(_mv) else 0.0,
+            "same": _same, "late": _late, "bar": _bar, "n": len(days)}
+
+
+def _etable(days: list, label: str) -> tuple:
+    print(f"\n  ── {label} ({len(days)}営業日) ──")
+    _b = _exit_stat(days)
+    print(f"    {'決済':<10}{'使うバー':>10}{'合計':>13}{'月平均':>11}"
+          f"{'月次σ':>11}{'÷σ':>7}{'最悪月':>12}{'引けとの差':>13}")
+    print(f"    {'引け ★現行':<10}{_b['bar']:>10}{_b['tot']:>+13,.0f}"
+          f"{_b['mu']:>+11,.0f}{_b['sd']:>11,.0f}{_b['ratio']:>7.2f}"
+          f"{_b['worst']:>+12,.0f}{'—':>13}")
+    _r = {}
+    for _t in _ET:
+        _s = _exit_stat(days, _t)
+        _r[_t] = _s
+        _note = ""
+        if _s["same"] >= len(days) * 0.5:
+            _note = f"  ⛔実質引け({_s['same']}日)"
+        elif _s["ratio"] - _b["ratio"] >= 0.10:
+            _note = "  ✅"
+        print(f"    {_t:<10}{_s['bar']:>10}{_s['tot']:>+13,.0f}"
+              f"{_s['mu']:>+11,.0f}{_s['sd']:>11,.0f}{_s['ratio']:>7.2f}"
+              f"{_s['worst']:>+12,.0f}{_s['tot'] - _b['tot']:>+13,.0f}{_note}")
+    return _b, _r
+
+
+_btr_e, _etr = _etable(_tr, f"TRAIN {_tr[0]}〜{_tr[-1]}")
+_bte_e, _ete = _etable(_te, f"TEST  {_te[0]}〜{_te[-1]}")
+
+print(f"\n  ⚠ **早い決済にだけ スリッページ {a.slip_pct * 100:.2f}% を掛けています。**")
+print(f"     引け成行(MOC)は板寄せの単一価格なのでスプレッドを払いません。")
+print(f"     揃えると早い側が不当に有利に出ます(実運用と食い違う)")
+
+
+def _beat(t: str, key: str) -> bool:
+    """TRAIN/TEST の両方で引けを上回ったか。実質引けの行は対象外。"""
+    if not (_etr.get(t) and _ete.get(t)):
+        return False
+    if _etr[t]["same"] >= len(_tr) * 0.5 or _ete[t]["same"] >= len(_te) * 0.5:
+        return False
+    return (_etr[t][key] > _btr_e[key]) and (_ete[t][key] > _bte_e[key])
+
+
+# ⛔ 採否は **月平均÷σ**。合計だけで見ると「降りて利益を増やした」と
+#   「ばらつきを増やした」を区別できない。§18.38 で walk-forward が合計で
+#   選んで σ 最悪の設定を掴んだのと同じ罠。両方出して食い違いを可視化する。
+_ag_r = [t for t in _ET if _beat(t, "ratio")]
+_ag_t = [t for t in _ET if _beat(t, "tot")]
+print(f"\n  ★ TRAIN と TEST の**両方**で引けを上回った時刻")
+print(f"      月平均÷σ（**これが採否の基準**）: "
+      + (", ".join(_ag_r) if _ag_r else "**なし**"))
+print(f"      合計（参考。これだけで選ばない）: "
+      + (", ".join(_ag_t) if _ag_t else "なし"))
+if _ag_r:
+    print(f"  ★ §18.55 の『早く降りるほど悪い』と逆です。**引け直前だけ別**"
+          f"かもしれないので、次は 5分刻みで詰める価値があります")
+elif _ag_t:
+    print(f"  ⚠ **合計では上回るが 月平均÷σ では上回りません。**"
+          f"利益と一緒にばらつきも増えています。採用しないこと")
+else:
+    print(f"  ⛔ **どちらの基準でも上回った時刻はありません。**")
+    print(f"     §18.55(5分 +10.3bp → 11:05 +10.5bp → 引け +17.8bp)と同じ向き。"
+          f"引け成行のままでよい")
 
 print(f"\n  {'=' * 68}")
 print(f"  ★ 判定(§18.36 のルール):")
