@@ -669,6 +669,14 @@ print(f"  ★ 累積建玉は **5分足の最初のバー = その銘柄が寄�
       f"組み立てています(picks.csv に約定時刻が無いための代理)")
 print(f"  ★ 主指標は **CVaR5%(円)** = 下位5%の日の平均。最悪1日ではなく裾の平均")
 # ★ 経路で扱えた満額日の数を必ず出す。ここが激減していたら判定は成立しない
+# ⛔ picks.csv を作った予算と --budget が食い違うと投入率が壊れる。
+#   analyze_gap_edge の --budget-man と揃っていないと、満額日の判定が
+#   丸ごと無意味になる(200万で作った picks を 400万で読むと投入率が半分)。
+_over = sum(1 for d in _ks if _FULL.get(d, 0.0) > 105.0)
+if _over > len(_ks) * 0.05:
+    print(f"  ⛔⛔ **投入率が100%を超える日が {_over}/{len(_ks)}日 あります。**")
+    print(f"     picks.csv を作った analyze_gap_edge の --budget-man と "
+          f"--budget {a.budget:,.0f}万 が食い違っています。満額判定は無意味です")
 _ftr = sum(1 for d in _tr if _FULL.get(d, 0.0) >= a.gate_pct)
 _fte = sum(1 for d in _te if _FULL.get(d, 0.0) >= a.gate_pct)
 print(f"  ★ 満額日の内訳: TRAIN **{_ftr}日** / TEST **{_fte}日** "
