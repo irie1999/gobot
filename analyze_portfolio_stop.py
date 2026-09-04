@@ -84,6 +84,14 @@ ap.add_argument("--arm-not-before", default="",
 ap.add_argument("--gate-nulls", type=int, default=200,
                 help="⑥ の帰無較正の本数。**同じ日数をランダムに選んで**"
                      "同じ損切りを当て、『件数条件そのもの』が特別かを見る")
+ap.add_argument("--worst-n", type=int, default=10,
+                help="★ 大負け日の形を見るときの件数の下限(既定10件以上)")
+ap.add_argument("--worst-k", type=int, default=20,
+                help="★ その中で損益が下位いくつの日を見るか(既定20日)")
+ap.add_argument("--worst-times",
+                default="09:00,09:05,09:10,09:15,09:30,10:00,10:30,11:00,"
+                        "11:30,12:30,13:00,14:00,14:30,15:00,15:20",
+                help="★ 大負け日の断面を出す時刻")
 ap.add_argument("--gate-n", default="0,4,6,8,10,12",
                 help="★★ **N件以上 建てた日だけ**損切りを有効化する(件数の閾値)。"
                      "0 は全日(比較の基準)。投入率(--gate-pct)と違い、"
@@ -902,6 +910,100 @@ print(f"     ③が効くのが『満額の日だから』なのか『投入額�
 print(f"     ③と④を並べないと分離できません")
 print(f"  ⚠ 予算縮小は比例縮小の近似です(実際は限界の銘柄が落ちる)。目安です")
 print(f"  ⚠ ②③④ が TRAIN と TEST で同じ水準を指さなければ、固定できません(§18.36)")
+
+# ══════════════════════════════════════════════════════════════════════
+# ★★ 大負けした日は、いつ畳めば損が小さかったか (2026-09-04 ユーザー発案)
+# ══════════════════════════════════════════════════════════════════════
+#   ⛔⛔ **これは事後選択の診断であって、ルールではない。**
+#     「その日が大負けになる」ことは寄りには分からない。ここで分かるのは
+#     **どういう形で負けたか**だけ。早い時間に損が決まっているなら時刻ルールに
+#     意味があり、遅ければ何をしても無理、という判断材料になる。
+#   ★ 同じ表を「10件以上の全日」でも出す。**形が同じなら見分けられない**
+#     ので、大負け日だけ早く畳むルールは作れない。
+
+_WT = [t.strip() for t in a.worst_times.split(",") if t.strip()]
+
+
+def _at(day: str, hhmm: str) -> float:
+    """その日の hhmm 時点(以前の最後のバー)の含み損益。無ければ最終値。"""
+    _idx, _path, _fin, _n, _cum = _days[day]
+    _h, _m = (int(x) for x in hhmm.split(":"))
+    _w = [k for k, t in enumerate(_idx) if (t.hour, t.minute) <= (_h, _m)]
+    return float(_path[_w[-1]]) if _w else _fin
+
+
+def _exit_all_at(day: str, hhmm: str) -> float:
+    """その時刻に全部畳んだときの損益(発火時点の建玉に slip)。"""
+    _idx, _path, _fin, _n, _cum = _days[day]
+    _h, _m = (int(x) for x in hhmm.split(":"))
+    _w = [k for k, t in enumerate(_idx) if (t.hour, t.minute) <= (_h, _m)]
+    if not _w:
+        return _fin
+    _j = _w[-1]
+    if _j >= len(_idx) - 1:
+        return _fin                     # 最終バー = 引けと同じ
+    _pv = _OPEN.get(day)
+    _v = float(_pv[_j + 1]) if (a.exit_next_open and _pv is not None
+                                and _j + 1 < len(_pv)) else float(_path[_j])
+    return _v - (float(_cum[_j]) if _j < len(_cum) else
+                 float(_NOTIONAL.get(day, 0.0))) * a.slip_pct
+
+
+def _worst_table(days: list, label: str) -> dict:
+    if not days:
+        print(f"\n  ── {label} … 対象なし")
+        return {}
+    _fin = sum(_days[d][2] for d in days)
+    print(f"\n  ── {label}（{len(days)}日 / 引けまで持った合計 "
+          f"{_fin:+,.0f}円 / 平均 {_fin / len(days):+,.0f}円/日）──")
+    print(f"    {'時刻':<8}{'平均 含み損益':>14}{'中央値':>12}{'最悪':>12}"
+          f"{'この時刻で全部畳む':>19}{'引けとの差':>13}")
+    _best, _bt = None, None
+    _out = {}
+    for _t in _WT:
+        _v = [_at(d, _t) for d in days]
+        _e = sum(_exit_all_at(d, _t) for d in days)
+        _out[_t] = _e
+        if _best is None or _e > _best:
+            _best, _bt = _e, _t
+        print(f"    {_t:<8}{np.mean(_v):>+14,.0f}{np.median(_v):>+12,.0f}"
+              f"{min(_v):>+12,.0f}{_e:>+19,.0f}{_e - _fin:>+13,.0f}")
+    print(f"    {'引け':<8}{_fin / len(days):>+14,.0f}{'—':>12}{'—':>12}"
+          f"{_fin:>+19,.0f}{0:>+13,.0f}")
+    if _best is not None and _best > _fin:
+        print(f"    ★ 最良は **{_bt}** … {_best:+,.0f}円 "
+              f"(引けより **{_best - _fin:+,.0f}円** 改善)")
+    else:
+        print(f"    ⛔ **引けを上回る時刻はありません**(いつ畳んでも同じか悪い)")
+    return _out
+
+
+print(f"\n{'=' * 96}")
+print(f"■ ★★ 大負けした日は、いつ畳めば損が小さかったか")
+print(f"{'=' * 96}")
+print(f"  ⛔⛔ **これは事後選択の診断です。ルールにはできません。**")
+print(f"     『その日が大負けになる』ことは寄りには分かりません。")
+print(f"     分かるのは **どういう形で負けたか** だけです")
+
+_c10 = [d for d in _ks if int(_NPOS.get(d, 0)) >= a.worst_n]
+_c10.sort(key=lambda d: _days[d][2])
+_wk = _c10[:a.worst_k]
+_o1 = _worst_table(_wk, f"★ {a.worst_n}件以上 かつ 損益が下位{a.worst_k}日")
+_o2 = _worst_table(_c10, f"参考: {a.worst_n}件以上の**全日**")
+
+if _o1 and _o2:
+    _f1 = sum(_days[d][2] for d in _wk)
+    _f2 = sum(_days[d][2] for d in _c10)
+    _b1 = max(_o1, key=lambda k: _o1[k])
+    _b2 = max(_o2, key=lambda k: _o2[k])
+    print(f"\n  ★ 最良の時刻: 大負け日 **{_b1}** / 全日 **{_b2}**")
+    if _b1 == _b2:
+        print(f"     → **同じ時刻**。大負け日に固有の形ではありません")
+    else:
+        print(f"     → 違う時刻。ただし**寄りには見分けられない**ので、")
+        print(f"       大負け日だけ {_b1} に畳むルールは作れません")
+    print(f"  ⚠ 全日で {_b2} に畳むと {_o2[_b2] - _f2:+,.0f}円。"
+          f"これが**実際に選べる唯一の形**です")
 
 # ══════════════════════════════════════════════════════════════════════
 # ★★ 決済時刻 — 引け成行より早く畳んだらどうか (2026-09-04 ユーザー発案)
