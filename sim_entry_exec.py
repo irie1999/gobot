@@ -52,54 +52,18 @@ a = ap.parse_args()
 _BPS = [float(x) for x in a.bps.split(",") if x.strip()]
 
 
+# ⛔ 板の読み方は board_fill に1本化してある。ここにコピーを作らないこと
+#   (2本に分かれると必ず片方だけ直って食い違う)。
+from board_fill import (code4 as _code4, f as _f, i as _i,  # noqa: E402
+                        sell_fill as _sell_fill, true as _true)
+
+
 def _rows(path: str) -> list:
     try:
         with open(path, newline="", encoding="utf-8-sig") as f:
             return list(_csv.DictReader(f))
     except Exception:
         return []
-
-
-def _f(v) -> float:
-    try:
-        return float(str(v).replace(",", "").strip())
-    except Exception:
-        return 0.0
-
-
-def _i(v) -> int:
-    return int(_f(v))
-
-
-def _code4(s: str) -> str:
-    return re.sub(r"\.T$", "", str(s).strip())
-
-
-def _true(v) -> bool:
-    return str(v).strip().lower() in ("1", "true", "yes")
-
-
-def _sell_fill(row: dict, limit_px: float, qty: int) -> tuple:
-    """売り注文が板でいくらになるか。
-
-    売り指値は **指値以上でしか約定しない**ので、Buy1 から順に
-    `price >= limit_px` の段だけ食える。limit_px=0 なら成行。
-
-    返り値: (約定単価, 約定数量, 使った段数)。数量に届かなければ単価は None。
-    """
-    got, cost, lv = 0, 0.0, 0
-    for i in range(1, 11):
-        p = _f(row.get(f"buy{i}_price"))
-        q = _i(row.get(f"buy{i}_qty"))
-        if p <= 0 or q <= 0 or p < limit_px:
-            break
-        take = min(qty - got, q)
-        cost += p * take
-        got += take
-        lv = i
-        if got >= qty:
-            break
-    return ((cost / got if got >= qty else None), got, lv)
 
 
 # ── 日ごとに n_quotes を読む ───────────────────────────────────────
