@@ -67,6 +67,19 @@ ap.add_argument("--trail", default="",
                      "例 30000,50000,80000。空で無効")
 ap.add_argument("--split-date", default="",
                 help="TRAIN/TEST の境界(yyyy-mm-dd)。空なら5分足のある期間の真ん中")
+ap.add_argument("--budget", type=float, default=400.0,
+                help="★ 予算(万円)。投入率(= その日の建玉 ÷ 予算)の分母。"
+                     "picks.csv を作った analyze_gap_edge の --budget-man と"
+                     "**必ず揃えること**")
+ap.add_argument("--gate-pct", type=float, default=90.0,
+                help="★★ **満額投資日だけ損切りを有効化**する閾値(投入率%%)。"
+                     "無条件の損切りは『悪い日は戻す』で失敗した(§18.62)が、"
+                     "満額の日だけなら保険料を払う日を絞れる")
+ap.add_argument("--gate-from", default="09:10",
+                help="★ 損切りを武装する時刻。⛔ picks.csv に約定時刻が無く"
+                     "(日足は全部 寄り約定)、『何時に満額になったか』を"
+                     "データから出せない。**建玉が揃う前に守られていたことに"
+                     "しない**ため、既定でこの時刻まで武装しない")
 ap.add_argument("--exit-times", default="14:00,15:00,15:10,15:15,15:20,15:25",
                 help="★ **引け成行より早く畳んだらどうか** を掃く時刻。"
                      "§18.55 の決済時刻スイープは 5分→11:05→引け しか見ておらず、"
@@ -246,7 +259,22 @@ if min(len(_tr), len(_te)) < a.min_days:
     sys.exit(f"[error] どちらかの窓が {a.min_days}日 未満です。--split-date で調整を")
 
 
-def _apply(day: str, level: float = 0.0, trail: float = 0.0):
+_BUD = a.budget * 1e4
+# 投入率 = その日の建玉 ÷ 予算。satisfied なら「満額投資日」
+_FULL = {d: (_NOTIONAL.get(d, 0.0) / _BUD * 100.0) for d in _days}
+
+
+def _armed_idx(day: str) -> int:
+    """損切りを武装できる最初のバー。--gate-from より前は守られていない。"""
+    _ts = _days[day][0]
+    _h, _m = (int(x) for x in str(a.gate_from).split(":"))
+    for _i, _t in enumerate(_ts):
+        if (_t.hour, _t.minute) >= (_h, _m):
+            return _i
+    return len(_ts)          # その時刻より後のバーが無い = 武装しない
+
+
+def _apply(day: str, level: float = 0.0, trail: float = 0.0, start: int = 0):
     """その日にルールを当てたときの損益と、発火したかを返す。
 
     level … 含み損が -level を割ったら全決済
@@ -259,12 +287,16 @@ def _apply(day: str, level: float = 0.0, trail: float = 0.0):
         return _fin, False, -1
     _hit = -1
     if level > 0:
+        # ⛔ start より前の含み損では発動させない(まだ建玉が揃っていない)
         _w = np.where(_path <= -level)[0]
+        _w = _w[_w >= start]
         if len(_w):
             _hit = int(_w[0])
     if trail > 0:
+        # ピークは最初から積む(武装前の含み益は実在する)が、発動は start 以降
         _peak = np.maximum.accumulate(_path)
         _w = np.where(_path <= _peak - trail)[0]
+        _w = _w[_w >= start]
         if len(_w):
             _hit = int(_w[0]) if _hit < 0 else min(_hit, int(_w[0]))
     if _hit < 0:
@@ -379,6 +411,123 @@ for _l in _LV:
           f"{_win / _f * 100:>7.0f}%")
 print(f"  ⚠ 『正解率』= 降りたほうが良かった日の割合。50%前後なら**コイン投げ**")
 print(f"  ⚠ 全期間(TRAIN+TEST)の集計。採否は上の TRAIN/TEST 表で判断すること")
+
+# ══════════════════════════════════════════════════════════════════════
+# ★★ 満額投資日だけの損切り (2026-09-04)
+# ══════════════════════════════════════════════════════════════════════
+#   ★ 位置づけは「悪い日を見抜く」ではなく **満額投資日の保険料を限定する**。
+#     無条件の損切りは『悪い日は戻す』ため失敗した(§18.62)。しかし
+#     n_days.csv の実測では、円の大負け日の 87.5% が 10件以上の日で、
+#     しかも 件数と投入額の相関 +0.935 / 件数と投入額比損益の相関 +0.008。
+#     = 件数が多い日が危険なのではなく **投入額が大きいから円損失も大きい**。
+#     なら守る日を「満額の日」に絞れば保険料の総額が下がるはず、という筋。
+#
+#   ⛔⛔ **先読みの排除がこの検証の要**。「最終的に満額になった日だけ、朝から
+#     損切りがあったことにする」は先読み。picks.csv には約定時刻が無く
+#     (日足バックテストは全部 寄り約定)、『何時に満額になったか』をデータから
+#     出せないので、代わりに **--gate-from(既定09:10)まで武装しない**。
+#     実運用の 09:09 頃まで遅寄りが続く実測に合わせた保守側の扱い。
+#
+#   ⚠ 実運用は予算200万なので満額(10件級)にはほぼ届かない。件数ではなく
+#     **投入率**で条件を書くのは、予算を変えても意味が変わらないため。
+
+
+def _cvar(vals: list, q: float = 0.05) -> float:
+    """下位 q の平均(CVaR)。**主指標**。最悪1日ではなく裾の平均を見る。"""
+    if not vals:
+        return 0.0
+    _v = sorted(vals)
+    _k = max(1, int(len(_v) * q))
+    return float(np.mean(_v[:_k]))
+
+
+def _arm(days: list, level: float, gate: float, use_start: bool):
+    """1本の腕を評価する。gate>0 なら投入率がそれ以上の日だけ損切りを効かせる。
+
+    返り値: 日次損益リスト, 日次の投入額比bp, 発火数, 守った日数
+    """
+    _yen, _bp, _fire, _cov = [], [], 0, 0
+    for _d in days:
+        _ts, _path, _fin, _n = _days[_d]
+        _nt = float(_NOTIONAL.get(_d, 0.0))
+        _on = (level > 0) and (gate <= 0 or _FULL.get(_d, 0.0) >= gate)
+        _v = _fin
+        if _on:
+            _cov += 1
+            _st = _armed_idx(_d) if use_start else 0
+            _v2, _f, _i = _apply(_d, level=level, start=_st)
+            if _f:
+                _v = _v2 - _nt * a.slip_pct
+                _fire += 1
+        _yen.append(_v)
+        _bp.append(_v / _nt * 1e4 if _nt > 0 else 0.0)
+    return _yen, _bp, _fire, _cov
+
+
+def _row(lbl: str, yen: list, bp: list, fire: int, cov: int,
+         base_cv: float, base_mu: float, nmon: int) -> None:
+    _tot = sum(yen)
+    _mu = _tot / max(nmon, 1)
+    _cv, _cb = _cvar(yen), _cvar(bp)
+    # ★ 予算縮小との等価比較: CVaR は予算に比例するので、同じ CVaR に
+    #   するには予算を f 倍すればよい。そのとき月平均は f 倍になる。
+    #   **それが腕の月平均より大きいなら、条件付き損切りは不要**。
+    _f = (_cv / base_cv) if base_cv < 0 else 1.0
+    _eq = base_mu * _f
+    _mk = ""
+    if fire <= 0:
+        _mk = "  —(発火なし)"
+    elif _f >= 1.0:
+        # ⛔ CVaR が改善していない腕に「等価予算」は無意味。
+        #   守るために払ったのに裾が悪化している = それ自体が却下理由。
+        _mk = "  ⛔CVaR が改善していない"
+    elif _mu > _eq:
+        _mk = "  ✅"
+    else:
+        _mk = "  ⛔予算縮小の方が良い"
+    _et = "—" if _f >= 1.0 else f"{_eq:+,.0f}"
+    _ft = "—" if _f >= 1.0 else f"{_f:.2f}"
+    print(f"  {lbl:<20}{_tot:>+13,.0f}{_mu:>+11,.0f}{_cv:>+12,.0f}"
+          f"{_cb:>+10.0f}{fire:>5}{cov:>6}{_ft:>7}{_et:>11}{_mk}")
+
+
+print(f"\n{'=' * 96}")
+print(f"■ ★★ 満額投資日だけの損切り — 投入率 ≥ {a.gate_pct:.0f}% の日に絞る")
+print(f"{'=' * 96}")
+_nfull = sum(1 for d in _ks if _FULL.get(d, 0.0) >= a.gate_pct)
+print(f"  予算 {a.budget:,.0f}万円 / 投入率 ≥ {a.gate_pct:.0f}% の日 "
+      f"**{_nfull}日 / 全{len(_ks)}日 ({_nfull / max(len(_ks), 1) * 100:.0f}%)**")
+print(f"  武装は **{a.gate_from} 以降**(それ以前の含み損では発動させない)")
+print(f"  ⛔ picks.csv に約定時刻が無いので『何時に満額になったか』は"
+      f"データから出せません。時刻での代用です")
+print(f"  ★ 主指標は **CVaR5%(円)** = 下位5%の日の平均。最悪1日ではなく裾の平均")
+
+for _wn, _wd in (("TRAIN", _tr), ("TEST", _te)):
+    print(f"\n  ── {_wn} {_wd[0]}〜{_wd[-1]} ({len(_wd)}営業日) ──")
+    _nm = len({d[:7] for d in _wd})
+    _by, _bb, _, _ = _arm(_wd, 0.0, 0.0, False)
+    _bcv, _bmu = _cvar(_by), sum(_by) / max(_nm, 1)
+    print(f"  {'腕':<20}{'合計':>13}{'月平均':>11}{'CVaR5%円':>12}"
+          f"{'CVaRbp':>10}{'発火':>5}{'対象日':>6}{'等価f':>7}{'等価月平均':>11}")
+    print("  " + "-" * 92)
+    print(f"  {'① 現行(損切りなし)':<20}{sum(_by):>+13,.0f}{_bmu:>+11,.0f}"
+          f"{_bcv:>+12,.0f}{_cvar(_bb):>+10.0f}{'—':>5}{'—':>6}{1.0:>7.2f}"
+          f"{_bmu:>+11,.0f}")
+    for _l in _LV:
+        _y, _b, _f, _c = _arm(_wd, _l, 0.0, True)
+        _row(f"② 全日 −{_l:,.0f}円", _y, _b, _f, _c, _bcv, _bmu, _nm)
+    for _l in _LV:
+        _y, _b, _f, _c = _arm(_wd, _l, a.gate_pct, True)
+        _row(f"③ 満額のみ −{_l:,.0f}円", _y, _b, _f, _c, _bcv, _bmu, _nm)
+
+print(f"\n  ★ 『等価f』= その腕と同じ CVaR にするために予算を何倍にするか。")
+print(f"     『等価月平均』= そのとき残る月平均利益(= 現行 × f)。")
+print(f"  ⛔ **等価月平均 を上回らない腕は採用しない**。"
+      f"同じリスク低減が『予算を減らすだけ』で得られるなら、")
+print(f"     条件付き損切りという複雑さを足す理由がありません")
+print(f"  ⚠ 予算縮小は比例縮小の近似です(実際は限界の銘柄が落ちる)。"
+      f"目安として使ってください")
+print(f"  ⚠ ②③ が TRAIN と TEST で同じ水準を指さなければ、固定できません(§18.36)")
 
 # ══════════════════════════════════════════════════════════════════════
 # ★★ 決済時刻 — 引け成行より早く畳んだらどうか (2026-09-04 ユーザー発案)
