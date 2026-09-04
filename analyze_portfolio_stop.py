@@ -115,6 +115,10 @@ ap.add_argument("--exit-times",
                 help="★ **引け成行より早く畳んだらどうか** を掃く時刻。"
                      "§18.55 の決済時刻スイープは 5分→11:05→引け しか見ておらず、"
                      "**引け直前の10〜30分は一度も測っていない**")
+ap.add_argument("--exit-slips", default="0.0005,0.0010,0.0015,0.0025,0.0034",
+                help="★★ 決済スリッページの感度。早く畳む案の ÷σ 改善は"
+                     "**この仮定に全部乗っている**。既定の上端 0.34%% は "
+                     "N のエントリー実測(-34bp)。空文字で無効")
 ap.add_argument("--slip-pct", type=float, default=0.0005,
                 help="発火時の決済スリッページ(0.0005=5bp)。全銘柄を成行で畳むので"
                      "個別損切りより不利に見積もる")
@@ -1052,6 +1056,9 @@ else:
           f"{'選んだ日 T時点':>15}{'→ 引け':>12}{'★ T→引け':>12}"
           f"{'畳んだ合計':>13}{'引けとの差':>12}")
     _neg = []
+    _EXV = {t: {d: _exit_all_at(d, t) for d in _c10} for t in _WT}
+    _CLV = {d: _days[d][2] for d in _c10}
+    _rng2 = np.random.default_rng(20260904)
     for _t in _WT:
         _v = {d: _at(d, _t) for d in _c10}
         _xs = np.array([_v[d] for d in _c10], dtype="float64")
@@ -1063,8 +1070,7 @@ else:
         _now = float(np.mean([_v[d] for d in _sel]))
         _cls = float(np.mean([_days[d][2] for d in _sel]))
         _dlt = _cls - _now                       # ★ ②見分けて得か
-        _tot = sum(_exit_all_at(d, _t) if d in _sel else _days[d][2]
-                   for d in _c10)
+        _tot = sum(_EXV[_t][d] if d in _sel else _CLV[d] for d in _c10)
         if _dlt < 0:
             _neg.append(_t)
         _mk = "*" if _hit > (_p0 + 2 * _sd) * 100 else " "
@@ -1084,21 +1090,41 @@ else:
         print(f"    ⛔ **T→引け が全時刻で正**。")
         print(f"       その時刻に下位20%だった日は、**放っておけば平均で戻す**。")
         print(f"       見分けられても降りてはいけない(§18.62 / §18.55 と同じ形)")
-    _bt2 = max(_WT, key=lambda t: sum(
-        _exit_all_at(d, t) if d in set(sorted(
-            _c10, key=lambda x: _at(x, t))[:_KK]) else _days[d][2]
-        for d in _c10))
-    _bv2 = sum(_exit_all_at(d, _bt2) if d in set(sorted(
-        _c10, key=lambda x: _at(x, _bt2))[:_KK]) else _days[d][2]
-        for d in _c10)
-    if _bv2 > _fin_all:
-        print(f"    ⚠ 最良は {_bt2} で {_bv2 - _fin_all:+,.0f}円。"
-              f"ただし **{_KK}日しか動かしていない**ので、")
-        print(f"       同じ日数をランダムに畳んだ帯の外に出ているかを"
-              f"必ず確認すること(§18.24)")
-    else:
-        print(f"    ⛔ **どの時刻で畳んでも引けに勝てません**"
-              f"(最良 {_bt2} でも {_bv2 - _fin_all:+,.0f}円)")
+    def _tot_at(t: str) -> float:
+        _s = set(sorted(_c10, key=lambda x: _at(x, t))[:_KK])
+        return sum(_EXV[t][d] if d in _s else _CLV[d] for d in _c10)
+
+    _bt2 = max(_WT, key=_tot_at)
+    _bv2 = _tot_at(_bt2)
+    # ★★ 同日数ランダム帯 (§18.24)。**{_KK}日を畳めば必ず何かは動く。**
+    #   ランダムに {_KK}日 選んで同じ時刻に畳んだ帯の外に出て初めて、
+    #   『T時点の含み損益で選んだこと』に意味がある
+    _band = []
+    _arr = list(_c10)
+    for _ in range(max(1, a.gate_nulls)):
+        _pick = set(_rng2.choice(len(_arr), size=_KK, replace=False).tolist())
+        _band.append(sum(_EXV[_bt2][_arr[k]] if k in _pick else _CLV[_arr[k]]
+                         for k in range(len(_arr))))
+    _band.sort()
+    _rank = sum(1 for x in _band if x >= _bv2) / len(_band) * 100.0
+    print(f"\n    最良は **{_bt2}** … {_bv2 - _fin_all:+,.0f}円")
+    print(f"    同日数ランダム{len(_band)}本 … 帯 "
+          f"{_band[0] - _fin_all:+,.0f}〜{_band[-1] - _fin_all:+,.0f} "
+          f"(上位{_rank:.0f}%)", end="")
+    print("  ★帯の外(上位5%)" if _rank <= 5 else
+          "  ⚠帯の中 = **日数を減らしただけ**。選び方に意味はありません")
+    if _bv2 <= _fin_all:
+        print(f"    ⛔ そもそも **どの時刻で畳んでも引けに勝てません**")
+    _sw = max(_WT, key=lambda t: abs(_tot_at(t) - _fin_all))
+    _adj = {t: _tot_at(t) - _fin_all for t in _WT}
+    _flip = [(_WT[k], _WT[k + 1]) for k in range(len(_WT) - 1)
+             if _adj[_WT[k]] * _adj[_WT[k + 1]] < 0]
+    if _flip:
+        _a1, _b1 = _flip[0]
+        print(f"    ⛔⛔ **隣り合う時刻で符号が反転しています** "
+              f"({_a1} {_adj[_a1]:+,.0f} → {_b1} {_adj[_b1]:+,.0f})。")
+        print(f"       {len(_flip)}箇所。時刻に構造があるならこうはなりません"
+              f" = **ノイズ**")
 
 # ══════════════════════════════════════════════════════════════════════
 # ★★ 決済時刻 — 引け成行より早く畳んだらどうか (2026-09-04 ユーザー発案)
@@ -1113,6 +1139,7 @@ else:
 #     ザラ場の成行なので **必ずスプレッドを払う**。--slip-pct を掛けるのは
 #     早い側だけ。ここを揃えると早い側が不当に有利に出る。
 _ET = [t.strip() for t in a.exit_times.split(",") if t.strip()]
+_ES = [float(s) for s in a.exit_slips.split(",") if s.strip()]
 
 
 def _tod(x):
@@ -1136,8 +1163,14 @@ print(f"    → 最終バーの終値 = その日の終値。**このラベル�
       f"引けと同じ**になります")
 
 
-def _exit_stat(days: list, hhmm: str = ""):
-    """毎日 hhmm に全部畳んだときの集計。hhmm が空なら引け(=現行)。"""
+def _exit_stat(days: list, hhmm: str = "", slip: float = -1.0):
+    """毎日 hhmm に全部畳んだときの集計。hhmm が空なら引け(=現行)。
+
+    `slip` は決済スリッページ(負なら --slip-pct)。**引けには掛けない**
+    (MOC は板寄せの単一価格なのでスプレッドを払わない)。
+    """
+    if slip < 0:
+        slip = a.slip_pct
     _tot, _same, _late = 0.0, 0, 0
     _daily, _labs = [], {}
     for _d in days:
@@ -1157,7 +1190,7 @@ def _exit_stat(days: list, hhmm: str = ""):
                 if _j == len(_ts) - 1:
                     _same += 1                  # 実質 引けと同じ
                 _v = float(_path[_j]) \
-                    - float(_NOTIONAL.get(_d, 0.0)) * a.slip_pct
+                    - float(_NOTIONAL.get(_d, 0.0)) * slip
         _tot += _v
         _daily.append((_d, _v))
     _m: dict = {}
@@ -1178,27 +1211,67 @@ def _etable(days: list, label: str) -> tuple:
     print(f"\n  ── {label} ({len(days)}営業日) ──")
     _b = _exit_stat(days)
     print(f"    {'決済':<10}{'使うバー':>10}{'合計':>13}{'月平均':>11}"
-          f"{'月次σ':>11}{'÷σ':>7}{'最悪月':>12}{'引けとの差':>13}")
+          f"{'月次σ':>11}{'÷σ':>7}{'等価f':>7}{'等価月平均':>12}"
+          f"{'最悪月':>12}{'引けとの差':>13}")
     print(f"    {'引け ★現行':<10}{_b['bar']:>10}{_b['tot']:>+13,.0f}"
           f"{_b['mu']:>+11,.0f}{_b['sd']:>11,.0f}{_b['ratio']:>7.2f}"
+          f"{1.0:>7.2f}{_b['mu']:>+12,.0f}"
           f"{_b['worst']:>+12,.0f}{'—':>13}")
     _r = {}
     for _t in _ET:
         _s = _exit_stat(days, _t)
         _r[_t] = _s
+        # ★ 等価予算縮小 — 予算を f 倍すれば月平均も σ も f 倍(近似)。
+        #   σ を揃える f のとき残る月平均を上回らなければ、
+        #   『早く畳む』は **予算を減らすのと同じ**でしかない
+        _f = (_s["sd"] / _b["sd"]) if _b["sd"] else 0.0
+        _eq = _b["mu"] * _f
         _note = ""
         if _s["same"] >= len(days) * 0.5:
             _note = f"  ⛔実質引け({_s['same']}日)"
-        elif _s["ratio"] - _b["ratio"] >= 0.10:
-            _note = "  ✅"
+        elif _s["ratio"] - _b["ratio"] < 0.10:
+            _note = ""
+        elif _s["mu"] <= _eq:
+            _note = "  ⛔予算縮小と同じ"
+        else:
+            _note = f"  ✅(等価比 {_s['mu'] - _eq:+,.0f})"
         print(f"    {_t:<10}{_s['bar']:>10}{_s['tot']:>+13,.0f}"
               f"{_s['mu']:>+11,.0f}{_s['sd']:>11,.0f}{_s['ratio']:>7.2f}"
+              f"{_f:>7.2f}{_eq:>+12,.0f}"
               f"{_s['worst']:>+12,.0f}{_s['tot'] - _b['tot']:>+13,.0f}{_note}")
     return _b, _r
 
 
+# ⛔⛔ ここが採否を決める。**早い決済の ÷σ 改善は slip の仮定に全部乗っている。**
+#   引け成行(MOC)は板寄せなのでスプレッドを払わないが、早い決済はザラ場の
+#   成行なので必ず払う。既定 0.05% は N のエントリー実測(-34bp = 0.34%)の
+#   **7分の1**でしかない。寄り15分後に全銘柄を成行で畳むコストが
+#   エントリーより安いと考える理由は無い。
+def _slip_table(days: list, label: str) -> None:
+    if not _ES:
+        return
+    _b = _exit_stat(days)
+    print(f"\n  ── ★★ 決済スリッページ感度 … {label} ──")
+    print(f"     引け(MOC)は板寄せなので **どの列でも一定**"
+          f"({_b['tot']:+,.0f}円 / ÷σ {_b['ratio']:.2f})")
+    print(f"    {'決済':<10}" + "".join(
+        f"{s * 100:>10.2f}%" for s in _ES))
+    for _t in _ET:
+        _cells = []
+        for _s in _ES:
+            _x = _exit_stat(days, _t, _s)
+            _mk = "*" if _x["ratio"] > _b["ratio"] + 0.10 else " "
+            _cells.append(f"{_x['tot']:>+10,.0f}{_mk}")
+        print(f"    {_t:<10}" + "".join(_cells))
+    print(f"    * = ÷σ が引けを 0.10 以上 上回った")
+    print(f"    ⛔ **符号が変わる列がある時刻は採用できません。**"
+          f"実測の決済滑りが出るまで保留すること")
+
+
 _btr_e, _etr = _etable(_tr, f"TRAIN {_tr[0]}〜{_tr[-1]}")
 _bte_e, _ete = _etable(_te, f"TEST  {_te[0]}〜{_te[-1]}")
+_slip_table(_tr, f"TRAIN {_tr[0]}〜{_tr[-1]}")
+_slip_table(_te, f"TEST  {_te[0]}〜{_te[-1]}")
 
 print(f"\n  ⚠ **早い決済にだけ スリッページ {a.slip_pct * 100:.2f}% を掛けています。**")
 print(f"     引け成行(MOC)は板寄せの単一価格なのでスプレッドを払いません。")
