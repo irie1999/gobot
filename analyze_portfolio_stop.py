@@ -50,6 +50,7 @@ r"""analyze_portfolio_stop.py — **ポートフォリオ全体**の損切りを
 from __future__ import annotations
 
 import argparse
+import random as _rnd
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -79,11 +80,14 @@ ap.add_argument("--gate-pct", type=float, default=90.0,
                 help="★★ **満額投資日だけ損切りを有効化**する閾値(投入率%%)。"
                      "無条件の損切りは『悪い日は戻す』で失敗した(§18.62)が、"
                      "満額の日だけなら保険料を払う日を絞れる")
-ap.add_argument("--gate-from", default="09:10",
-                help="★ 損切りを武装する時刻。⛔ picks.csv に約定時刻が無く"
-                     "(日足は全部 寄り約定)、『何時に満額になったか』を"
-                     "データから出せない。**建玉が揃う前に守られていたことに"
-                     "しない**ため、既定でこの時刻まで武装しない")
+ap.add_argument("--exit-next-open", action="store_true", default=True,
+                help="★ 発火の**次のバーの始値**で決済する(既定ON)。検知は"
+                     "5分足の終値なので、同じバーの終値で約定させると甘い")
+ap.add_argument("--exit-same-close", dest="exit_next_open",
+                action="store_false",
+                help="旧挙動(発火したバーの終値で決済)に戻す。差を見るとき用")
+ap.add_argument("--boot", type=int, default=1000,
+                help="CVaR差の月ブロック・ブートストラップの本数(既定1000)")
 ap.add_argument("--exit-times", default="14:00,15:00,15:10,15:15,15:20,15:25",
                 help="★ **引け成行より早く畳んだらどうか** を掃く時刻。"
                      "§18.55 の決済時刻スイープは 5分→11:05→引け しか見ておらず、"
@@ -166,7 +170,12 @@ def _paths_for_day(day: str, grp: pd.DataFrame):
     ⚠ 5分足が無い銘柄はその日から丸ごと除外する(部分的に混ぜると合計が歪む)。
     """
     _d0 = pd.Timestamp(day).date()
-    _series, _fin, _n = [], 0.0, 0
+    _series, _sero, _fin, _n = [], [], 0.0, 0
+    # ★ (銘柄が寄った時刻, その建玉)。**5分足の最初のバー = その銘柄の寄り**。
+    #   picks.csv に約定時刻は無いが、これが代理になる。累積建玉が予算の
+    #   gate_pct% を超えた時刻が「実建玉が満額に達した瞬間」。
+    #   ⛔ 「最終的に満額だった日は朝から守られていた」ことにしない。
+    _ent: list = []
     for _r in grp.itertuples():
         _b = _bars.get(str(_r.symbol), {})
         _df = _b.get(_d0)
@@ -200,6 +209,13 @@ def _paths_for_day(day: str, grp: pd.DataFrame):
         _sgn = 1.0 if int(_r.side) > 0 else -1.0
         _pl = (float(_r.entry_p) - _px) * _sgn * int(_r.qty)
         _series.append(pd.Series(_pl, index=_ts))
+        # ★ **次のバーの始値**で決済したときの含み損益も作る。
+        #   検知は5分足の終値、約定はその後 = 同じバーの終値だと甘い。
+        #   どちらが実運用に近いかは板次第なので、両方出して差を見る。
+        _po = _df["open"].to_numpy(dtype="float64")
+        _sero.append(pd.Series((float(_r.entry_p) - _po) * _sgn * int(_r.qty),
+                               index=_ts))
+        _ent.append((_ts[0], float(_r.entry_p) * int(_r.qty)))
         _fin += float(_r.pnl)
         _n += 1
     # ⚠ 外しすぎた日は捨てる。**ポートフォリオの合計**を見るのが目的なので、
@@ -209,9 +225,23 @@ def _paths_for_day(day: str, grp: pd.DataFrame):
     _m = pd.concat(_series, axis=1).ffill().bfill()
     if _m.isna().any().any():
         return None
-    return _m.index, _m.sum(axis=1).to_numpy(dtype="float64"), _fin, _n
+    _mo = pd.concat(_sero, axis=1).ffill().bfill()
+    _OPEN[day] = (_mo.sum(axis=1).to_numpy(dtype="float64")
+                  if not _mo.isna().any().any() else None)
+    # 累積建玉の推移(グリッド上)。「いま何円建っているか」= 武装判定の材料
+    _ent.sort(key=lambda x: x[0])
+    _idx = _m.index
+    _cum = np.zeros(len(_idx), dtype="float64")
+    _run = 0.0
+    for _t, _nt in _ent:
+        _run += _nt
+        _p = int(_idx.searchsorted(_t))
+        if _p < len(_cum):
+            _cum[_p:] = _run
+    return _idx, _m.sum(axis=1).to_numpy(dtype="float64"), _fin, _n, _cum
 
 
+_OPEN: dict = {}          # 次のバー始値ベースの経路
 _BAD: list = []                # 分割汚染などで弾いた (日, 銘柄, 倍率)
 _MISS: list = []               # 5分足が無くて外した (日, 銘柄)
 
@@ -268,14 +298,23 @@ _BUD = a.budget * 1e4
 _FULL = {d: (_NOTIONAL.get(d, 0.0) / _BUD * 100.0) for d in _days}
 
 
-def _armed_idx(day: str) -> int:
-    """損切りを武装できる最初のバー。--gate-from より前は守られていない。"""
-    _ts = _days[day][0]
-    _h, _m = (int(x) for x in str(a.gate_from).split(":"))
-    for _i, _t in enumerate(_ts):
-        if (_t.hour, _t.minute) >= (_h, _m):
-            return _i
-    return len(_ts)          # その時刻より後のバーが無い = 武装しない
+def _armed_idx(day: str, gate: float = 0.0) -> int:
+    """武装できる最初のバー。**建玉が揃うまで守られていない**。
+
+    gate>0  … 累積建玉が **予算の gate%** に達した時点(満額条件)
+    gate<=0 … その日の建玉が **全部入った**時点(無条件の腕)
+    到達しなければ len(グリッド) を返す = その日は武装しない。
+
+    ⛔⛔ ここが先読み排除の要。「最終的に満額だった日は朝から守られていた」に
+      しない。累積建玉は **5分足の最初のバー = その銘柄が寄った時刻** から
+      組み立てているので、遅寄りの銘柄はその時刻まで建玉に入らない。
+    """
+    _idx, _p, _f, _n, _cum = _days[day]
+    if len(_cum) == 0:
+        return len(_idx)
+    _need = (_BUD * gate / 100.0) if gate > 0 else float(_cum[-1])
+    _w = np.where(_cum >= _need - 1e-6)[0]
+    return int(_w[0]) if len(_w) else len(_idx)
 
 
 def _apply(day: str, level: float = 0.0, trail: float = 0.0, start: int = 0):
@@ -286,7 +325,7 @@ def _apply(day: str, level: float = 0.0, trail: float = 0.0, start: int = 0):
     ⚠ 発火は **その5分足の終値** で検知し、決済は **次の足の始値** ではなく
       同じ終値に slip を掛ける(次足始値は5分後で、実運用の成行より甘くなる)。
     """
-    _ts, _path, _fin, _n = _days[day]
+    _ts, _path, _fin, _n, _cum = _days[day]
     if level <= 0 and trail <= 0:
         return _fin, False, -1
     _hit = -1
@@ -315,7 +354,7 @@ def _stat(days: list, level: float = 0.0, trail: float = 0.0,
     _tot, _fire, _saved = 0.0, 0, 0.0
     _daily = []
     for _d in days:
-        _ts, _path, _fin, _n = _days[_d]
+        _ts, _path, _fin, _n, _cum = _days[_d]
         _v, _f, _i = _apply(_d, level, trail)
         if _f:
             # 建玉に対するスリッページ。全銘柄を成行で畳むので個別より不利に見積もる
@@ -400,7 +439,7 @@ for _l in _LV:
         _v, _fired, _i = _apply(_d, level=_l)
         if not _fired:
             continue
-        _ts, _path, _fin, _n = _days[_d]
+        _ts, _path, _fin, _n, _cum = _days[_d]
         _v -= float(_NOTIONAL.get(_d, 0.0)) * a.slip_pct
         _f += 1
         _cut_pnl += _v
@@ -460,27 +499,37 @@ def _arm(days: list, level: float, gate: float, use_start: bool,
     """
     _yen, _bp, _fire, _cov = [], [], 0, 0
     _cut, _hold = 0.0, 0.0
-    _win = 0
+    _gain, _loss, _win = [], [], 0
     for _d in days:
-        _ts, _path, _fin, _n = _days[_d]
+        _ts, _path, _fin, _n, _cum = _days[_d]
         _nt = float(_NOTIONAL.get(_d, 0.0))
         _lv = (_nt * pct / 100.0) if pct > 0 else level
-        _on = (_lv > 0) and (gate <= 0 or _FULL.get(_d, 0.0) >= gate)
+        _st = _armed_idx(_d, gate) if use_start else 0
+        # 武装できない日(満額に達しない/建玉が揃わない)は対象外
+        _on = (_lv > 0) and (_st < len(_ts))
         _v = _fin
         if _on:
             _cov += 1
-            _st = _armed_idx(_d) if use_start else 0
             _v2, _f, _i = _apply(_d, level=_lv, start=_st)
             if _f:
+                _pv = _OPEN.get(_d)
+                if a.exit_next_open and _pv is not None and _i + 1 < len(_pv):
+                    _v2 = float(_pv[_i + 1])      # 次のバーの始値で決済
                 _v = _v2 - _nt * a.slip_pct
                 _fire += 1
                 _cut += _v
                 _hold += _fin
+                # ★ 非対称性を見るため、改善と機会損失を **別々に**貯める。
+                #   正解率は分類の指標で、損益の大小を映さない(2026-09-04 指摘)。
+                (_gain if _v > _fin else _loss).append(_v - _fin)
                 _win += 1 if _v > _fin else 0
         _yen.append(_v)
         _bp.append(_v / _nt * 1e4 if _nt > 0 else 0.0)
     return {"yen": _yen, "bp": _bp, "fire": _fire, "cov": _cov,
-            "cut": _cut, "hold": _hold, "win": _win}
+            "cut": _cut, "hold": _hold, "win": _win,
+            "gain": (float(np.mean(_gain)) if _gain else 0.0),
+            "loss": (float(np.mean(_loss)) if _loss else 0.0),
+            "ngain": len(_gain), "nloss": len(_loss)}
 
 
 def _msig(days: list, yen: list) -> tuple:
@@ -495,8 +544,40 @@ def _msig(days: list, yen: list) -> tuple:
     return _mu, _sd, (_mu / _sd if _sd else 0.0)
 
 
-def _row2(lbl: str, r: dict, days: list, base: dict) -> None:
-    """1行。**CVaR と 月平均÷σ の両方**を出す。片方だけだと食い違いに気づけない。"""
+def _boot_cvar(days: list, ya: list, yb: list, B: int = 1000) -> tuple:
+    """月ブロック・ブートストラップで **CVaR差(腕 − 現行)** の95%CI。
+
+    ⛔ 日をシャッフルすると同日相関・月内相関を壊す。**月ごと**にリサンプルする
+      (§18.13 の『帰無較正は日ブロックを保つ』と同じ理由)。
+    CVaR5% は 236日なら下位11〜12日の平均でしかない。CI を出さないと
+    「そもそも区別できるのか」が分からない。
+    """
+    _mo: dict = {}
+    for _i, _d in enumerate(days):
+        _mo.setdefault(_d[:7], []).append(_i)
+    _keys = sorted(_mo)
+    if len(_keys) < 3:
+        return None, None          # 月が3つ未満 → 計算しない(0と誤読させない)
+    _out = []
+    for _b in range(B):
+        _g = _rnd.Random(_b)
+        _ix: list = []
+        for _ in _keys:
+            _ix.extend(_mo[_g.choice(_keys)])
+        _out.append(_cvar([ya[i] for i in _ix]) - _cvar([yb[i] for i in _ix]))
+    _out.sort()
+    return _out[int(B * 0.025)], _out[int(B * 0.975)]
+
+
+# ★★ 主判定は **先に固定する**(2026-09-04 に宣言)。後から基準を足さない。
+#   ⛔ 目的は『大負けを薄くする保険』なので、÷σ は拒否条件にしない。
+#     通常月の効率が少し下がるのは、保険として受け入れる範囲。
+_PASS = ("CVaR5% が改善 かつ 月平均が現行の90%以上 "
+         "かつ 同じCVaRになる単純予算縮小より月平均が高い")
+
+
+def _row2(lbl: str, r: dict, days: list, base: dict, boot: bool = False) -> None:
+    """1行。主判定は _PASS。÷σ は**副判定**として併記するだけ。"""
     _tot = sum(r["yen"])
     _mu, _sd, _rt = _msig(days, r["yen"])
     _cv, _cb = _cvar(r["yen"]), _cvar(r["bp"])
@@ -506,19 +587,36 @@ def _row2(lbl: str, r: dict, days: list, base: dict) -> None:
     _wr = (r["win"] / r["fire"] * 100.0) if r["fire"] else 0.0
     if r["fire"] <= 0:
         _mk = "  —"
-    elif _f >= 1.0:
+    elif _cv <= base["cv"]:
+        # ⛔ CVaR は **負**(下位5%の平均損失)。改善 = ゼロに近づく = より大きい。
+        #   `_cv >= base` と書くと符号が反転して改善側に ⛔ が付く
+        #   (§18.62 の _judge で踏んだのと同じ形。2026-09-04 に再発させた)。
         _mk = "  ⛔CVaR悪化"
+    elif _mu < base["mu"] - abs(base["mu"]) * 0.10:
+        # ⛔ `base*0.90` と書くと **base が負のとき不等号が反転**する
+        #   (-53,250 の 90% は -47,925 で、元より良い値になってしまう)。
+        #   「現行から1割以上 悪化していない」を符号に依らず書く。
+        _mk = "  ⛔月平均が現行の90%未満"
     elif _mu <= _eq:
         _mk = "  ⛔予算縮小が上"
-    elif _rt <= base["rt"]:
-        _mk = "  ⚠÷σ は改善せず"     # CVaR は良いが ばらつきは良くなっていない
     else:
-        _mk = "  ✅"
+        _mk = "  ✅" + ("" if _rt > base["rt"] else "(÷σは横ばい)")
     _ft = "—" if _f >= 1.0 else f"{_f:.2f}"
     _et = "—" if _f >= 1.0 else f"{_eq:+,.0f}"
     print(f"  {lbl:<22}{_tot:>+12,.0f}{_mu:>+10,.0f}{_rt:>6.2f}"
           f"{_cv:>+11,.0f}{_ft:>6}{_et:>11}{r['fire']:>5}{r['cov']:>5}"
-          f"{_dif:>+11,.0f}{_wr:>6.0f}%{_mk}")
+          f"{_dif:>+11,.0f}{r['gain']:>+10,.0f}{r['loss']:>+10,.0f}"
+          f"{_wr:>5.0f}%{_mk}")
+    if boot and r["fire"] > 0:
+        _lo, _hi = _boot_cvar(days, r["yen"], base["yen"], a.boot)
+        if _lo is None:
+            print(f"  {'':<22}└ CVaR差の95%CI … "
+                  f"**月が3つ未満なので計算しません**")
+        else:
+            _sig = ("  ⚠CIがゼロをまたぐ = 区別できない"
+                    if _lo <= 0 <= _hi else "  ★CIがゼロをまたがない")
+            print(f"  {'':<22}{'└ CVaR差の95%CI(月ブロック)':<30}"
+                  f"{_lo:>+12,.0f} 〜 {_hi:>+12,.0f}{_sig}")
 
 
 def _row(lbl: str, yen: list, bp: list, fire: int, cov: int,
@@ -554,9 +652,11 @@ print(f"{'=' * 96}")
 _nfull = sum(1 for d in _ks if _FULL.get(d, 0.0) >= a.gate_pct)
 print(f"  予算 {a.budget:,.0f}万円 / 投入率 ≥ {a.gate_pct:.0f}% の日 "
       f"**{_nfull}日 / 全{len(_ks)}日 ({_nfull / max(len(_ks), 1) * 100:.0f}%)**")
-print(f"  武装は **{a.gate_from} 以降**(それ以前の含み損では発動させない)")
-print(f"  ⛔ picks.csv に約定時刻が無いので『何時に満額になったか』は"
-      f"データから出せません。時刻での代用です")
+print(f"  武装は **累積建玉がその水準に達した時点から**"
+      f"(⑤は予算の{a.gate_pct:.0f}%、②④はその日の建玉が全部入った時点)")
+print(f"  決済は **{'次のバーの始値' if a.exit_next_open else '発火バーの終値'}**")
+print(f"  ★ 累積建玉は **5分足の最初のバー = その銘柄が寄った時刻** から"
+      f"組み立てています(picks.csv に約定時刻が無いための代理)")
 print(f"  ★ 主指標は **CVaR5%(円)** = 下位5%の日の平均。最悪1日ではなく裾の平均")
 
 _LP = [float(x) for x in a.levels_pct.split(",") if x.strip()]
@@ -565,14 +665,19 @@ for _wn, _wd in (("TRAIN", _tr), ("TEST", _te)):
     print(f"\n  ── {_wn} {_wd[0]}〜{_wd[-1]} ({len(_wd)}営業日) ──")
     _b0 = _arm(_wd, 0.0, 0.0, False)
     _bmu, _bsd, _brt = _msig(_wd, _b0["yen"])
-    _base = {"cv": _cvar(_b0["yen"]), "mu": _bmu, "rt": _brt}
+    _base = {"cv": _cvar(_b0["yen"]), "mu": _bmu, "rt": _brt,
+             "yen": _b0["yen"]}
     print(f"  {'腕':<22}{'合計':>12}{'月平均':>10}{'÷σ':>6}"
           f"{'CVaR5%':>11}{'等価f':>6}{'等価月平均':>11}{'発火':>5}"
-          f"{'対象':>5}{'降−引':>11}{'正解率':>7}")
-    print("  " + "-" * 106)
+          f"{'対象':>5}{'降−引':>11}{'正解時':>10}{'誤発火':>10}{'正解率':>6}")
+    print("  " + "-" * 126)
     print(f"  {'① 現行(損切りなし)':<22}{sum(_b0['yen']):>+12,.0f}"
           f"{_bmu:>+10,.0f}{_brt:>6.2f}{_base['cv']:>+11,.0f}"
-          f"{1.0:>6.2f}{_bmu:>+11,.0f}{'—':>5}{'—':>5}{'—':>11}{'—':>7}")
+          f"{1.0:>6.2f}{_bmu:>+11,.0f}{'—':>5}{'—':>5}{'—':>11}"
+          f"{'—':>10}{'—':>10}{'—':>6}")
+    # ★★ 2×2。**満額条件と閾値単位を同時に変えない**ため4象限すべて出す。
+    #   ③ vs ④ は2つ同時に変えているので比較にならない(2026-09-04 指摘)。
+    #   同じ −0.5% で ④(全日) と ⑤(満額のみ) を並べるのが本命。
     for _l in _LV:
         _row2(f"② 全日 −{_l:,.0f}円", _arm(_wd, _l, 0.0, True), _wd, _base)
     for _l in _LV:
@@ -581,6 +686,10 @@ for _wn, _wd in (("TRAIN", _tr), ("TEST", _te)):
     for _p in _LP:
         _row2(f"④ 全日 −投入の{_p:.1f}%",
               _arm(_wd, 0.0, 0.0, True, pct=_p), _wd, _base)
+    for _p in _LP:
+        _row2(f"⑤ 満額のみ −投入の{_p:.1f}%",
+              _arm(_wd, 0.0, a.gate_pct, True, pct=_p), _wd, _base,
+              boot=True)
 
 print(f"\n  ★ 『等価f』= その腕と同じ CVaR にするために予算を何倍にするか。")
 print(f"     『等価月平均』= そのとき残る月平均利益(= 現行 × f)。")
@@ -639,7 +748,7 @@ def _exit_stat(days: list, hhmm: str = ""):
     _tot, _same, _late = 0.0, 0, 0
     _daily, _labs = [], {}
     for _d in days:
-        _ts, _path, _fin, _n = _days[_d]
+        _ts, _path, _fin, _n, _cum = _days[_d]
         if not hhmm:
             _v = _fin
         else:
