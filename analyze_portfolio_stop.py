@@ -312,7 +312,15 @@ def _armed_idx(day: str, gate: float = 0.0) -> int:
     _idx, _p, _f, _n, _cum = _days[day]
     if len(_cum) == 0:
         return len(_idx)
-    _need = (_BUD * gate / 100.0) if gate > 0 else float(_cum[-1])
+    # ⛔⛔ **予算に対する絶対額で切ってはいけない**(2026-09-04 に踏んだ)。
+    #   _cum は 5分足が読めて汚染ガードを通った銘柄だけの累積なので、
+    #   その日の建玉(_NOTIONAL)より必ず小さい(--min-cover 0.7 まで許容)。
+    #   `_BUD * gate/100` で切ると、投入率が丁度90〜100%の日は3割欠けただけで
+    #   届かなくなり、**満額日150日のうち69日しか対象にならなかった**。
+    #   しかも残る日が「5分足が揃った日」に偏る。
+    #   → 武装時刻は **再現できた建玉の中での割合**で決める。
+    #     『その日が満額日か』の判定は _FULL(picks全体)で別に行う。
+    _need = float(_cum[-1]) * (gate / 100.0 if gate > 0 else 1.0)
     _w = np.where(_cum >= _need - 1e-6)[0]
     return int(_w[0]) if len(_w) else len(_idx)
 
@@ -505,8 +513,10 @@ def _arm(days: list, level: float, gate: float, use_start: bool,
         _nt = float(_NOTIONAL.get(_d, 0.0))
         _lv = (_nt * pct / 100.0) if pct > 0 else level
         _st = _armed_idx(_d, gate) if use_start else 0
-        # 武装できない日(満額に達しない/建玉が揃わない)は対象外
-        _on = (_lv > 0) and (_st < len(_ts))
+        # 対象日か = **その日の建玉(picks全体)が予算の gate% 以上**。
+        #   ⛔ 経路で再現できた分(_cum)で判定すると欠損の多い日が落ちる。
+        _elig = (gate <= 0) or (_FULL.get(_d, 0.0) >= gate)
+        _on = (_lv > 0) and _elig and (_st < len(_ts))
         _v = _fin
         if _on:
             _cov += 1
@@ -658,6 +668,11 @@ print(f"  決済は **{'次のバーの始値' if a.exit_next_open else '発火�
 print(f"  ★ 累積建玉は **5分足の最初のバー = その銘柄が寄った時刻** から"
       f"組み立てています(picks.csv に約定時刻が無いための代理)")
 print(f"  ★ 主指標は **CVaR5%(円)** = 下位5%の日の平均。最悪1日ではなく裾の平均")
+# ★ 経路で扱えた満額日の数を必ず出す。ここが激減していたら判定は成立しない
+_ftr = sum(1 for d in _tr if _FULL.get(d, 0.0) >= a.gate_pct)
+_fte = sum(1 for d in _te if _FULL.get(d, 0.0) >= a.gate_pct)
+print(f"  ★ 満額日の内訳: TRAIN **{_ftr}日** / TEST **{_fte}日** "
+      f"(③⑤ の『対象』列がこれと大きく違うなら、武装できていない日があります)")
 
 _LP = [float(x) for x in a.levels_pct.split(",") if x.strip()]
 
