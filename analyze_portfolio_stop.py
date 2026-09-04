@@ -1113,6 +1113,19 @@ else:
           f"(上位{_rank:.0f}%)", end="")
     print("  ★帯の外(上位5%)" if _rank <= 5 else
           "  ⚠帯の中 = **日数を減らしただけ**。選び方に意味はありません")
+    # ⛔⛔ 帯の外に出ても、まだ2つ潰していない
+    if _rank <= 5:
+        _mt = (1.0 - 0.95 ** len(_WT)) * 100.0
+        print(f"    ⛔ ただし **{len(_WT)}時刻から最良を選んでいます**。"
+              f"どれも無力でも {_mt:.0f}% の確率で1つは帯の外に出ます")
+        print(f"       多重検定を補正するなら閾値は 5%/{len(_WT)} = "
+              f"{5.0 / len(_WT):.2f}% で、{len(_band)}本では分解能が足りません")
+        _mg = _bv2 - _band[-1]
+        print(f"       帯の最大との差は **{_mg:+,.0f}円**"
+              f"(帯の幅 {_band[-1] - _band[0]:,.0f}円 の "
+              f"{abs(_mg) / max(1.0, _band[-1] - _band[0]) * 100:.1f}%)"
+              + ("  ⚠ 実質 帯の縁です" if abs(_mg) < (_band[-1] - _band[0]) * 0.10
+                 else ""))
     if _bv2 <= _fin_all:
         print(f"    ⛔ そもそも **どの時刻で畳んでも引けに勝てません**")
     _sw = max(_WT, key=lambda t: abs(_tot_at(t) - _fin_all))
@@ -1255,17 +1268,40 @@ def _slip_table(days: list, label: str) -> None:
     print(f"     引け(MOC)は板寄せなので **どの列でも一定**"
           f"({_b['tot']:+,.0f}円 / ÷σ {_b['ratio']:.2f})")
     print(f"    {'決済':<10}" + "".join(
-        f"{s * 100:>10.2f}%" for s in _ES))
+        f"{s * 100:>10.2f}%" for s in _ES)
+        + f"{'合計=0':>9}{'÷σ優位':>9}")
     for _t in _ET:
-        _cells = []
+        _cells, _tot, _ok = [], [], []
         for _s in _ES:
             _x = _exit_stat(days, _t, _s)
             _mk = "*" if _x["ratio"] > _b["ratio"] + 0.10 else " "
+            _tot.append(_x["tot"])
+            _ok.append(_mk == "*")
             _cells.append(f"{_x['tot']:>+10,.0f}{_mk}")
-        print(f"    {_t:<10}" + "".join(_cells))
+        # ★ 損益分岐 — 合計が正→負に変わる区間を線形補間
+        _be = ""
+        for _k in range(len(_ES) - 1):
+            if _tot[_k] > 0 >= _tot[_k + 1]:
+                _w = _tot[_k] / (_tot[_k] - _tot[_k + 1])
+                _be = f"{(_ES[_k] + (_ES[_k + 1] - _ES[_k]) * _w) * 100:.2f}%"
+                break
+        if not _be:
+            _be = "全列+" if _tot[-1] > 0 else "全列-"
+        # ★ ÷σ の優位が保てる上限。**合計より先にこちらが落ちる**
+        _lim = "なし"
+        for _k in range(len(_ES) - 1, -1, -1):
+            if _ok[_k]:
+                _lim = f"≤{_ES[_k] * 100:.2f}%"
+                break
+        print(f"    {_t:<10}" + "".join(_cells) + f"{_be:>9}{_lim:>9}")
     print(f"    * = ÷σ が引けを 0.10 以上 上回った")
-    print(f"    ⛔ **符号が変わる列がある時刻は採用できません。**"
-          f"実測の決済滑りが出るまで保留すること")
+    print(f"    『合計=0』= 合計がゼロになる決済滑り(線形補間)")
+    print(f"    『÷σ優位』= ÷σ の優位が保てる上限。"
+          f"**合計より先にこちらが落ちる**のが普通です")
+    print(f"    ⛔ 判定は **÷σ優位の上限** で行うこと。合計が黒字でも"
+          f"採用基準を満たさなければ意味がありません")
+    print(f"    ⚠ 参考: N のエントリー実測は **0.34%**。"
+          f"寄り15分後に全銘柄を成行で畳むコストが それより安い根拠はありません")
 
 
 _btr_e, _etr = _etable(_tr, f"TRAIN {_tr[0]}〜{_tr[-1]}")
