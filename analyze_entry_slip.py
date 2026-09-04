@@ -45,6 +45,9 @@ ap.add_argument("--since", default="", help="この日以降だけ (YYYY-MM-DD)"
 ap.add_argument("--dir", default=".", help="CSV のあるフォルダ")
 ap.add_argument("--no-ledger", action="store_true",
                 help="台帳での N 判別をやめる（⛔ J が混ざる。検証用）")
+ap.add_argument("--qty", type=int, default=100,
+                help="株数(既定100 = N は100株固定)。**建玉の表示にだけ**使う。"
+                     "資金加重bp は株数が約分されるので影響しません")
 ap.add_argument("--save", default="entry_slip.csv",
                 help="1件1行で保存する先（'' で保存しない）")
 a = ap.parse_args()
@@ -346,21 +349,44 @@ if _no_close:
 # ── §18.49 の点推定 ────────────────────────────────────────────
 print()
 print("■ §18.49 の点推定")
-print(f"{'日付':<12}{'件数':>6}{'件数加重bp':>12}")
-print("-" * 32)
+
+
+def _wbp(rows: list) -> tuple:
+    """(件数加重bp, 資金加重bp, 建玉合計)。
+
+    ★ 両方 正しいが **意味が違う**(2026-09-04 Codex 指摘):
+      件数加重 = 1件を1票とする。**§18.49 で点推定として宣言済み**
+      資金加重 = 払った円に比例。**実際にいくら損したか**はこちら
+    値がさ株の日は資金加重の方が重くなるので、円で期間比較するならこちら。
+    """
+    if not rows:
+        return 0.0, 0.0, 0.0
+    _cw = sum(x["slip"] for x in rows) / len(rows)
+    _nt = sum(x["open_p"] * a.qty for x in rows)
+    _yn = sum(x["slip"] / 1e4 * x["open_p"] * a.qty for x in rows)
+    return _cw, (_yn / _nt * 1e4 if _nt > 0 else 0.0), _nt
+
+
+print(f"{'日付':<12}{'件数':>6}{'件数加重bp':>12}{'資金加重bp':>12}{'建玉':>14}")
+print("-" * 58)
 for _d in _days:
     _g = [r for r in _recs if r["date"] == _d]
-    print(f"{_d:<12}{len(_g):>6}{sum(x['slip'] for x in _g) / len(_g):>+12.1f}")
-print("-" * 32)
+    _c, _w, _n = _wbp(_g)
+    print(f"{_d:<12}{len(_g):>6}{_c:>+12.1f}{_w:>+12.1f}{_n:>14,.0f}")
+print("-" * 58)
 _dm = sum(sum(x["slip"] for x in _recs if x["date"] == d)
           / len([x for x in _recs if x["date"] == d]) for d in _days) / len(_days)
-print(f"{'件数加重(点推定)':<12}{len(_recs):>6}{_slip:>+12.1f}")
+_ac, _aw, _an = _wbp(_recs)
+print(f"{'件数加重(点推定)':<12}{len(_recs):>6}{_slip:>+12.1f}{'':>12}{'':>14}")
+print(f"{'資金加重(参考)':<12}{len(_recs):>6}{'':>12}{_aw:>+12.1f}{_an:>14,.0f}")
 print(f"{'日平均(参考)':<12}{len(_days):>6}{_dm:>+12.1f}")
 print()
 print(f"  進捗 **{len(_recs)} / 30 件**  ・  独立な営業日 **{len(_days)}日**"
       f"  ・  損益分岐 -15.0bp")
 print(f"  ⛔ 点推定は **件数加重**（§18.49 で先に宣言済み）。日平均は")
 print(f"     1件の日と7件の日を同じ重みにするので使いません")
+print(f"  ⚠ **資金加重は『実際にいくら損したか』**。円で期間比較するならこちら。")
+print(f"     件数加重と食い違うのは、値がさ株ほど1件の重みが大きいからです")
 print(f"  ⚠ 同日相関があるので、信頼区間の実効サンプルは**件数ではなく日数**です")
 
 # ── ★ 保存則の検査（合わなければ失敗終了） ───────────────────────

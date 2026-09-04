@@ -44,6 +44,7 @@ import argparse
 import csv as _csv
 import glob
 import os
+import random as _rnd
 import re
 import statistics as _st
 
@@ -63,6 +64,15 @@ ap.add_argument("--main-wait", type=float, default=10.0,
 ap.add_argument("--main-drop", type=float, default=0.0,
                 help="★主判定の下落bp（既定0 = 始値以下）")
 ap.add_argument("--qty", type=int, default=100, help="株数(既定100)")
+ap.add_argument("--budget", type=float, default=200.0,
+                help="★ 予算(万円)。既定200 = 実運用と同じ。"
+                     "0 で予算制約なし(合格を全部建てる診断)。"
+                     "⛔ 制約なしの表は『全部買えるなら得か』であって"
+                     "『予算内でどれを買うか』ではない(§18.10)")
+ap.add_argument("--nulls", type=int, default=200,
+                help="★ 選別効果の帰無較正の本数。**同じ日・同じ件数を"
+                     "ランダムに選ぶ**ことで『件数が減った効果』と"
+                     "『条件そのものの効果』を分ける(既定200)")
 ap.add_argument("--min-days", type=int, default=10,
                 help="これ未満の営業日数なら『判定しない』と明示する(既定10)")
 ap.add_argument("--save", default="wait_sim.csv",
@@ -85,6 +95,11 @@ def _rows(path: str) -> list:
             return list(_csv.DictReader(fh))
     except Exception:
         return []
+
+
+def _hms(sec: float) -> str:
+    _s = int(sec)
+    return f"{_s // 3600:02d}:{_s % 3600 // 60:02d}:{_s % 60:02d}"
 
 
 # ── 日ごとに n_quotes を読む ───────────────────────────────────────
@@ -171,6 +186,9 @@ for _ymd in sorted(_qd):
 
         _rec = {"date": _iso, "code": _s, "open_p": _open,
                 "close_p": _cl.get(_s, 0.0),
+                # 発注順は **寄ったグループ順 → |ギャップ|降順**(ライブと同じ)。
+                # そのために寄り時刻を秒で持つ。
+                "open_s": _t0, "last_s": _t[-1][0],
                 "gap_bp": _f(_live[0].get("gap_bp")),
                 "pass_gap": 1 if any(_true(r.get("pass_gap")) for r in _live) else 0,
                 "polls": len(_t)}
@@ -277,49 +295,152 @@ if _immlag:
 
 
 # ── 3段分解 ──────────────────────────────────────────────────
+_BUDGET = a.budget * 1e4
+
+
+def _fill(rows: list, key: str) -> tuple:
+    """予算の許す範囲で建てる。返り値 (損益, 建玉, 建てた件数)。
+
+    ⛔ **落ちた銘柄の枠は後続に回る**(飛ばして次を試す)。これを再現しないと
+      「合格を全部建てられたら」の診断にしかならない(§18.10)。
+    ★ 順番はライブと同じ **寄ったグループ順 → |ギャップ|降順**。
+    """
+    _cash = _BUDGET if _BUDGET > 0 else float("inf")
+    # ⛔ ローカル名を _yen にしない。同名の関数を隠して NameError になる
+    _sy, _not, _n = 0.0, 0.0, 0
+    for r in sorted(rows, key=lambda x: (x["open_s"], -abs(x["gap_bp"]))):
+        if r.get(key) is None:
+            continue                       # その腕では建てない銘柄
+        _need = r["open_p"] * a.qty
+        if _need > _cash:
+            continue                       # 枠が足りない → 次の候補を試す
+        _cash -= _need
+        _sy += _yen(r[key], r["close_p"])
+        _not += _need
+        _n += 1
+    return _sy, _not, _n
+
+
+def _bp(yen: float, notional: float) -> float:
+    """資金加重bp。円だけだと値がさ株の日が重くなり期間比較できない。"""
+    return (yen / notional * 1e4) if notional > 0 else 0.0
+
+
 def _decompose(pool: list, tag: str) -> list:
-    """待ち × 下落閾値 の3段分解。対応（同じ銘柄集合）で比べる。"""
+    """待ち × 下落閾値 の3段分解。対応（同じ銘柄集合）・予算制約つき。"""
     print()
-    print("=" * 84)
+    print("=" * 96)
     print(f"■ {tag}（{len(pool)}件）")
-    print("=" * 84)
+    print("=" * 96)
     if not pool:
         print("  対象なし")
         return []
+    _byday: dict = {}
+    for r in pool:
+        _byday.setdefault(r["date"], []).append(r)
     _out = []
     for _w in _WAITS:
         _k = int(_w)
         # ⛔ 判定行が無い銘柄は **全ての腕から外す**（対応をとる）。
         #   0円扱いにすると「ログが途切れた」ことを「建てなかった」と
         #   混同し、待ちが有利に出る。
-        _p = [r for r in pool if r.get(f"w{_k}_yen") is not None]
-        if not _p:
+        _pd = {d: [r for r in rs if r.get(f"w{_k}_yen") is not None]
+               for d, rs in _byday.items()}
+        _pd = {d: rs for d, rs in _pd.items() if rs}
+        if not _pd:
             continue
-        _imm = sum(r["imm_yen"] for r in _p)
-        _all = sum(r[f"w{_k}_yen"] for r in _p)
+        _n = sum(len(v) for v in _pd.values())
+        _iy = _in = 0.0
+        _ay = _an = 0.0
+        for _rs in _pd.values():
+            _y, _nt, _ = _fill(_rs, "imm_px")
+            _iy += _y
+            _in += _nt
+            _y, _nt, _ = _fill(_rs, f"w{_k}_px")
+            _ay += _y
+            _an += _nt
         for _d in _DROPS:
             # 選別: その板で成行を打った値が 始値から _d bp 以上 下げている
-            _sel_rows = [r for r in _p
-                         if r.get(f"w{_k}_bp") is not None
-                         and r[f"w{_k}_bp"] <= -_d]
-            _sel = sum(r[f"w{_k}_yen"] for r in _sel_rows)
+            _sy = _sn = 0.0
+            _ns = 0
+            _selcnt: dict = {}
+            for _dt, _rs in _pd.items():
+                _sel = [r for r in _rs if r[f"w{_k}_bp"] is not None
+                        and r[f"w{_k}_bp"] <= -_d]
+                _selcnt[_dt] = len(_sel)
+                _y, _nt, _c = _fill(_sel, f"w{_k}_px")
+                _sy += _y
+                _sn += _nt
+                _ns += _c
+            # ★★ 帰無較正: **同じ日・同じ件数**をランダムに選ぶ。
+            #   これで「12/14件に減った効果」と「10秒条件そのものの効果」を
+            #   分ける。帯の中なら条件に意味は無い(件数を減らしただけ)。
+            _band = []
+            for _s in range(a.nulls):
+                _g = _rnd.Random(_s)
+                _t = 0.0
+                for _dt, _rs in _pd.items():
+                    _c = _selcnt.get(_dt, 0)
+                    if _c <= 0:
+                        continue
+                    _pk = _g.sample(_rs, min(_c, len(_rs)))
+                    _t += _fill(_pk, f"w{_k}_px")[0]
+                _band.append(_t - _ay)
+            _bm = _st.mean(_band) if _band else 0.0
+            _bs = _st.pstdev(_band) if len(_band) > 1 else 0.0
+            _pick = _sy - _ay
             _out.append({
-                "tag": tag, "wait": _k, "drop": int(_d), "n": len(_p),
-                "n_sel": len(_sel_rows),
-                "imm": _imm, "all": _all, "sel": _sel,
-                "cost": _all - _imm, "pick": _sel - _all, "net": _sel - _imm})
+                "tag": tag, "wait": _k, "drop": int(_d), "n": _n, "n_sel": _ns,
+                "imm": _iy, "all": _ay, "sel": _sy,
+                "imm_n": _in, "all_n": _an, "sel_n": _sn,
+                "cost": _ay - _iy, "pick": _pick, "net": _sy - _iy,
+                "z": ((_pick - _bm) / _bs) if _bs > 0 else 0.0,
+                "band_lo": min(_band) if _band else 0.0,
+                "band_hi": max(_band) if _band else 0.0})
     _nd = max(len(_days), 1)
     print(f"{'待ち':>6}{'下落':>6}{'建てた':>7}{'/母数':>6}"
-          f"{'待機コスト':>11}{'選別効果':>11}{'★最終効果':>11}{'/日':>9}")
-    print("-" * 68)
+          f"{'待機コスト':>11}{'選別効果':>11}{'帯のz':>8}"
+          f"{'★最終効果':>11}{'★bp':>8}{'/日':>9}")
+    print("-" * 88)
     for x in _out:
         _star = " ★" if (x["wait"] == int(a.main_wait)
                          and x["drop"] == int(a.main_drop)) else "  "
+        # bp の分母は **即時全件の建玉** で統一する。そうしないと
+        # 3段が足し算にならない(腕ごとに分母が違ってしまう)。
         print(f"{x['wait']:>5}s{x['drop']:>5}b{x['n_sel']:>7}{x['n']:>6}"
-              f"{x['cost']:>+11,.0f}{x['pick']:>+11,.0f}"
-              f"{x['net']:>+11,.0f}{x['net'] / _nd:>+9,.0f}{_star}")
+              f"{x['cost']:>+11,.0f}{x['pick']:>+11,.0f}{x['z']:>+8.2f}"
+              f"{x['net']:>+11,.0f}{_bp(x['net'], x['imm_n']):>+8.1f}"
+              f"{x['net'] / _nd:>+9,.0f}{_star}")
+    print(f"  ⚠ 『帯のz』= 選別効果が **同日・同数ランダム除外**の帯から"
+          f"どれだけ外れているか。|z|<2 なら『件数を減らしただけ』")
+    if _BUDGET > 0:
+        print(f"  ⚠ 予算 {a.budget:,.0f}万円で制約済み。"
+              f"落ちた銘柄の枠は後続に回しています")
     return _out
 
+
+# ── 表A-3: 判定できなかった件（除外に偏りがないか）─────────────────
+#   ⛔ 母数16件が14件になった、その2件が「遅寄り」など特定の性質を持つなら、
+#     除外そのものに偏りが出る。黙って減らさず、必ず中身を出す。
+print()
+print("■ 表A-3 ★ 判定できなかった件（除外に偏りがないか）")
+print(f"{'待ち':>6}{'N母数':>7}{'判定可':>7}{'欠け':>6}"
+      f"{'うち遅寄り':>11}{'欠けた銘柄(寄り / 最終観測)':>28}")
+print("-" * 74)
+for _w in _WAITS:
+    _k = int(_w)
+    _miss = [r for r in _N if r.get(f"w{_k}_yen") is None]
+    _late = [r for r in _miss if r["open_s"] > 9 * 3600 + 60]
+    _txt = ", ".join(
+        f"{r['code']}({_hms(r['open_s'])[:5]}/{_hms(r['last_s'])[:5]})"
+        for r in _miss[:3]) + (" …" if len(_miss) > 3 else "")
+    print(f"{_k:>5}s{len(_N):>7}{len(_N) - len(_miss):>7}{len(_miss):>6}"
+          f"{len(_late):>11}  {_txt}")
+if any(r["open_s"] > 9 * 3600 + 60 for r in _N):
+    _nl = sum(1 for r in _N if r["open_s"] > 9 * 3600 + 60)
+    print(f"  ⚠ N の {_nl}/{len(_N)}件 が **遅寄り**(09:01以降)。"
+          f"欠けた件がここに偏るなら、待ちの評価は"
+          f"『早く寄った銘柄だけ』のものになります")
 
 _res = _decompose(_N, "★ N（合格 pass_gap=1）— これが本番")
 _resc = _decompose(_C, "対照群（pass_gap=0）— 合格していない銘柄。"
@@ -338,15 +459,32 @@ if _main is None:
     print("  判定できませんでした（該当する行がありません）")
 else:
     _nd = max(len(_days), 1)
+    _dn = _main["imm_n"]                       # bp の共通分母 = 即時全件の建玉
     print(f"  母数 {_main['n']}件 → 建てた {_main['n_sel']}件 "
-          f"({_main['n_sel'] / _main['n'] * 100:.0f}%)")
-    print(f"    即時 全件        {_main['imm']:>+12,.0f}円")
-    print(f"    {int(a.main_wait)}秒待ち 全件    {_main['all']:>+12,.0f}円   "
-          f"→ 待機コスト {_main['cost']:>+10,.0f}円")
-    print(f"    {int(a.main_wait)}秒待ち 選別    {_main['sel']:>+12,.0f}円   "
-          f"→ 選別効果   {_main['pick']:>+10,.0f}円")
-    print(f"    {'':>16}{'':>12}      **最終効果 {_main['net']:>+10,.0f}円 "
-          f"({_main['net'] / _nd:+,.0f}円/日)**")
+          f"({_main['n_sel'] / _main['n'] * 100:.0f}%) / "
+          f"予算 {a.budget:,.0f}万円 / 投入(即時) {_dn:,.0f}円")
+    print(f"    即時 全件        {_main['imm']:>+12,.0f}円 "
+          f"({_bp(_main['imm'], _main['imm_n']):+.1f}bp)")
+    print(f"    {int(a.main_wait)}秒待ち 全件    {_main['all']:>+12,.0f}円 "
+          f"({_bp(_main['all'], _main['all_n']):+.1f}bp)  "
+          f"→ 待機コスト {_main['cost']:>+10,.0f}円 "
+          f"({_bp(_main['cost'], _dn):+.1f}bp)")
+    print(f"    {int(a.main_wait)}秒待ち 選別    {_main['sel']:>+12,.0f}円 "
+          f"({_bp(_main['sel'], _main['sel_n']):+.1f}bp)  "
+          f"→ 選別効果   {_main['pick']:>+10,.0f}円 "
+          f"({_bp(_main['pick'], _dn):+.1f}bp)")
+    print(f"    {'':>16}{'':>19}  **最終効果 {_main['net']:>+10,.0f}円 "
+          f"({_bp(_main['net'], _dn):+.1f}bp / {_main['net'] / _nd:+,.0f}円/日)**")
+    print()
+    print(f"  ★ 選別効果の帰無較正（同日・同数ランダム除外 {a.nulls}本）")
+    print(f"      実測 {_main['pick']:>+10,.0f}円   "
+          f"帯 {_main['band_lo']:>+10,.0f} 〜 {_main['band_hi']:>+10,.0f}   "
+          f"**z = {_main['z']:+.2f}**")
+    if abs(_main["z"]) < 2.0:
+        print(f"      → **帯の中**。『10秒で下げた銘柄を選んだ』効果は無く、"
+              f"件数が減っただけと区別できません")
+    else:
+        print(f"      → 帯の外。件数減では説明できない効果があります")
 
 # ── 判定の作法 ────────────────────────────────────────────────
 print()
