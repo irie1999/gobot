@@ -71,6 +71,10 @@ ap.add_argument("--budget", type=float, default=400.0,
                 help="★ 予算(万円)。投入率(= その日の建玉 ÷ 予算)の分母。"
                      "picks.csv を作った analyze_gap_edge の --budget-man と"
                      "**必ず揃えること**")
+ap.add_argument("--levels-pct", default="0.5,0.75,1.0,1.5,2.0",
+                help="★★ **投入額比**の損切り(%%)。固定円は投入額で意味が"
+                     "変わるので、③(満額のみ)が効く理由が『満額だから』なのか"
+                     "『投入額比で浅いから』なのかを分離するために要る")
 ap.add_argument("--gate-pct", type=float, default=90.0,
                 help="★★ **満額投資日だけ損切りを有効化**する閾値(投入率%%)。"
                      "無条件の損切りは『悪い日は戻す』で失敗した(§18.62)が、"
@@ -441,27 +445,80 @@ def _cvar(vals: list, q: float = 0.05) -> float:
     return float(np.mean(_v[:_k]))
 
 
-def _arm(days: list, level: float, gate: float, use_start: bool):
+def _arm(days: list, level: float, gate: float, use_start: bool,
+         pct: float = 0.0):
     """1本の腕を評価する。gate>0 なら投入率がそれ以上の日だけ損切りを効かせる。
 
-    返り値: 日次損益リスト, 日次の投入額比bp, 発火数, 守った日数
+    ★ pct>0 なら損切り水準を **その日の投入額の pct%** にする。
+      ⛔ 固定円の損切りは投入額で意味が変わる: −30,000円 は満額(400万)なら
+        −0.75% だが 3割(120万)なら −2.5%。「満額の日だけ」に絞ることは
+        実質「投入額比で浅い損切りだけ効かせる」ことになっていて、
+        『保険料を限定する』とは別の機構が働いている可能性がある。
+        投入額比で書けば、その2つを分離できる。
+
+    返り値: 日次損益, 日次の投入額比bp, 発火数, 対象日数, 発火日の(降りた,引け)
     """
     _yen, _bp, _fire, _cov = [], [], 0, 0
+    _cut, _hold = 0.0, 0.0
+    _win = 0
     for _d in days:
         _ts, _path, _fin, _n = _days[_d]
         _nt = float(_NOTIONAL.get(_d, 0.0))
-        _on = (level > 0) and (gate <= 0 or _FULL.get(_d, 0.0) >= gate)
+        _lv = (_nt * pct / 100.0) if pct > 0 else level
+        _on = (_lv > 0) and (gate <= 0 or _FULL.get(_d, 0.0) >= gate)
         _v = _fin
         if _on:
             _cov += 1
             _st = _armed_idx(_d) if use_start else 0
-            _v2, _f, _i = _apply(_d, level=level, start=_st)
+            _v2, _f, _i = _apply(_d, level=_lv, start=_st)
             if _f:
                 _v = _v2 - _nt * a.slip_pct
                 _fire += 1
+                _cut += _v
+                _hold += _fin
+                _win += 1 if _v > _fin else 0
         _yen.append(_v)
         _bp.append(_v / _nt * 1e4 if _nt > 0 else 0.0)
-    return _yen, _bp, _fire, _cov
+    return {"yen": _yen, "bp": _bp, "fire": _fire, "cov": _cov,
+            "cut": _cut, "hold": _hold, "win": _win}
+
+
+def _msig(days: list, yen: list) -> tuple:
+    """月平均と月次σ。⛔ 従来の判定基準(月平均÷σ)を新表にも必ず出す。
+    CVaR は裾、÷σ は全体のばらつき。**別の量なので片方だけ見ると食い違う**。"""
+    _m: dict = {}
+    for _d, _v in zip(days, yen):
+        _m[_d[:7]] = _m.get(_d[:7], 0.0) + _v
+    _mv = np.array([_m[k] for k in sorted(_m)], float)
+    _mu = float(_mv.mean()) if len(_mv) else 0.0
+    _sd = float(_mv.std(ddof=1)) if len(_mv) > 1 else 0.0
+    return _mu, _sd, (_mu / _sd if _sd else 0.0)
+
+
+def _row2(lbl: str, r: dict, days: list, base: dict) -> None:
+    """1行。**CVaR と 月平均÷σ の両方**を出す。片方だけだと食い違いに気づけない。"""
+    _tot = sum(r["yen"])
+    _mu, _sd, _rt = _msig(days, r["yen"])
+    _cv, _cb = _cvar(r["yen"]), _cvar(r["bp"])
+    _f = (_cv / base["cv"]) if base["cv"] < 0 else 1.0
+    _eq = base["mu"] * _f
+    _dif = r["cut"] - r["hold"]              # 発火日: 降りた − 引けまで
+    _wr = (r["win"] / r["fire"] * 100.0) if r["fire"] else 0.0
+    if r["fire"] <= 0:
+        _mk = "  —"
+    elif _f >= 1.0:
+        _mk = "  ⛔CVaR悪化"
+    elif _mu <= _eq:
+        _mk = "  ⛔予算縮小が上"
+    elif _rt <= base["rt"]:
+        _mk = "  ⚠÷σ は改善せず"     # CVaR は良いが ばらつきは良くなっていない
+    else:
+        _mk = "  ✅"
+    _ft = "—" if _f >= 1.0 else f"{_f:.2f}"
+    _et = "—" if _f >= 1.0 else f"{_eq:+,.0f}"
+    print(f"  {lbl:<22}{_tot:>+12,.0f}{_mu:>+10,.0f}{_rt:>6.2f}"
+          f"{_cv:>+11,.0f}{_ft:>6}{_et:>11}{r['fire']:>5}{r['cov']:>5}"
+          f"{_dif:>+11,.0f}{_wr:>6.0f}%{_mk}")
 
 
 def _row(lbl: str, yen: list, bp: list, fire: int, cov: int,
@@ -502,32 +559,44 @@ print(f"  ⛔ picks.csv に約定時刻が無いので『何時に満額にな�
       f"データから出せません。時刻での代用です")
 print(f"  ★ 主指標は **CVaR5%(円)** = 下位5%の日の平均。最悪1日ではなく裾の平均")
 
+_LP = [float(x) for x in a.levels_pct.split(",") if x.strip()]
+
 for _wn, _wd in (("TRAIN", _tr), ("TEST", _te)):
     print(f"\n  ── {_wn} {_wd[0]}〜{_wd[-1]} ({len(_wd)}営業日) ──")
-    _nm = len({d[:7] for d in _wd})
-    _by, _bb, _, _ = _arm(_wd, 0.0, 0.0, False)
-    _bcv, _bmu = _cvar(_by), sum(_by) / max(_nm, 1)
-    print(f"  {'腕':<20}{'合計':>13}{'月平均':>11}{'CVaR5%円':>12}"
-          f"{'CVaRbp':>10}{'発火':>5}{'対象日':>6}{'等価f':>7}{'等価月平均':>11}")
-    print("  " + "-" * 92)
-    print(f"  {'① 現行(損切りなし)':<20}{sum(_by):>+13,.0f}{_bmu:>+11,.0f}"
-          f"{_bcv:>+12,.0f}{_cvar(_bb):>+10.0f}{'—':>5}{'—':>6}{1.0:>7.2f}"
-          f"{_bmu:>+11,.0f}")
+    _b0 = _arm(_wd, 0.0, 0.0, False)
+    _bmu, _bsd, _brt = _msig(_wd, _b0["yen"])
+    _base = {"cv": _cvar(_b0["yen"]), "mu": _bmu, "rt": _brt}
+    print(f"  {'腕':<22}{'合計':>12}{'月平均':>10}{'÷σ':>6}"
+          f"{'CVaR5%':>11}{'等価f':>6}{'等価月平均':>11}{'発火':>5}"
+          f"{'対象':>5}{'降−引':>11}{'正解率':>7}")
+    print("  " + "-" * 106)
+    print(f"  {'① 現行(損切りなし)':<22}{sum(_b0['yen']):>+12,.0f}"
+          f"{_bmu:>+10,.0f}{_brt:>6.2f}{_base['cv']:>+11,.0f}"
+          f"{1.0:>6.2f}{_bmu:>+11,.0f}{'—':>5}{'—':>5}{'—':>11}{'—':>7}")
     for _l in _LV:
-        _y, _b, _f, _c = _arm(_wd, _l, 0.0, True)
-        _row(f"② 全日 −{_l:,.0f}円", _y, _b, _f, _c, _bcv, _bmu, _nm)
+        _row2(f"② 全日 −{_l:,.0f}円", _arm(_wd, _l, 0.0, True), _wd, _base)
     for _l in _LV:
-        _y, _b, _f, _c = _arm(_wd, _l, a.gate_pct, True)
-        _row(f"③ 満額のみ −{_l:,.0f}円", _y, _b, _f, _c, _bcv, _bmu, _nm)
+        _row2(f"③ 満額のみ −{_l:,.0f}円",
+              _arm(_wd, _l, a.gate_pct, True), _wd, _base)
+    for _p in _LP:
+        _row2(f"④ 全日 −投入の{_p:.1f}%",
+              _arm(_wd, 0.0, 0.0, True, pct=_p), _wd, _base)
 
 print(f"\n  ★ 『等価f』= その腕と同じ CVaR にするために予算を何倍にするか。")
 print(f"     『等価月平均』= そのとき残る月平均利益(= 現行 × f)。")
+print(f"  ★ 『降−引』= **発火した日だけ**で「降りた損益 − 引けまで持った損益」。")
+print(f"     マイナスなら降りて損。『正解率』が50%前後なら**コイン投げ**(§18.62)")
 print(f"  ⛔ **等価月平均 を上回らない腕は採用しない**。"
       f"同じリスク低減が『予算を減らすだけ』で得られるなら、")
 print(f"     条件付き損切りという複雑さを足す理由がありません")
-print(f"  ⚠ 予算縮小は比例縮小の近似です(実際は限界の銘柄が落ちる)。"
-      f"目安として使ってください")
-print(f"  ⚠ ②③ が TRAIN と TEST で同じ水準を指さなければ、固定できません(§18.36)")
+print(f"  ⚠ **CVaR と ÷σ は別の量**(裾 vs 全体のばらつき)。CVaR が改善しても")
+print(f"     ÷σ が改善しないことはあります。片方だけ見て採用しないこと")
+print(f"  ⛔ ④(投入額比)を必ず見ること。**固定円は投入額で意味が変わる**"
+      f"(−30,000円 は満額400万なら−0.75%、3割120万なら−2.5%)。")
+print(f"     ③が効くのが『満額の日だから』なのか『投入額比で浅いから』なのかは、")
+print(f"     ③と④を並べないと分離できません")
+print(f"  ⚠ 予算縮小は比例縮小の近似です(実際は限界の銘柄が落ちる)。目安です")
+print(f"  ⚠ ②③④ が TRAIN と TEST で同じ水準を指さなければ、固定できません(§18.36)")
 
 # ══════════════════════════════════════════════════════════════════════
 # ★★ 決済時刻 — 引け成行より早く畳んだらどうか (2026-09-04 ユーザー発案)
