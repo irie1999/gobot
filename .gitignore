@@ -81,3 +81,20 @@ k_morning_log.csv
 # 5分足の部分スナップショットを復元した先 (export_intraday_cache.py --import)
 # ⛔ 部分データ。本物の stock_5min と混ぜないこと
 stock_5min_subset/
+
+# N/J の観測データと調査ツールの出力 (2026-09-04)
+# 実測値なので git には入れない。ordered_signals_lss.csv* はあったが
+# **_n 版が抜けていた**(N 追加時の漏れ)。
+ordered_signals_n.csv*
+n_quotes_*.csv
+n_close_*.csv
+n_paper_*.csv
+n_signals_*.csv
+k_paper_*.csv
+k_signals_*.csv
+board_speed_log.csv
+picks*.csv
+# 調査ツールの出力 (--save の既定)
+entry_slip.csv
+exec_sim.csv
+wait_sim.csv
