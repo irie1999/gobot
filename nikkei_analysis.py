@@ -649,9 +649,11 @@ _NG_NOPX_TAB = os.environ.get("LSS_NEWGAP_NOPX", "0").strip().lower() \
 #      → _newgap_scan_one で min_start_date を渡し、実際に取れた期間を出す。
 _NG_DAYS = int(os.environ.get("LSS_NEWGAP_DAYS", "0"))
 _NG_SPAN: dict = {}          # (窓の実測) 最古日 / 最新日 / 銘柄日数
-# ★ 全変種を1つのテキストにまとめて書き出す先。既定 n_report_<日付>.txt
-#   HTML を目で写すと必ず取り違えるので、比較に要る数字をファイルに集める。
-_NG_TXT = os.environ.get("LSS_NEWGAP_TXT", "auto").strip()
+# ★ 全変種を1つのテキストにまとめて書き出す先。**既定OFF**(2026-09-05 ユーザー指示
+#   「常にファイル出力は行わないでいい」)。毎日の .\dailyfast では出さない。
+#   出したいときだけ:  $env:LSS_NEWGAP_TXT = "auto"   → n_report_<日付>.txt
+#                      $env:LSS_NEWGAP_TXT = "x.txt"  → そのパス
+_NG_TXT = os.environ.get("LSS_NEWGAP_TXT", "").strip()
 import datetime as _dtt
 
 
