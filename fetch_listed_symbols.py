@@ -33,10 +33,15 @@ import pandas as pd
 import requests
 
 # ── JPX データソース ──────────────────────────────────────────
-JPX_XLS_URL = (
-    "https://www.jpx.co.jp/markets/statistics-equities/misc/"
-    "tvdivq0000001vg2-att/data_j.xls"
-)
+# ⛔ 2026-09-06: JPX が **.xls → .xlsx** に変わって直リンクが404になった。
+#   拡張子も変わりうるので、既知の候補を順に試し、全滅したら一覧ページから探す。
+JPX_XLS_URLS = [
+    ("https://www.jpx.co.jp/markets/statistics-equities/misc/"
+     "tvdivq0000001vg2-att/data_j.xlsx"),      # 2026-09-06 実測でこれが現行
+    ("https://www.jpx.co.jp/markets/statistics-equities/misc/"
+     "tvdivq0000001vg2-att/data_j.xls"),       # 旧(2026-09-05 まで)
+]
+JPX_XLS_URL = JPX_XLS_URLS[0]                  # 表示用(互換)
 # ★ 直リンクが 404 になったときに、ここから現在のリンクを探す
 JPX_INDEX_URL = "https://www.jpx.co.jp/markets/statistics-equities/misc/01.html"
 CACHE_FILE  = Path(".jpx_listed_cache.pkl")
@@ -97,14 +102,16 @@ def fetch_jpx_raw(no_cache: bool = False) -> pd.DataFrame:
 
     r = None
     _tried = []
-    for _u, _how in ((JPX_XLS_URL, "既知の直リンク"), (_discover(), "一覧ページから発見")):
+    _cands = [(_u, f"既知の直リンク({_u.rsplit('.', 1)[-1]})")
+              for _u in JPX_XLS_URLS]
+    for _u, _how in _cands + [(_discover(), "一覧ページから発見")]:
         if not _u:
             continue
         _tried.append(f"{_how}: {_u}")
         try:
             r = requests.get(_u, timeout=30, headers=_HD)
             r.raise_for_status()
-            if _how != "既知の直リンク":
+            if _how == "一覧ページから発見":
                 print(f"  ★ 直リンクが変わっていたので一覧ページから取得: {_u}")
                 print(f"     → JPX_XLS_URL を更新すると次回から速くなります")
             break
