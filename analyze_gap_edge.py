@@ -3516,8 +3516,30 @@ if a.sector_scan:
         print(f"\n  ② 33業種の総当たり — **多重検定**。帰無は『同日シャッフルで最悪業種を選ぶ』")
         _w = _trp.copy()
         _w["_sec"] = _w["symbol"].map(_sec33).fillna("(不明)")
+        # ⛔⛔ **業種は「今の」上場銘柄一覧から引いている**(JPX data_j.xls)。
+        #   11.5年前まで今日の業種を遡及適用しており、
+        #     ・上場廃止銘柄は引けない = 「(不明)」
+        #     ・業種変更は反映されない
+        #   → 今回は **探索用**。ここで出たものを即ルールにしない。
+        #   ★ 年別の判明率を必ず出す。古い年ほど「(不明)」が増えるはずで、
+        #     増え方が急なら業種軸そのものが古い期間で機能していない。
+        _w["_yr"] = _w["date"].astype(str).str[:4]
+        _kn = _w.groupby("_yr")["_sec"].apply(lambda x: (x != "(不明)").mean() * 100.0)
+        _un = _w.groupby("_yr")["_sec"].apply(lambda x: (x == "(不明)").sum())
+        print(f"\n    【年別 業種判明率】(今の上場一覧で引けた割合)")
+        print(f"    {'年':<7}" + "".join(f"{y:>8}" for y in _kn.index))
+        print(f"    {'判明%':<7}" + "".join(f"{v:>7.0f}%" for v in _kn.values))
+        print(f"    {'不明件':<7}" + "".join(f"{v:>8,}" for v in _un.values))
+        _un_all = float((_w["_sec"] == "(不明)").mean()) * 100.0
+        print(f"    全体の不明 **{_un_all:.1f}%** "
+              + ("⛔ 多すぎます。業種軸の結論は使えません" if _un_all > 25 else
+                 "⚠ 生存バイアス(上場廃止が落ちている)は残ります"))
         _rows = []
         for _s, _g in _w.groupby("_sec"):
+            # ⛔ 「(不明)」を業種候補にしない(先に宣言)。中身は上場廃止銘柄の
+            #   寄せ集めで、業種ではないうえ生存バイアスの塊
+            if _s == "(不明)":
+                continue
             if len(_g) >= 200:
                 _rows.append((_s, len(_g), _bp(_g), _cluster_t(_g)))
         _rows.sort(key=lambda x: x[2])
@@ -3550,12 +3572,86 @@ if a.sector_scan:
         if _wst:
             print(f"\n    最悪業種 {_wst[0]} {_wst[2]:+.1f}bp  /  帰無(最悪を選ぶ) 中央 "
                   f"{_med:+.1f} / 5%点 {_p05:+.1f}")
+            _hit2 = _wst[2] < _p05
             print("    " + ("✅ 帯の外(5%)。**ただし33業種から最悪を選んだ1回**。"
-                            "別の窓で同じ業種が最悪でなければノイズ"
-                            if _wst[2] < _p05 else
+                            if _hit2 else
                             "⛔ **帯の中**。33業種から最悪を選べばこの程度は必ず出る"))
+            # ── ③ TRAIN の最悪業種を **TEST でそのまま**確かめる ──
+            #   ⛔ TEST で最悪業種を選び直したら再探索。**業種名を固定して**引く
+            if len(_tep):
+                _t2 = _tep.copy()
+                _t2["_sec"] = _t2["symbol"].map(_sec33).fillna("(不明)")
+                _sel2 = _t2[_t2["_sec"] == _wst[0]]
+                _oth2 = _t2[(_t2["_sec"] != _wst[0]) & (_t2["_sec"] != "(不明)")]
+                print(f"\n    【TEST で同じ業種を固定して確認】(選び直さない)")
+                if len(_sel2) < 100:
+                    print(f"      ⚠ TEST に {len(_sel2)}件しかありません。判定不能")
+                else:
+                    print(f"      {_wst[0]}: {len(_sel2):,}件 {_bp(_sel2):+.1f}bp "
+                          f"(日t {_cluster_t(_sel2):+.2f})  / "
+                          f"その他 {len(_oth2):,}件 {_bp(_oth2):+.1f}bp")
+                    _same = (_bp(_sel2) < 0) and (_bp(_sel2) < _bp(_oth2))
+                    print("      " + ("✅ TRAIN と同じ向き(マイナス かつ その他より下)"
+                                      if _same else
+                                      "⛔ **TEST で再現しません**。TRAIN のノイズ"))
+            # ── ④ 除外したら実際にどうなるか(予算シミュを通す) ──
+            #   ⛔ bp の比較だけで決めない。§18.10「全部買えるなら得」と
+            #     「予算内でどれを買うか」は別問題。空いた枠は下位が埋める
+            print(f"\n    【最悪業種を除外して予算シミュを通す】"
+                  f"(空いた枠は下位銘柄が埋める)")
+            for _wn2, _wf2 in (("TRAIN", _train), ("TEST", _test)):
+                if _wf2 is None or not len(_wf2):
+                    continue
+                _p2 = _pool_of(_wf2)
+                if _p2.empty:
+                    continue
+                _nd2 = max(1, _p2["date"].nunique())
+                _sim2, _, _ = _make_ops_sim(_wf2, _p2, _nd2)
+                _base2 = _sim2(50, a.budget_man or 400.0, 0, False)
+                _p3 = _p2[_p2["symbol"].map(_sec33).fillna("(不明)") != _wst[0]]
+                _sim3, _, _ = _make_ops_sim(_wf2, _p3, _nd2)
+                _ex2 = _sim3(50, a.budget_man or 400.0, 0, False)
+                _mo2 = _nd2 / 20.0
+                print(f"      {_wn2:<6} 除外なし {_base2['pnl']:>+12,.0f} → "
+                      f"除外後 {_ex2['pnl']:>+12,.0f}  "
+                      f"差 {_ex2['pnl'] - _base2['pnl']:>+11,.0f} "
+                      f"(月 {(_ex2['pnl'] - _base2['pnl']) / _mo2:>+8,.0f}円)")
+            print(f"      ⚠ 月あたりの差が **月次σ(約12.6万円)の半分**を超えなければ"
+                  f"『測れていない』であって『改善した』ではない")
+    # ── ⑤ 同業種の同日集中に上限をかける(除外とは別の検定) ──
+    #   ★ 「その業種が悪い」ではなく「**同じ業種に偏った日が悪い**」かもしれない。
+    #     除外は業種そのものを否定するが、上限は偏りだけを削る。別物なので分ける。
+    if _sec33:
+        print(f"\n  ⑤ 同業種の同日集中に上限 — **除外とは別の検定**")
+        for _wn3, _wf3 in (("TRAIN", _train), ("TEST", _test)):
+            if _wf3 is None or not len(_wf3):
+                continue
+            _p4 = _pool_of(_wf3)
+            if _p4.empty:
+                continue
+            _p4 = _p4.copy()
+            _p4["_sec"] = _p4["symbol"].map(_sec33).fillna("(不明)")
+            _nd3 = max(1, _p4["date"].nunique())
+            _mo3 = _nd3 / 20.0
+            _b4 = _make_ops_sim(_wf3, _p4, _nd3)[0](50, a.budget_man or 400.0,
+                                                    0, False)
+            _out4 = [f"      {_wn3:<6} 上限なし {_b4['pnl']:>+12,.0f}"]
+            for _cap4 in (2, 3, 4):
+                # 同じ日・同じ業種は |ギャップ| 上位 _cap4 件まで
+                _k4 = (_p4.sort_values("gap_bp", ascending=False)
+                       .groupby(["date", "_sec"]).head(_cap4))
+                _r4 = _make_ops_sim(_wf3, _k4, _nd3)[0](50, a.budget_man or 400.0,
+                                                        0, False)
+                _out4.append(f"        同業種 {_cap4}件まで {_r4['pnl']:>+12,.0f} "
+                             f"(差 {_r4['pnl'] - _b4['pnl']:>+11,.0f} / "
+                             f"月 {(_r4['pnl'] - _b4['pnl']) / _mo3:>+8,.0f}円)")
+            print("\n".join(_out4))
+        print(f"      ⚠ TRAIN と TEST で **同じ上限**が良くなければ固定できません(§18.36)")
+
     print(f"\n  ★ 前提: N の稼働率は約40%(§18.55)。**除外で空いた予算は使い道が無い**ので、"
           f"除外の利得は『対象のbpがマイナスであること』だけ。プラスなら除外は純損")
+    print(f"  ⛔⛔ **業種は「今の」上場一覧の遡及適用**です(上場廃止は不明・業種変更は未反映)。"
+          f"\n     ここで何が出ても **探索用**。即ルール化しないと先に宣言しています")
 
 if a.confirm:
     _cax, _, _cq = a.confirm.partition(":")
