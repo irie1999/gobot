@@ -177,6 +177,14 @@ ap.add_argument("--out", type=str, default="")
 #   モデルに無い建玉ができる。
 ap.add_argument("--allow-late-orders", action="store_true",
                 help="⛔ 時間外でも発注する。事故のもとなので通常は使わない")
+# ⛔⛔ 板の PreviousClose が前夜の候補と食い違ったら **発注を止める**。
+#   kabuステーションが起動していないと前回終了時のキャッシュが返り、
+#   トークンも板も正常なので気づかない(2026-09-05 実測)。判定の分母が
+#   前々日の終値になるので、ギャップが丸ごと1日ずれる。
+#   §18.48 ⑦④ の方針どおり **fail-safe**(疑わしければ建てない)。
+ap.add_argument("--allow-stale-pc", action="store_true",
+                help="⛔ 前日終値が前夜と食い違っても発注する。"
+                     "板が古いキャッシュの可能性があるので通常は使わない")
 # ★★ 終了直前に引け成行(MOC)を板へ置く (2026-08-20)。既定ON。
 #   09:00 に建てた玉は、このスクリプトが終わる 09:10 まで板に何も乗らない
 #   (トークンが1つなので watcher を並走できない)。2026-08-19 はその直後に
@@ -236,7 +244,11 @@ if args.execute and not args.allow_late_orders:
             f"  ・それでも出す     → --allow-late-orders（自己責任）")
 
 _COLS = ["date", "seen_ts", "grp", "symbol", "in_j", "rank_liq", "liquidity",
-         "prev_close", "open_p", "open_time", "current_price",
+         "prev_close", "open_p", "open_time",
+         # ★ 板の PreviousClose を前夜の候補ファイル(日足)と突き合わせた結果。
+         #   pc_dev_bp が全銘柄で大きければ **板が古いキャッシュ**(2026-09-05)
+         "pc_ref", "pc_dev_bp",
+         "current_price",
          # ⛔⛔ **売りは最良買い気配に当てる**(2026-08-19)。バックテストは
          #   「約定=始値」を仮定しているが、実発注は保護指値 @始値×(1-50bp) を
          #   板にぶつけるので、**その瞬間の最良買い気配**で約定する。
@@ -280,6 +292,16 @@ _SIG_LIQ: dict = {}
 #    重複排除して1本だけ発注するので、**戦略の本数で割らないと配分がズレる**
 #    (7936 のように4戦略出る銘柄で大きく食い違う)。§18.9 の鉄則に従って揃える。
 _NPAIR: dict = {}
+# 銘柄 -> **前夜の候補ファイルが持っている前日終値**(日足由来)。
+# ⛔⛔ 09:00 の判定は kabu の /board の `PreviousClose` を使う。ところが
+#    kabuステーションが起動していないと **前回終了時のキャッシュ**を返し、
+#    トークンも板も正常に返るので気づかない(2026-09-05 に実測。9/5 15:49 に
+#    叩いて CurrentPriceTime が 9/4 15:30、PreviousClose は 9/3 の終値)。
+#    そのまま朝に走ると **前々日の終値 vs 今日の始値**でギャップを測る。
+#    → 前夜の値(日足)と突き合わせて、ずれたら **発注を止める**。
+#    OpeningPriceTime の日付ガード(:974)は始値しか守っておらず、
+#    分母である前日終値は無検証だった。
+_SIG_PC: dict = {}
 
 # ══════════════════════════════════════════════════════════════════════
 #  --collect : 今日のシグナルだけを収集する (kabu を使わない)
@@ -444,6 +466,12 @@ elif Path(_sig_csv).exists():
             _l0 = 0.0
         if _l0 > 0 and _l0 > _SIG_LIQ.get(_s0, 0):
             _SIG_LIQ[_s0] = _l0
+        try:
+            _p0 = float(r.get("prev_close") or 0)
+        except Exception:
+            _p0 = 0.0
+        if _p0 > 0 and not _SIG_PC.get(_s0):
+            _SIG_PC[_s0] = _p0          # 板の PreviousClose を検証する基準
         _NPAIR[_s0] = _NPAIR.get(_s0, 0) + 1
         if _s0 not in _syms:
             _syms.append(_s0)
@@ -971,6 +999,15 @@ def _mk_row(_s: str, _bd: dict, _ts: str, _grp: int) -> dict:
     _pc = float(_bd.get("PreviousClose") or 0)
     _op = float(_bd.get("OpeningPrice") or 0)
     _ot = str(_bd.get("OpeningPriceTime") or "")
+    # ⛔⛔ **分母(前日終値)を検証する** (2026-09-05)。板が古いキャッシュだと
+    #   PreviousClose が **前々日**の終値になり、ギャップ判定が丸ごと1日ずれる。
+    #   前夜の候補ファイル(日足由来)と突き合わせる。営業日の計算が要らず、
+    #   実際に判定へ使う値そのものを見るので確実。
+    #   ⚠ 配当落ち日は日足が遡及調整されてずれうるが、それは銘柄ごと。
+    #     **全銘柄が同時にずれるのはキャッシュが古いときだけ**なので、
+    #     採否は個別ではなく全体の割合で決める(:_pc_bad)。
+    _ref = float(_SIG_PC.get(_s) or 0)
+    _dev = (abs(_pc - _ref) / _ref * 10000.0) if (_ref > 0 and _pc > 0) else -1.0
     # ⛔⛔ **OpeningPriceTime の日付を必ず見る** (2026-08-20)。
     #   /board は引け後も当日の OpeningPrice を返し続ける(:172)。つまり 09:00 に
     #   まだ寄っていない銘柄は **前日の** OpeningPrice / OpeningPriceTime
@@ -1006,6 +1043,7 @@ def _mk_row(_s: str, _bd: dict, _ts: str, _grp: int) -> dict:
             "symbol": _s, "in_j": 1 if _s in _jpool else 0,
             "rank_liq": 0, "liquidity": _liq.get(_s, 0),
             "prev_close": _pc, "open_p": _op, "open_time": _ot,
+            "pc_ref": _ref, "pc_dev_bp": (round(_dev, 1) if _dev >= 0 else ""),
             "current_price": _bd.get("CurrentPrice") or 0,
             # 売り注文が当たる先 = 最良買い気配(Bid)。数量も残すと板の厚さが分かる。
             "bid": _bd.get("BidPrice") or 0,
@@ -1449,6 +1487,40 @@ print(f"""
   09:00に未寄  {_late_n:,}銘柄 ({_late_n / max(1, len(_rows)) * 100:.1f}%)
                ⚠ バックテストの実測は15.7%。大きく違うなら要調査
   グループ     {len(_groups)}回""")
+# ⛔⛔ **前日終値(判定の分母)が正しいか** (2026-09-05 に実測で見つけた穴)。
+#   kabuステーションが起動していないと /board は前回終了時のキャッシュを返す。
+#   トークンも板も正常に返り、CurrentPriceTime だけが前日のまま = **気づかない**。
+#   そのまま朝に走ると PreviousClose が前々日の終値になり、
+#   「前々日の終値 vs 今日の始値」でギャップを測る = 判定が丸ごと1日ずれる。
+#   ⚠ 個別のズレは配当落ち(日足は遡及調整、板はしない)で説明できるので、
+#     **全体の割合**で判定する。全銘柄が同時にずれるのはキャッシュが古いときだけ。
+_pc_chk = [r for r in _rows if str(r.get("pc_dev_bp") or "") != ""]
+_pc_bad = [r for r in _pc_chk if float(r.get("pc_dev_bp") or 0) > 50.0]
+if _pc_chk:
+    _bad_r = len(_pc_bad) / len(_pc_chk)
+    if _bad_r > 0.5:
+        print(f"\n⛔⛔ **前日終値が前夜の候補と食い違っています** … "
+              f"{len(_pc_bad):,}/{len(_pc_chk):,}銘柄 (0.5%超のズレ)")
+        for r in _pc_bad[:3]:
+            print(f"     {r['symbol']}  板 {float(r['prev_close'] or 0):,.1f}"
+                  f"  vs  前夜 {float(r['pc_ref'] or 0):,.1f}"
+                  f"  ({float(r['pc_dev_bp'] or 0):,.0f}bp)")
+        print(f"   **kabuステーションが起動していない**可能性が高い"
+              f"(前回終了時のキャッシュを返します)。")
+        print(f"   このまま判定すると **前々日の終値 vs 今日の始値** に"
+              f"なるので、発注を止めます。")
+        print(f"   → kabuステーションを起動して再実行してください")
+        if getattr(args, "execute", False) and not getattr(
+                args, "allow_stale_pc", False):
+            sys.exit("[中止] 前日終値が信用できないため発注しません "
+                     "(どうしても出すなら --allow-stale-pc)")
+    elif _pc_bad:
+        print(f"\n  ⚠ 前日終値が前夜と違う {len(_pc_bad):,}銘柄"
+              f"(配当落ちなら正常。全体の{_bad_r * 100:.0f}%なので続行)")
+elif _SIG_PC:
+    print(f"\n  ⚠ 前日終値の突合ができませんでした"
+          f"(候補ファイルに prev_close が無い)。板が古くても検出できません")
+
 # ⛔ 前日の OpeningPrice を掴んだ銘柄。1〜2件なら「まだ寄っていないだけ」で正常。
 #   大半がこれなら kabu の書式が変わった等で **全件が黙ってスキップ**されている。
 _stale_n = sum(1 for r in _rows if r.get("stale_open"))
