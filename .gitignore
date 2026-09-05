@@ -44,3 +44,57 @@ signal_score_cache.json
 .risk_check_cache_*.json
 mae_analysis_*.html
 signals_holdout_all*.html
+entry_delay_analysis*.html
+
+# Claude Code agent worktrees (ephemeral, never commit)
+.claude/worktrees/
+.sameday5m_cache/
+.lss_scan_cache/
+
+# ── 実行のたびに作られる生成物(2026-08-10: 誤って commit して pull が壊れた) ──
+# これらが追跡されていると、各PCで再生成されるたびに「ローカル変更」になり
+# git pull が Aborting する。中身は毎回作り直されるので履歴に残す意味は無い。
+signals_*.json
+holdout_selected_symbols.py
+signals_holdout_all*.html
+lss_trades*.csv
+placed_orders_*.csv
+ordered_signals_lss.csv*
+fills_*.csv
+orders_*.csv
+tenkan_*.csv
+slip_daily_log.csv
+signal_score_cache_lss.json*
+bt_v*.pkl
+holdings_latest.html
+.eh_cache/
+.asof_bt_cache/
+report_conditions_log.csv
+
+# 発注リストの日別スナップショット(その日に見えていた正本 / 直近3日だけ)
+signal_history/
+
+# 朝の J 記録(k_morning_archive.py)。取り直せないのでローカルに残す
+k_morning/
+k_morning_log.csv
+
+# 5分足の部分スナップショットを復元した先 (export_intraday_cache.py --import)
+# ⛔ 部分データ。本物の stock_5min と混ぜないこと
+stock_5min_subset/
+
+# N/J の観測データと調査ツールの出力 (2026-09-04)
+# 実測値なので git には入れない。ordered_signals_lss.csv* はあったが
+# **_n 版が抜けていた**(N 追加時の漏れ)。
+ordered_signals_n.csv*
+n_quotes_*.csv
+n_close_*.csv
+n_paper_*.csv
+n_signals_*.csv
+k_paper_*.csv
+k_signals_*.csv
+board_speed_log.csv
+picks*.csv
+# 調査ツールの出力 (--save の既定)
+entry_slip.csv
+exec_sim.csv
+wait_sim.csv

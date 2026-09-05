@@ -1,0 +1,466 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""N の**エントリー滑り**を、寄ってからの遅れ秒で分けて見る（調査用・発注しない）。
+
+⛔ **日々の手順には入れないこと**（手順は .\\nexec / .\\fills / n_paper --close の3つ）。
+   これは「30件が何を測っているか」を理解するための道具です。
+
+★ 何を見るのか
+  滑りの説明変数は「09:00ちょうどに寄ったか」ではなく、
+  **寄ってから何秒後に検知/約定できたか** です。遅寄り銘柄でも、
+  寄った直後に検知できれば滑らないからです。
+      seen_lag = seen_ts   - open_time   （検知の遅れ）
+      fill_lag = fill_time - open_time   （約定の遅れ）
+
+★ 3つの量を混ぜないこと
+  ① 純粋な滑り     … 約定した銘柄の 実約定 vs 始値
+  ② 選択損失       … 合格したのに建てられなかったぶん（不約定・ガード・予算）
+  ③ 理想との差     … ①+② = バックテスト(始値で全部建てる)との差
+  いまは約定率100%なので②はゼロですが、-3%ガードや予算で落ちると出ます。
+
+⛔ **N と J を混ぜない。** 判別は日付ではなく `ordered_signals_n.csv`
+   （N 専用の台帳）で行います。2026-08-21 は J の運用日で、たまたま
+   k_paper が無かったから混ざらなかっただけでした。
+
+読むもの（どれも既存。何も発注しません）:
+    ordered_signals_n.csv    N の発注台帳（これが N の定義）
+    orders_<yyyyMMdd>.csv    .\\fills が出す全注文一覧（実約定値・約定時刻）
+    k_paper_<yyyyMMdd>.csv   朝の板読み（始値・寄り時刻・検知時刻）
+
+使い方:
+    python analyze_entry_slip.py
+    python analyze_entry_slip.py --since 2026-09-01
+"""
+from __future__ import annotations
+
+import argparse
+import csv as _csv
+import glob
+import os
+import re
+
+ap = argparse.ArgumentParser(
+    description="N のエントリー滑りを遅れ秒で分けて見る（調査用・発注しない）")
+ap.add_argument("--since", default="", help="この日以降だけ (YYYY-MM-DD)")
+ap.add_argument("--dir", default=".", help="CSV のあるフォルダ")
+ap.add_argument("--no-ledger", action="store_true",
+                help="台帳での N 判別をやめる（⛔ J が混ざる。検証用）")
+ap.add_argument("--qty", type=int, default=100,
+                help="株数(既定100 = N は100株固定)。**建玉の表示にだけ**使う。"
+                     "資金加重bp は株数が約分されるので影響しません")
+ap.add_argument("--save", default="entry_slip.csv",
+                help="1件1行で保存する先（'' で保存しない）")
+a = ap.parse_args()
+
+
+def _rows(path: str) -> list:
+    try:
+        with open(path, newline="", encoding="utf-8-sig") as f:
+            return list(_csv.DictReader(f))
+    except Exception:
+        return []
+
+
+def _pick(r: dict, *names) -> str:
+    for n in names:
+        v = str(r.get(n, "") or "").strip()
+        if v and v not in ("—", "-", "nan", "None"):
+            return v
+    return ""
+
+
+def _f(v) -> float:
+    try:
+        return float(str(v).replace(",", "").strip())
+    except Exception:
+        return 0.0
+
+
+def _code4(s: str) -> str:
+    return re.sub(r"\.T$", "", str(s).strip())
+
+
+def _secs(hms: str) -> int:
+    """時刻文字列 → 秒。取れなければ -1。
+
+    ⛔ 数字だけ抜いて末尾6桁、はダメ(2026-09-03 に踏んだ)。kabu の
+       OpeningPriceTime は `2026-09-03T09:00:50+09:00` で来るので、
+       末尾6桁は `+09:00` を含んだ `500900` になり `50:09:00` が出る。
+       時刻の**位置**を正規表現で当てること。
+    """
+    s = str(hms).strip()
+    if not s:
+        return -1
+    m = re.search(r"[T ](\d{1,2}):(\d{2}):(\d{2})", s)      # ISO
+    if m:
+        return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+    m = re.match(r"^(\d{1,2}):(\d{2})(?::(\d{2}))?", s)     # 先頭が時刻
+    if m:
+        return (int(m.group(1)) * 3600 + int(m.group(2)) * 60
+                + int(m.group(3) or 0))
+    d = re.sub(r"[^0-9]", "", s)                            # 数字だけ
+    if len(d) == 14:
+        d = d[8:14]
+    elif len(d) == 12:
+        d = d[8:12]
+    if len(d) == 6:
+        try:
+            return int(d[0:2]) * 3600 + int(d[2:4]) * 60 + int(d[4:6])
+        except Exception:
+            return -1
+    if len(d) == 4:
+        try:
+            return int(d[0:2]) * 3600 + int(d[2:4]) * 60
+        except Exception:
+            return -1
+    return -1
+
+
+def _has_sec(s: str) -> bool:
+    """秒の情報があるか。`09:00` のような分までの値は False。
+
+    ⛔ 分までの値を 09:00:00 として遅延帯に入れてはいけない
+       (2026-09-03 に踏んだ)。orders_20260901.csv には秒列が無く、
+       `fill_time=09:00` を 0秒として読んだ結果、「約定が検知より
+       前」という有り得ない行が出た。実際は 09:00:08 だった。
+    """
+    s = str(s).strip()
+    if not s:
+        return False
+    if re.search(r"\d{1,2}:\d{2}:\d{2}", s):
+        return True
+    d = re.sub(r"[^0-9]", "", s)
+    return len(d) in (6, 14)          # HHmmss / yyyyMMddHHmmss
+
+
+def _hms(sec: int) -> str:
+    return "??:??:??" if sec < 0 else \
+        f"{sec // 3600:02d}:{sec % 3600 // 60:02d}:{sec % 60:02d}"
+
+
+def _lag(a_sec: int, b_sec: int) -> int:
+    """a - b。どちらか欠ければ -9999。"""
+    return a_sec - b_sec if (a_sec >= 0 and b_sec >= 0) else -9999
+
+
+# ── ⛔ N の定義：台帳に載っている (日付, 銘柄) だけ ────────────────────
+_LEDGER = os.path.join(a.dir, "ordered_signals_n.csv")
+_n_keys, _ledger_ok = set(), False
+if not a.no_ledger:
+    for r in _rows(_LEDGER):
+        _st = _pick(r, "strategy")
+        if _st and _st.upper() != "N":
+            continue
+        _d = _pick(r, "date")
+        _s = _code4(_pick(r, "symbol", "code"))
+        if _d and _s:
+            _n_keys.add((_d[:10], _s))
+    _ledger_ok = bool(_n_keys)
+
+# ── 日付ごとに orders と k_paper を突き合わせる ─────────────────────────
+_od = {}
+for p in sorted(glob.glob(os.path.join(a.dir, "orders_2*.csv"))):
+    m = re.search(r"orders_(\d{8})\.csv$", os.path.basename(p))
+    if m:
+        _od[m.group(1)] = p
+if not _od:
+    raise SystemExit("orders_<日付>.csv が見つかりません。先に .\\fills を実行してください")
+
+_recs, _no_board, _bad_ts, _not_n, _missed = [], [], [], [], []
+for _ymd in sorted(_od):
+    _iso = f"{_ymd[0:4]}-{_ymd[4:6]}-{_ymd[6:8]}"
+    if a.since and _iso < a.since:
+        continue
+
+    _bd = {}
+    for _bp in (os.path.join(a.dir, f"k_paper_{_ymd}.csv"),
+                os.path.join(a.dir, f"n_paper_{_ymd}.csv")):
+        for r in _rows(_bp):
+            _sym = _code4(_pick(r, "symbol", "code"))
+            if _sym:
+                _bd[_sym] = r
+        if _bd:
+            break
+
+    # 終値（理想の損益を出すのに要る）。n_paper --close の出力から。
+    _cl = {}
+    for r in _rows(os.path.join(a.dir, f"n_close_{_ymd}.csv")):
+        _s = _code4(_pick(r, "symbol", "code"))
+        if _s:
+            _cl[_s] = (_f(_pick(r, "open_p", "始値", "open")),
+                       _f(_pick(r, "close_p", "終値", "close")))
+
+    # ⛔ 「約定した」の判定は orders の約定行。`ordered=1` は**発注しただけ**で、
+    #    約定を意味しない(2026-09-03 に踏んだ)。09-01 の 3110 は発注済み・
+    #    約定ゼロで、これを「建てた」と数えて選択損失を0件と誤報していた。
+    _filled_syms = set()
+    for r in _rows(_od[_ymd]):
+        if "売" in _pick(r, "side", "売買") and _f(_pick(r, "fill_price", "約定値")) > 0:
+            _filled_syms.add(_code4(_pick(r, "code", "symbol", "コード")))
+
+    # ② 選択損失: 合格したのに**約定しなかった**銘柄
+    for _sym, _b in _bd.items():
+        if _pick(_b, "pass_gap") not in ("1", "True", "true"):
+            continue
+        if _sym in _filled_syms:
+            continue
+        if _ledger_ok and (_iso, _sym) not in _n_keys:
+            continue                      # N の候補でないものは数えない
+        _o, _c = _cl.get(_sym, (_f(_pick(_b, "open_p", "始値")), 0.0))
+        # ショートなので「始値で売って終値で買い戻せたら」が理想
+        _ideal = (_o - _c) / _o * 1e4 if (_o > 0 and _c > 0) else None
+        _why = ("発注したが約定せず"
+                if _pick(_b, "ordered") in ("1", "True", "true") else
+                (_pick(_b, "guard_ng") and "ガード") or
+                (_pick(_b, "stale_open") and "始値が前日") or "予算/上限")
+        _missed.append({"date": _iso, "code": _sym, "why": _why,
+                        "ideal_bp": _ideal, "open_p": _o, "close_p": _c,
+                        "yen": (_o - _c) * 100 if (_o > 0 and _c > 0) else None})
+
+    for r in _rows(_od[_ymd]):
+        if "売" not in _pick(r, "side", "売買"):
+            continue
+        _fill = _f(_pick(r, "fill_price", "約定値"))
+        if _fill <= 0:
+            continue
+        _cd = _code4(_pick(r, "code", "symbol", "コード"))
+        # ⛔ N の台帳に無い注文は落とす（J が混ざるのを防ぐ）
+        if _ledger_ok and (_iso, _cd) not in _n_keys:
+            _not_n.append((_iso, _cd))
+            continue
+        _b = _bd.get(_cd)
+        if not _b:
+            _no_board.append((_iso, _cd))
+            continue
+        _open = _f(_pick(_b, "open_p", "open", "始値"))
+        if _open <= 0:
+            continue
+
+        _raw_t = _pick(_b, "open_time", "OpeningPriceTime", "寄り時刻")
+        _ot = _secs(_raw_t)
+        if _ot >= 0 and not (9 * 3600 <= _ot <= 15 * 3600 + 30 * 60):
+            _bad_ts.append((_iso, _cd, _raw_t))
+            _ot = -1
+        # ⛔ 秒が無い値は「不明」にする。分までの値を 0秒として遅延帯に
+        #    入れると「約定が検知より前」という有り得ない行が出る。
+        _sraw = _pick(_b, "seen_ts", "ts")
+        _st = _secs(_sraw) if _has_sec(_sraw) else -1
+        _fraw = _pick(r, "fill_time_s", "fill_time", "約定")
+        _ft = _secs(_fraw) if _has_sec(_fraw) else -1
+        _pc = _f(_pick(_b, "prev_close", "前日終値"))
+
+        _recs.append({
+            "date": _iso, "code": _cd,
+            "open_sec": _ot, "seen_lag": _lag(_st, _ot), "fill_lag": _lag(_ft, _ot),
+            "open_p": _open, "fill": _fill,
+            "slip": (_fill - _open) / _open * 1e4,   # ショート: 高く売れたら+
+            "gap_bp": (_open - _pc) / max(_pc, 1e-9) * 1e4 if _pc > 0 else 0.0,
+        })
+
+if not _recs:
+    raise SystemExit("突合できた N の売り注文がありません "
+                     "（ordered_signals_n.csv と k_paper_<日付>.csv が要ります）")
+
+_days = sorted({r["date"] for r in _recs})
+
+print()
+print("=" * 82)
+print("■ N のエントリー滑り（実約定 vs 始値）— **調査用。判定はしません**")
+print("=" * 82)
+print(f"  N の判別: " + (
+    f"**ordered_signals_n.csv**（{len(_n_keys)}件の台帳）" if _ledger_ok else
+    "⛔ **台帳が無いので全売り注文を N とみなしています**（J が混ざりえます）"))
+print(f"  採用 {len(_recs)}件 / 除外(N以外) {len(_not_n)}件 / "
+      f"板の記録なし {len(_no_board)}件")
+print()
+print(f"{'日付':<12}{'銘柄':>6}{'寄り':>10}{'検知遅れ':>9}{'約定遅れ':>9}"
+      f"{'ギャップ':>8}{'始値':>10}{'実約定':>10}{'滑りbp':>9}")
+print("-" * 82)
+for r in sorted(_recs, key=lambda x: (x["date"], x["open_sec"])):
+    # 「—」は不約定ではなく**秒が記録に無い**という意味。約定はしている。
+    _sl = f"{r['seen_lag']:+d}s" if r["seen_lag"] > -9000 else "秒なし"
+    _fl = f"{r['fill_lag']:+d}s" if r["fill_lag"] > -9000 else "秒なし"
+    print(f"{r['date']:<12}{r['code']:>6}{_hms(r['open_sec']):>10}"
+          f"{_sl:>9}{_fl:>9}{r['gap_bp']:>+8.0f}"
+          f"{r['open_p']:>10,.1f}{r['fill']:>10,.1f}{r['slip']:>+9.1f}")
+
+
+def _group(lbl: str, key: str, edges: list) -> None:
+    """遅れ秒の帯ごとに滑りを出す。"""
+    print()
+    print(f"■ ★ {lbl} で分けると")
+    print(f"{'':>18}{'件数':>6}{'件数加重bp':>12}{'最小':>9}{'最大':>9}")
+    print("-" * 56)
+    _lo = -1
+    for _hi in edges + [10 ** 9]:
+        _g = [r for r in _recs if r[key] > -9000 and _lo < r[key] <= _hi]
+        _nm = (f"〜{_hi}s" if _lo < 0 else
+               (f"{_lo + 1}s〜" if _hi > 10 ** 8 else f"{_lo + 1}〜{_hi}s"))
+        if _g:
+            _m = sum(x["slip"] for x in _g) / len(_g)
+            print(f"{_nm:>18}{len(_g):>6}{_m:>+12.1f}"
+                  f"{min(x['slip'] for x in _g):>+9.1f}"
+                  f"{max(x['slip'] for x in _g):>+9.1f}")
+        else:
+            print(f"{_nm:>18}{0:>6}{'—':>12}{'—':>9}{'—':>9}")
+        _lo = _hi
+    _u = [r for r in _recs if r[key] <= -9000]
+    if _u:
+        # ⛔ 「不約定」ではない。**約定はしたが時刻の秒が記録に無い**だけ。
+        #    ここを『取れない』とだけ書くと不約定と読まれる(2026-09-03 の指摘)。
+        print(f"{'時刻不明(約定済)':>18}{len(_u):>6}"
+              f"{sum(x['slip'] for x in _u) / len(_u):>+12.1f}"
+              f"{min(x['slip'] for x in _u):>+9.1f}"
+              f"{max(x['slip'] for x in _u):>+9.1f}")
+        print(f"{'':>18}  ⚠ 約定はしている。秒の列が無いだけ（不約定は②に出る）")
+
+
+_group("検知の遅れ（seen_ts − 寄り時刻）", "seen_lag", [0, 10, 30, 60])
+_group("約定の遅れ（fill_time − 寄り時刻）", "fill_lag", [0, 10, 30, 60])
+
+# ── 3量の分離 ──────────────────────────────────────────────────
+print()
+print("■ 3つの量  ⛔ ③は①+② ではありません（分母が違う）")
+_slip = sum(r["slip"] for r in _recs) / len(_recs)
+print(f"  ① 純粋な滑り  約定した {len(_recs)}件の 実約定 vs 始値"
+      f"          {_slip:>+9.1f}bp")
+
+if _missed:
+    print(f"  ② 選択損失    合格したが**約定しなかった** {len(_missed)}件")
+    for m in _missed[:8]:
+        _b = (f"理想 {m['ideal_bp']:+.1f}bp / {m['yen']:+,.0f}円"
+              if m["ideal_bp"] is not None else "⚠ 終値が無く計算できません")
+        print(f"       {m['date']} {m['code']}  {m['why']}  {_b}")
+else:
+    print(f"  ② 選択損失    **0件**（合格した銘柄は全部約定している）")
+
+_n_all = len(_recs) + len(_missed)
+_no_close = [m for m in _missed if m["ideal_bp"] is None]
+_sum_ideal = sum(m["ideal_bp"] for m in _missed if m["ideal_bp"] is not None)
+_impl = (sum(r["slip"] for r in _recs) - _sum_ideal) / _n_all if _n_all else 0.0
+print(f"  ③ 実装差      合格 {_n_all}件ぜんぶで見た、理想との差"
+      f"      {_impl:>+9.1f}bp")
+print(f"       = (約定した{len(_recs)}件の滑り合計 {sum(r['slip'] for r in _recs):+.1f}"
+      f" − 逃した{len(_missed)}件の理想 {_sum_ideal:+.1f}) ÷ {_n_all}件")
+if _no_close:
+    print(f"       ⚠ 終値が取れない {len(_no_close)}件を **0として** 扱っています"
+          f"（n_close_<日付>.csv が要ります）")
+
+# ── §18.49 の点推定 ────────────────────────────────────────────
+print()
+print("■ §18.49 の点推定")
+
+
+def _wbp(rows: list) -> tuple:
+    """(件数加重bp, 資金加重bp, 建玉合計)。
+
+    ★ 両方 正しいが **意味が違う**(2026-09-04 Codex 指摘):
+      件数加重 = 1件を1票とする。**§18.49 で点推定として宣言済み**
+      資金加重 = 払った円に比例。**実際にいくら損したか**はこちら
+    値がさ株の日は資金加重の方が重くなるので、円で期間比較するならこちら。
+    """
+    if not rows:
+        return 0.0, 0.0, 0.0
+    _cw = sum(x["slip"] for x in rows) / len(rows)
+    _nt = sum(x["open_p"] * a.qty for x in rows)
+    _yn = sum(x["slip"] / 1e4 * x["open_p"] * a.qty for x in rows)
+    return _cw, (_yn / _nt * 1e4 if _nt > 0 else 0.0), _nt
+
+
+print(f"{'日付':<12}{'件数':>6}{'件数加重bp':>12}{'資金加重bp':>12}{'建玉':>14}")
+print("-" * 58)
+for _d in _days:
+    _g = [r for r in _recs if r["date"] == _d]
+    _c, _w, _n = _wbp(_g)
+    print(f"{_d:<12}{len(_g):>6}{_c:>+12.1f}{_w:>+12.1f}{_n:>14,.0f}")
+print("-" * 58)
+_dm = sum(sum(x["slip"] for x in _recs if x["date"] == d)
+          / len([x for x in _recs if x["date"] == d]) for d in _days) / len(_days)
+_ac, _aw, _an = _wbp(_recs)
+print(f"{'件数加重(点推定)':<12}{len(_recs):>6}{_slip:>+12.1f}{'':>12}{'':>14}")
+print(f"{'資金加重(参考)':<12}{len(_recs):>6}{'':>12}{_aw:>+12.1f}{_an:>14,.0f}")
+print(f"{'日平均(参考)':<12}{len(_days):>6}{_dm:>+12.1f}")
+print()
+print(f"  進捗 **{len(_recs)} / 30 件**  ・  独立な営業日 **{len(_days)}日**"
+      f"  ・  損益分岐 -15.0bp")
+print(f"  ⛔ 点推定は **件数加重**（§18.49 で先に宣言済み）。日平均は")
+print(f"     1件の日と7件の日を同じ重みにするので使いません")
+print(f"  ⚠ **資金加重は『実際にいくら損したか』**。円で期間比較するならこちら。")
+print(f"     件数加重と食い違うのは、値がさ株ほど1件の重みが大きいからです")
+print(f"  ⚠ 同日相関があるので、信頼区間の実効サンプルは**件数ではなく日数**です")
+
+# ── ★ 保存則の検査（合わなければ失敗終了） ───────────────────────
+# ⛔ 台帳の候補は、必ず「約定した」か「約定しなかった理由がある」かの
+#    どちらかに落ちるはず。落ちない件があるなら集計が欠けている。
+#    2026-09-03 の「台帳5件なのに採用4件」は、これがあれば即分かった。
+_rc = 0
+if _ledger_ok:
+    _keys = {k for k in _n_keys if not a.since or k[0] >= a.since}
+    _cov = ({(r["date"], r["code"]) for r in _recs}
+            | {(m["date"], m["code"]) for m in _missed}
+            | {(d, c) for d, c in _no_board})
+    _unex = sorted(_keys - _cov)
+    print()
+    print("■ ★ 保存則  台帳 = 約定 + 不約定(理由あり) + 板なし")
+    print(f"    台帳 {len(_keys)}件 = 約定 {len(_recs)} + 不約定 {len(_missed)}"
+          f" + 板なし {len(_no_board)} → 説明できない **{len(_unex)}件**")
+    if _unex:
+        _rc = 1
+        print(f"    ⛔⛔ **{len(_unex)}件が説明できません。集計が欠けています**")
+        for _d, _c in _unex[:8]:
+            print(f"         {_d} {_c}")
+    else:
+        print(f"    ✅ すべて説明できています")
+else:
+    print()
+    print("■ ★ 保存則  ⛔ **台帳が無いので検査できません**"
+          "（ordered_signals_n.csv が要ります）")
+
+# ── 毎日CSVに保存（画面出力だけだと定義が変わる） ────────────────────
+if a.save:
+    _cols = ["date", "code", "kind", "open_p", "fill_p", "close_p",
+             "slip_bp", "ideal_bp", "yen", "why",
+             "open_sec", "seen_lag", "fill_lag", "gap_bp"]
+    _out = []
+    for r in _recs:
+        _out.append({"date": r["date"], "code": r["code"], "kind": "filled",
+                     "open_p": r["open_p"], "fill_p": r["fill"],
+                     "slip_bp": round(r["slip"], 2), "gap_bp": round(r["gap_bp"], 1),
+                     "open_sec": r["open_sec"],
+                     "seen_lag": r["seen_lag"] if r["seen_lag"] > -9000 else "",
+                     "fill_lag": r["fill_lag"] if r["fill_lag"] > -9000 else ""})
+    for m in _missed:
+        _out.append({"date": m["date"], "code": m["code"], "kind": "missed",
+                     "open_p": m["open_p"], "close_p": m["close_p"],
+                     "ideal_bp": (round(m["ideal_bp"], 2)
+                                  if m["ideal_bp"] is not None else ""),
+                     "yen": (round(m["yen"]) if m["yen"] is not None else ""),
+                     "why": m["why"]})
+    try:
+        with open(a.save, "w", newline="", encoding="utf-8-sig") as f:
+            w = _csv.DictWriter(f, fieldnames=_cols, extrasaction="ignore")
+            w.writeheader()
+            w.writerows(sorted(_out, key=lambda x: (x["date"], x["code"])))
+        print()
+        print(f"  → {a.save}（{len(_out)}行）")
+    except Exception as _e:
+        print(f"  ⚠ 保存に失敗: {_e}")
+
+if _not_n:
+    print()
+    print(f"  [除外] N の台帳に無い売り注文 {len(_not_n)}件: "
+          f"{', '.join(f'{d} {c}' for d, c in _not_n[:6])}")
+if _no_board:
+    print()
+    print(f"  ⚠ 板の記録が無くて突合できなかった注文 {len(_no_board)}件: "
+          f"{', '.join(f'{d} {c}' for d, c in _no_board[:6])}")
+if _bad_ts:
+    print()
+    print(f"  ⛔ 場外の寄り時刻 {len(_bad_ts)}件 — 時刻の列を読み違えています")
+    for _d, _c, _v in _bad_ts[:5]:
+        print(f"       {_d} {_c}: {_v!r}")
+print()
+
+# ⛔ 保存則が合わないときは **失敗終了**する。黙って通すと、欠けた集計の
+#    まま数字が独り歩きする(2026-09-03 に実際に「選択損失0件」と誤報した)。
+raise SystemExit(_rc)

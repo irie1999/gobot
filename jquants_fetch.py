@@ -29,6 +29,7 @@ import argparse
 import os
 import pickle
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -48,9 +49,25 @@ for d in [CACHE_ROOT, DAILY_CACHE_DIR, MINUTE_CACHE_DIR]:
 # ─────────────────────────────────────────────────────────────
 
 def _load_dotenv() -> None:
-    for p in [Path.cwd() / ".env", Path(__file__).resolve().parent / ".env"]:
-        if not p.exists():
+    # swingtrade だけでなく近隣フォルダ(kabu station直下・daytrading・stock_5min)
+    # の .env も探索する。鍵が別プロジェクト側にあっても見つける。
+    here = Path(__file__).resolve().parent
+    candidates = [
+        Path.cwd() / ".env",
+        here / ".env",
+        here.parent / ".env",
+        here.parent / "daytrading" / ".env",
+        here.parent / "stock_5min" / ".env",
+    ]
+    seen = set()
+    for p in candidates:
+        try:
+            p = p.resolve()
+        except Exception:
             continue
+        if p in seen or not p.exists():
+            continue
+        seen.add(p)
         try:
             for line in p.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
@@ -61,9 +78,10 @@ def _load_dotenv() -> None:
                 val = val.strip().strip('"').strip("'")
                 if key and key not in os.environ:
                     os.environ[key] = val
-            return
         except Exception:
             pass
+        if os.environ.get("JQUANTS_API_KEY"):
+            return
 
 
 _load_dotenv()
@@ -133,15 +151,22 @@ def _normalize(df: pd.DataFrame, dt_col: str = "Date") -> pd.DataFrame:
     df = df.copy()
 
     # ── DateTime 解決 ─────────────────────────────────────
-    if dt_col in df.columns:
-        df[dt_col] = pd.to_datetime(df[dt_col])
-    elif "DateTime" in df.columns:
+    # ★2026-08-01 バグ修正: 旧実装は dt_col="Date" を最優先で判定していたため、分足で
+    #   Date列(日付のみ)+Time列 がある場合に Time を捨てて日付だけ(00:00)にしていた
+    #   (=1分足の時刻が全て消える bug)。分足は DateTime / Date+Time を優先して結合し、
+    #   日足(Timeなし)のときだけ Date 単独を使う。
+    if "DateTime" in df.columns:
         dt_col = "DateTime"
         df[dt_col] = pd.to_datetime(df[dt_col])
     elif "Date" in df.columns and "Time" in df.columns:
         dt_col = "DateTime"
         df[dt_col] = pd.to_datetime(
             df["Date"].astype(str) + " " + df["Time"].astype(str))
+    elif dt_col in df.columns:
+        df[dt_col] = pd.to_datetime(df[dt_col])
+    elif "Date" in df.columns:
+        dt_col = "Date"
+        df[dt_col] = pd.to_datetime(df[dt_col])
     else:
         return pd.DataFrame()
 
@@ -309,7 +334,12 @@ def fetch_intraday(symbol: str, days: int = 60,
               file=sys.stderr)
         return None
 
-    # 30日チャンクで取得 (大量データ対応)
+    # 30日チャンクで取得 (大量データ対応)。
+    # レート制限(429)対策: チャンクごとに指数バックオフで再試行し、チャンク間に待機を入れる。
+    #   JQ_CHUNK_PAUSE = チャンク間の基本待機秒(既定1.0)。429が続くなら 2.0〜3.0 に上げる。
+    #   JQ_CHUNK_RETRY = 1チャンクの最大再試行回数(既定5)。バックオフ 5,10,20,40,60秒(上限60)。
+    _chunk_pause = float(os.environ.get("JQ_CHUNK_PAUSE", "1.0") or "1.0")
+    _chunk_retry = int(os.environ.get("JQ_CHUNK_RETRY", "5") or "5")
     all_dfs: list[pd.DataFrame] = []
     current = start
     chunk_idx = 0
@@ -318,24 +348,46 @@ def fetch_intraday(symbol: str, days: int = 60,
         chunk_idx += 1
         from_d = current.strftime("%Y%m%d")
         to_d = chunk_end.strftime("%Y%m%d")
-        try:
-            raw = fetch_method(
-                code=jq_code, from_yyyymmdd=from_d, to_yyyymmdd=to_d,
-            )
-            if raw is not None and not raw.empty:
-                # 銘柄フィルタ
-                if "Code" in raw.columns:
-                    raw = raw[raw["Code"].astype(str).str.startswith(
-                        jq_code[:4])].copy()
-                if not raw.empty:
-                    all_dfs.append(raw)
+        raw = None
+        for _attempt in range(max(1, _chunk_retry)):
+            try:
+                raw = fetch_method(
+                    code=jq_code, from_yyyymmdd=from_d, to_yyyymmdd=to_d,
+                )
+                break
+            except Exception as e:
+                _msg = str(e)
+                # 400/契約範囲外 = 恒久エラー(古すぎる期間)。再試行せず即スキップして次チャンクへ。
+                # (例: "400 ... Your subscription covers the following dates: 2024-07-30 ~")
+                if "400" in _msg or "subscription covers" in _msg.lower():
+                    print(f"    chunk {chunk_idx}: 契約範囲外(400)→スキップ "
+                          f"({current.strftime('%Y-%m-%d')}〜{chunk_end.strftime('%Y-%m-%d')})",
+                          file=sys.stderr, flush=True)
+                    break
+                # 429/一時エラー/接続断 = 指数バックオフで再試行
+                _is429 = "429" in _msg or "too many" in _msg.lower()
+                if _attempt < _chunk_retry - 1:
+                    _wait = min(60, 5 * (2 ** _attempt))   # 5,10,20,40,60
                     print(f"    chunk {chunk_idx}: "
-                          f"{current.strftime('%Y-%m-%d')}〜"
-                          f"{chunk_end.strftime('%Y-%m-%d')} → "
-                          f"{len(raw)}行", flush=True)
-        except Exception as e:
-            print(f"    chunk {chunk_idx}: ERROR {e}", file=sys.stderr)
+                          f"{'429' if _is429 else type(e).__name__} → "
+                          f"{_wait}秒待って再試行 ({_attempt+1}/{_chunk_retry})",
+                          file=sys.stderr, flush=True)
+                    time.sleep(_wait)
+                else:
+                    print(f"    chunk {chunk_idx}: ERROR {e}", file=sys.stderr)
+        if raw is not None and not raw.empty:
+            # 銘柄フィルタ
+            if "Code" in raw.columns:
+                raw = raw[raw["Code"].astype(str).str.startswith(
+                    jq_code[:4])].copy()
+            if not raw.empty:
+                all_dfs.append(raw)
+                print(f"    chunk {chunk_idx}: "
+                      f"{current.strftime('%Y-%m-%d')}〜"
+                      f"{chunk_end.strftime('%Y-%m-%d')} → "
+                      f"{len(raw)}行", flush=True)
         current = chunk_end + timedelta(days=1)
+        time.sleep(_chunk_pause)   # チャンク間の基本待機(429回避)
 
     if not all_dfs:
         print(f"  [warn] {symbol}: 分足データなし", file=sys.stderr)

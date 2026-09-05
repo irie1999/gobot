@@ -1,0 +1,101 @@
+@echo off
+REM ============================================================
+REM norder.bat - N (09:00 confirm) PAPER RECORDING
+REM
+REM *** THIS PLACES NO ORDERS AT ALL. NOT ONE YEN. ***
+REM   n_open_confirm.py is a copy of k_open_confirm.py with the order calls
+REM   PHYSICALLY REMOVED (send_sell / send_moc are gone, dry_run is pinned to
+REM   True, and --execute makes it exit at startup). Verified with an AST scan.
+REM   If you want to place real J orders, use .\jorder instead.
+REM
+REM   Usage:  .\norder            (start it by 08:40; it waits by itself)
+REM           .\norder --now      (skip the waits, read once - for testing)
+REM   ASCII-only on purpose (Japanese comments break on Shift-JIS cmd, 18.10.1).
+REM
+REM WHAT IT DOES, IN ORDER (one kabu token, so strictly sequential)
+REM   0. build tonight's candidate list (yfinance only, no kabu)
+REM        prev-day return >= +1.753 percent, price band 1,000-6,000 yen,
+REM        sorted by 20-day turnover, top 50 (kabu registration cap, 18.44)
+REM        -> n_signals_<date>.csv
+REM   1. waits until 08:47, registers the 50 names and does ONE WARM READ.
+REM        Skipping this makes the 09:00 read take 40-140 seconds (18.44).
+REM   2. waits until 09:00, then polls every 10s until 09:30:
+REM        for each name that opens, records the opening price and the gap.
+REM        A name passes when open >= prev close + 100bp (18.54).
+REM        Late opens (09:02-09:06) are picked up as they come.
+REM        -> k_paper_<date>.csv
+REM
+REM WHY N USES +100bp AND J USED +75bp
+REM   Different strategies. N is the gap-up short found on 2026-08-25:
+REM   11.6 years, 388k stock-days, passes on both TRAIN and TEST (18.54).
+REM   J is stopped (18.51).
+REM
+REM AFTER THE CLOSE (15:40 or later, no kabu needed)
+REM   python n_paper.py --close --seq-sides n
+REM     fills in the closing price and prints the paper P&L, so you can
+REM     compare it against the "New method N" tab in the report.
+REM
+REM WHAT THIS IS FOR
+REM   The only unmeasured factor left in N is the execution cost. The report
+REM   assumes the fill happens exactly at the daily open with zero slippage.
+REM   This script records what the board actually shows at 09:00, so the two
+REM   can be compared day by day. No money is at risk.
+REM ============================================================
+cd /d "%~dp0"
+if /i "%~1"=="close" goto :close
+for %%a in (%*) do (
+  if /i "%%~a"=="-h"     goto :help
+  if /i "%%~a"=="--help" goto :help
+  if /i "%%~a"=="/?"     goto :help
+)
+echo ============================================================
+echo  N-ONLY PAPER RECORDING - no orders, reads the board only
+echo    start this by 08:40; it waits for 08:47 and 09:00 by itself
+echo    do NOT run .\jorder, .\watch or the order server at the same time
+echo    (kabu allows exactly one live token)
+echo ============================================================
+echo.
+echo [0/2] building the candidate list (no kabu)
+REM   N only: prev-day return >= +1.753 pct, top 50 by 20-day turnover,
+REM   open >= prev close +100bp, SELL. Mirror and stopped J are excluded.
+REM   Exactly 50 names = one board-registration batch. This preserves the
+REM   finest possible seen_ts ordering, which is the purpose of this recorder.
+python n_paper.py --collect --no-mirror
+if errorlevel 1 (
+  echo.
+  echo *** candidate list failed - stopping here ***
+  goto :eof
+)
+echo.
+echo [1/2] warm read at 08:47, then [2/2] poll from 09:00
+python n_open_confirm.py --prod --poll %*
+echo.
+echo ============================================================
+echo  done. after the close (15:40 or later) run ONE command:
+echo.
+echo      python n_paper.py --close --budget 400 --seq-sides n
+echo.
+echo  it prints, in this order, from the same board read:
+echo    1. which N names passed (gap ^>= +100bp, sell)
+echo    2. the order the orders would have gone out in
+echo         (open-time group, then biggest ^|gap^| first)
+echo    3. the paper P^&L for each method
+echo  no kabu needed - it only reads the CSVs written this morning.
+echo ============================================================
+goto :eof
+
+:close
+echo ============================================================
+echo  N-ONLY PAPER CLOSE - no kabu, no orders
+echo ============================================================
+python n_paper.py --close --budget 400 --seq-sides n
+goto :eof
+
+:help
+echo .\norder [--now] [--gap-bp 100] [--poll-until 09:30]
+echo .\norder close
+echo   Records the 09:00 board for the N method. PLACES NO ORDERS.
+echo   Runs: collect -^> 08:47 warm read -^> 09:00 poll.
+echo   After the close:  python n_paper.py --close --seq-sides n
+echo   To place real J orders use .\jorder instead.
+goto :eof
