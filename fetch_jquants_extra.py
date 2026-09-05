@@ -47,11 +47,21 @@ DATASETS = {
     # 決算 **発表予定**。⚠ 直近の予定しか返らないことが多い(過去には遡れない)
     "earnings_cal":      ["get_eq_earnings_cal", "get_fins_announcement",
                           "get_announcement"],
-    # ★ 決算 **実績**(DisclosedDate を持つ)。過去に遡れるのはこちら。
-    #   11.5年の「決算翌日を除外」を測るならこれが要る
-    "statements":        ["get_fins_statements", "get_statements",
-                          "get_fin_statements"],
-    "master":            ["get_eq_master", "get_listed_info", "get_list"],
+    # ★ 決算 **実績**(開示日を持つ)。過去に遡れるのはこちら。
+    #   11.5年の「決算翌日を除外」を測るならこれが要る。
+    #   ⛔ 2026-09-06 実測: ClientV2 の名前は **get_fin_summary_range**。
+    #     get_fins_statements は存在しない(V1 の名前)。_range 版を先に試す
+    #     (期間指定が効く形。§18.53 の『窓が効いていない』を避ける)
+    "statements":        ["get_fin_summary_range", "get_fin_summary",
+                          "get_fins_statements", "get_statements"],
+    # 財務詳細(BS/PL の明細)。決算日だけなら statements で足りる
+    "fin_details":       ["get_fin_details_range", "get_fin_details"],
+    # ⛔ get_eq_master は 2026-09-06 に 403 "No active subscription"。
+    #   **get_list を先に試す**(別エンドポイントなので通る可能性がある)
+    "master":            ["get_list", "get_eq_master", "get_listed_info"],
+    # 業種コード→名称の対応表(銘柄別ではない)。master が通らないときの補助
+    "sectors33":         ["get_33_sectors"],
+    "sectors17":         ["get_17_sectors"],
     "calendar":          ["get_mkt_calendar", "get_markets_trading_calendar",
                           "get_trading_calendar"],
     "investor_types":    ["get_eq_investor_types", "get_markets_trades_spec",
@@ -61,8 +71,9 @@ DATASETS = {
 # 候補が全滅したとき、実在メソッドを探すためのキーワード
 _HINT = {"short_sale_report": "short", "short_ratio": "short",
          "margin_interest": "margin", "margin_alert": "margin",
-         "earnings_cal": "announce", "statements": "statement",
+         "earnings_cal": "earn", "statements": "fin",
          "master": "list", "calendar": "calendar",
+         "fin_details": "fin", "sectors33": "sector", "sectors17": "sector",
          "investor_types": "trades", "breakdown": "breakdown"}
 
 ap = argparse.ArgumentParser(description="lss対策用 J-Quants 追加データ一括取得")
@@ -83,7 +94,9 @@ ap.add_argument("--list-methods", action="store_true",
 #   ここの値を信じて「取れるはず」と判断しないこと。
 _PLAN = {"calendar": "全?", "master": "要契約確認", "earnings_cal": "要契約確認",
          "investor_types": "Light", "short_sale_report": "Standard",
-         "statements": "全", "short_ratio": "Standard", "margin_interest": "Standard",
+         "statements": "要契約確認", "fin_details": "要契約確認",
+         "sectors33": "全?", "sectors17": "全?",
+         "short_ratio": "Standard", "margin_interest": "Standard",
          "margin_alert": "Standard", "breakdown": "Premium"}
 args = ap.parse_args()
 
