@@ -27,6 +27,8 @@ import pickle
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import re
+
 import pandas as pd
 import requests
 
@@ -35,6 +37,8 @@ JPX_XLS_URL = (
     "https://www.jpx.co.jp/markets/statistics-equities/misc/"
     "tvdivq0000001vg2-att/data_j.xls"
 )
+# ★ 直リンクが 404 になったときに、ここから現在のリンクを探す
+JPX_INDEX_URL = "https://www.jpx.co.jp/markets/statistics-equities/misc/01.html"
 CACHE_FILE  = Path(".jpx_listed_cache.pkl")
 CACHE_DAYS  = 7   # 7日間キャッシュ
 
@@ -65,18 +69,56 @@ def fetch_jpx_raw(no_cache: bool = False) -> pd.DataFrame:
 
     print(f"  JPX から銘柄リストをダウンロード中...")
     print(f"  URL: {JPX_XLS_URL}")
-    try:
-        r = requests.get(JPX_XLS_URL, timeout=30, headers={
-            "User-Agent": "Mozilla/5.0",
-            "Referer":    "https://www.jpx.co.jp/",
-        })
-        r.raise_for_status()
-    except requests.RequestException as e:
+    # ⛔⛔ 直リンクは **JPX 側で変わる**(2026-09-06 に 404。添付フォルダの
+    #   ハッシュ部分 tvdivq0000001vg2-att が変更された)。決め打ちを1本だけ持つと
+    #   その日から取れなくなる。→ **一覧ページを読んで今のリンクを拾う**。
+    _HD = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.jpx.co.jp/"}
+
+    def _discover() -> str | None:
+        """一覧ページから data_j.xls の現在のURLを探す。"""
+        try:
+            _ix = requests.get(JPX_INDEX_URL, timeout=30, headers=_HD)
+            _ix.raise_for_status()
+        except requests.RequestException:
+            return None
+        # ⛔ [sx] だと .xlsx で `x` が余って一致しない(2026-09-06 検算で判明)。
+        #   xlsx? にすること。JPX が xls → xlsx に変えても拾える
+        _m = re.search(r'href="([^"]*data_j\.xlsx?)"', _ix.text)
+        if not _m:
+            return None
+        _u = _m.group(1)
+        if _u.startswith("//"):
+            return "https:" + _u
+        if _u.startswith("/"):
+            return "https://www.jpx.co.jp" + _u
+        if _u.startswith("http"):
+            return _u
+        return "https://www.jpx.co.jp/markets/statistics-equities/misc/" + _u
+
+    r = None
+    _tried = []
+    for _u, _how in ((JPX_XLS_URL, "既知の直リンク"), (_discover(), "一覧ページから発見")):
+        if not _u:
+            continue
+        _tried.append(f"{_how}: {_u}")
+        try:
+            r = requests.get(_u, timeout=30, headers=_HD)
+            r.raise_for_status()
+            if _how != "既知の直リンク":
+                print(f"  ★ 直リンクが変わっていたので一覧ページから取得: {_u}")
+                print(f"     → JPX_XLS_URL を更新すると次回から速くなります")
+            break
+        except requests.RequestException as _e:
+            print(f"  ⚠ {_how} が失敗: {str(_e)[:80]}")
+            r = None
+    if r is None:
+        e = RuntimeError("すべての取得先が失敗")
         raise RuntimeError(
             f"ダウンロード失敗: {e}\n"
             f"  ブラウザで以下にアクセスして data_j.xls を手動ダウンロードし、\n"
             f"  同じフォルダに置いてから --local data_j.xls で実行してください:\n"
             f"  https://www.jpx.co.jp/markets/statistics-equities/misc/01.html"
+            + "\n  試した先:\n    " + "\n    ".join(_tried)
         ) from e
 
     df = _parse_xls(io.BytesIO(r.content))
