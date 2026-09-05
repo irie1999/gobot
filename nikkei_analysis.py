@@ -649,6 +649,10 @@ _NG_NOPX_TAB = os.environ.get("LSS_NEWGAP_NOPX", "0").strip().lower() \
 #      → _newgap_scan_one で min_start_date を渡し、実際に取れた期間を出す。
 _NG_DAYS = int(os.environ.get("LSS_NEWGAP_DAYS", "0"))
 _NG_SPAN: dict = {}          # (窓の実測) 最古日 / 最新日 / 銘柄日数
+# ★ 全変種を1つのテキストにまとめて書き出す先。既定 n_report_<日付>.txt
+#   HTML を目で写すと必ず取り違えるので、比較に要る数字をファイルに集める。
+_NG_TXT = os.environ.get("LSS_NEWGAP_TXT", "auto").strip()
+import datetime as _dtt
 
 
 def _newgap_yf(code: str) -> str:
@@ -1159,7 +1163,171 @@ def _newgap_build(days: int, min_price: float, max_price: float,
             f'{_r["投入"] / 10_000:,.0f}万</td></tr>')
     _h.append('</tbody></table></details>')
     return {"head": "".join(_h_main), "tail": "".join(_t2),
-            "trades": _newgap_rows_to_trades(_det, side)}
+            "trades": _newgap_rows_to_trades(_det, side),
+            # ★ テキスト書き出し用の生データ(2026-09-05)。HTMLを目で写さずに済む
+            "_raw": {"dd": _dd, "det": _det, "span": _sp, "side": side,
+                     "variant": variant, "days": days,
+                     "pmin": float(min_price or 0.0),
+                     "pmax": float(max_price or 1e9)}}
+
+
+def _newgap_txt_report(items: list, path: str) -> None:
+    """N の全変種を **1つのテキスト**にまとめて書く (2026-09-05 ユーザー依頼)。
+
+    ★ HTML を目で写すと必ず取り違えるので、比較に要る数字を1ファイルに集める。
+      items = [(ラベル, build の返り値), ...]
+    ⛔ 総額だけを並べない。**月平均÷σ / bp per件 / 集中度**を必ず併記する。
+      100株固定なので値がさ株ほど1件の建玉が大きく、価格帯を外すと
+      『同じ戦略の改善』ではなく『レバレッジの違う戦略』になりうる(§18.38 #6)。
+    """
+    import numpy as _np
+    _L: list = []
+    _w = _L.append
+
+    def _stats(_r: dict) -> dict:
+        _dd, _det = _r["dd"], _r["det"]
+        _o: dict = {}
+        _o["nd"] = int(len(_dd))
+        _o["lo"], _o["hi"] = str(_dd["date"].min()), str(_dd["date"].max())
+        _o["yrs"] = (pd.Timestamp(_o["hi"]) - pd.Timestamp(_o["lo"])).days / 365.25
+        _o["tot"] = float(_dd["pnl"].sum())
+        _o["n"] = int(len(_det))
+        _o["win"] = (float((_det["pnl"] > 0).mean()) * 100.0
+                     if not _det.empty else 0.0)
+        _o["bp"] = (float((_det["pnl"] / (_det["entry_p"] * _NG_QTY)).mean()) * 1e4
+                    if not _det.empty else 0.0)
+        _o["notional"] = (float((_det["entry_p"] * _NG_QTY).mean())
+                          if not _det.empty else 0.0)
+        _o["peak"] = float(_dd["used"].max()) if len(_dd) else 0.0
+        _o["used_med"] = float(_dd["used"].median()) if len(_dd) else 0.0
+        _o["per_day"] = _o["n"] / max(1, _o["nd"])
+        _m = _dd.copy()
+        _m["month"] = _m["date"].str[:7]
+        _mm = _m.groupby("month")["pnl"].sum()
+        _o["mo"] = _mm
+        _o["nm"] = int(len(_mm))
+        _o["mu"] = float(_mm.mean()) if len(_mm) else 0.0
+        _o["sd"] = float(_mm.std(ddof=1)) if len(_mm) > 1 else 0.0
+        _o["ratio"] = (_o["mu"] / _o["sd"]) if _o["sd"] else 0.0
+        _o["pos"] = int((_mm > 0).sum())
+        # 日次(月次より実効サンプルが多い。日クラスタ頑健 t の材料)
+        _dv = _dd["pnl"].to_numpy(dtype="float64")
+        _o["dsd"] = float(_dv.std(ddof=1)) if len(_dv) > 1 else 0.0
+        _o["t"] = (float(_dv.mean() / (_o["dsd"] / (len(_dv) ** 0.5)))
+                   if _o["dsd"] > 0 else 0.0)
+        _o["worst_d"] = float(_dv.min()) if len(_dv) else 0.0
+        _o["cvar5"] = (float(_np.sort(_dv)[:max(1, int(len(_dv) * 0.05))].mean())
+                       if len(_dv) else 0.0)
+        # 前半/後半(窓の中央で割る)
+        _h = len(_dd) // 2
+        _o["h1"] = float(_dd["pnl"].iloc[:_h].sum())
+        _o["h2"] = float(_dd["pnl"].iloc[_h:].sum())
+        _m["year"] = _m["date"].str[:4]
+        _o["yr"] = _m.groupby("year").agg(
+            日数=("date", "count"), 建てた=("built", "sum"),
+            損益=("pnl", "sum"))
+        _o["mo_tbl"] = _m.groupby("month").agg(
+            日数=("date", "count"), 建てた=("built", "sum"),
+            損益=("pnl", "sum"))
+        return _o
+
+    _w("=" * 78)
+    _w("■ 新方式N — 変種比較レポート")
+    _w("=" * 78)
+    _w(f"生成 {_dtt.datetime.now():%Y-%m-%d %H:%M:%S}")
+    _w("")
+    _w("【共通の条件】")
+    _w(f"  前夜  : 前日リターン ≥ +{_NG_RET1:.3f}% の銘柄を 流動性(20日平均売買代金)"
+       f"降順に 上位{_NG_WATCH}件")
+    _w(f"  09:00 : その始値を見て ギャップ ≥ +{_NG_GAP_BP:.0f}bp なら空売り"
+       f"(鏡像は符号反転)")
+    _w(f"  引け  : MOC。**損切り・利確・delay を1つも持たない**")
+    _w(f"  予算  : {_NG_BUDGET:,.0f}万円 / {_NG_QTY}株固定 / |ギャップ|降順に充当")
+    _w(f"  執行  : slip=0(板寄せ前提)。実測の遅延は別途 -{_NG_DELAY_BP:.1f}bp 程度")
+    _w("")
+    _w("⛔ 読み方: 総額だけで比べないこと。100株固定なので値がさ株ほど1件の")
+    _w("   建玉が大きく、価格帯を外すと『レバレッジの違う戦略』になりうる。")
+    _w("   **月平均÷σ と bp/件 と 平均建玉** を必ず併せて見る(§18.38 #6)。")
+    _w("")
+
+    _st = []
+    for _lbl, _r in items:
+        try:
+            _st.append((_lbl, _stats(_r)))
+        except Exception as _e:                       # noqa: BLE001
+            _w(f"⚠ {_lbl}: 集計に失敗 {type(_e).__name__}: {_e}")
+
+    # ── 横並びの比較表(これが本体) ──
+    _w("=" * 78)
+    _w("■ 一覧比較")
+    _w("=" * 78)
+    _hd = (f"{'変種':<18}{'窓':>22}{'件数':>8}{'勝率':>7}{'合計':>14}"
+           f"{'bp/件':>8}{'月平均':>12}{'月次σ':>12}{'÷σ':>7}{'+月':>8}")
+    _w(_hd)
+    _w("-" * len(_hd))
+    for _lbl, _o in _st:
+        _w(f"{_lbl:<18}{_o['lo'] + '〜' + _o['hi']:>22}{_o['n']:>8,}"
+           f"{_o['win']:>6.0f}%{_o['tot']:>+14,.0f}{_o['bp']:>+8.1f}"
+           f"{_o['mu']:>+12,.0f}{_o['sd']:>12,.0f}{_o['ratio']:>7.2f}"
+           f"{str(_o['pos']) + '/' + str(_o['nm']):>8}")
+    _w("")
+    _hd2 = (f"{'変種':<18}{'日数':>7}{'件/日':>8}{'平均建玉':>12}{'投入中央':>12}"
+            f"{'投入ピーク':>12}{'日次t':>8}{'最悪日':>13}{'CVaR5%':>12}")
+    _w(_hd2)
+    _w("-" * len(_hd2))
+    for _lbl, _o in _st:
+        _w(f"{_lbl:<18}{_o['nd']:>7,}{_o['per_day']:>8.1f}"
+           f"{_o['notional']:>12,.0f}{_o['used_med']:>12,.0f}"
+           f"{_o['peak']:>12,.0f}{_o['t']:>+8.2f}{_o['worst_d']:>+13,.0f}"
+           f"{_o['cvar5']:>+12,.0f}")
+    _w("")
+    _w("  平均建玉 = 1件あたりの投入額(円)。**集中度**の指標。")
+    _w("  投入ピーク が予算に張り付いていれば『予算が律速』= 資金効率の比較になる。")
+    _w("  CVaR5% = 下位5%の日の平均(裾の重さ)。最悪1日ではなく裾の平均で見る。")
+    _w("")
+    _w("  前半/後半(窓を営業日で二分):")
+    for _lbl, _o in _st:
+        _sg = "✓同符号" if (_o["h1"] > 0) == (_o["h2"] > 0) else "⛔符号が逆"
+        _w(f"    {_lbl:<18} 前半 {_o['h1']:>+14,.0f} / 後半 {_o['h2']:>+14,.0f}"
+           f"   {_sg}")
+    _w("")
+
+    # ── 変種ごとの年別・月別 ──
+    for _lbl, _o in _st:
+        _w("=" * 78)
+        _w(f"■ {_lbl}")
+        _w("=" * 78)
+        _w(f"  窓 {_o['lo']}〜{_o['hi']}  ({_o['yrs']:.1f}年 / {_o['nd']:,}営業日)")
+        _w(f"  {_o['n']:,}件 / 勝率 {_o['win']:.1f}% / 合計 {_o['tot']:+,.0f}円 / "
+           f"{_o['bp']:+.1f}bp per件")
+        _w("")
+        _w("  【年別】")
+        _w(f"    {'年':<8}{'日数':>7}{'建てた':>9}{'損益':>15}{'月平均相当':>14}")
+        for _y, _r2 in _o["yr"].iterrows():
+            _w(f"    {str(_y):<8}{int(_r2['日数']):>7,}{int(_r2['建てた']):>9,}"
+               f"{float(_r2['損益']):>+15,.0f}"
+               f"{float(_r2['損益']) / max(1, int(_r2['日数'])) * 20.0:>+14,.0f}")
+        _w("")
+        _w("  【月別】")
+        _w(f"    {'月':<10}{'日数':>7}{'建てた':>9}{'損益':>15}")
+        for _mth, _r2 in _o["mo_tbl"].iterrows():
+            _w(f"    {str(_mth):<10}{int(_r2['日数']):>7,}{int(_r2['建てた']):>9,}"
+               f"{float(_r2['損益']):>+15,.0f}")
+        _w("")
+
+    _w("=" * 78)
+    _w("■ このレポートが測っていないもの")
+    _w("=" * 78)
+    _w("  * 執行コスト … slip=0。N 自身の実測は 5分後 -10.4bp(§18.44 の J より軽い)")
+    _w("  * 空売り在庫・貸株可否 … 今日のリストしか無い")
+    _w("  * 生存バイアス … 今日 5分足を持っている銘柄しか見ていない")
+    _w("  * 決算・特別気配・IPO … 全部建てる前提")
+    try:
+        with open(path, "w", encoding="utf-8") as _f:
+            _f.write("\n".join(_L) + "\n")
+        print(f"  [N] テキストレポート → {path} ({len(_L):,}行)", flush=True)
+    except Exception as _e:                           # noqa: BLE001
+        print(f"  ⚠ [N] レポート書き出しに失敗: {_e}", flush=True)
 
 
 def _lookup_frozen_bt(sym: str, strat: str):
@@ -21889,13 +22057,23 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 # ★ 株価制限なし(2026-09-05)。スキャンは共有、価格帯だけ外す
                 _ng_sides.append(("short", "newgapx", "★ N 株価制限なし",
                                   "#f59e0b", "#fcd34d", 0.0, 1e9, "nopx"))
+            _ng_txt_items = []
             for (_ng_side, _ng_key, _ng_lbl, _ng_c1, _ng_c2,
                  _ng_pmin, _ng_pmax, _ng_var) in _ng_sides:
                 _ng = _newgap_build(days, _ng_pmin, _ng_pmax, _ng_syms,
                                     side=_ng_side, variant=_ng_var)
                 if not (_ng and _ng.get("head")):
                     continue
+                if _ng.get("_raw"):
+                    _ng_txt_items.append(
+                        (_ng_lbl.replace("★ ", ""), _ng["_raw"]))
                 _ng_build_one(_ng, _ng_key, _ng_lbl, _ng_c1, _ng_c2)
+            # ★ 全変種を1つのテキストに(HTML を目で写さないため)
+            if _ng_txt_items and _NG_TXT.lower() not in ("0", "off", "no", ""):
+                _newgap_txt_report(
+                    _ng_txt_items,
+                    (f"n_report_{_dtt.date.today():%Y%m%d}.txt"
+                     if _NG_TXT.lower() == "auto" else _NG_TXT))
             print(f"[新方式N] {len(_ng_syms):,}銘柄 / "
                   f"{_time.time() - _t_ng:.1f}s", flush=True)
         except Exception as _nge:
