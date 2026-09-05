@@ -32,18 +32,38 @@ from dateutil import tz as _dtz
 # ClientV2 を流用(V1は廃止=410 Gone。5分足取得と同じ認証)。
 from jquants_fetch import get_client
 
-# 取得名 -> jquantsapi クライアントのメソッド名
+# 取得名 -> クライアントのメソッド名 **の候補**(先頭から順に試す)。
+# ⛔ ライブラリの版で名前が変わる(V1 は get_listed_info / V2 は get_eq_master 系)。
+#   1つ決め打ちにすると「ライブラリに無い」で黙って落ちる(2026-09-05 に master が
+#   出なかった)。候補を並べ、**どれも無ければ実在するメソッド名を列挙**して
+#   次の実行で原因が分かるようにする。
 DATASETS = {
-    "short_sale_report": "get_mkt_short_sale_report_range",  # 空売り集計/残高 → 踏み上げ
-    "short_ratio":       "get_mkt_short_ratio_range",        # 業種別空売り比率 → レジーム
-    "margin_interest":   "get_mkt_margin_interest_range",    # 信用残高(週次 買残/売残)
-    "margin_alert":      "get_mkt_margin_alert_range",       # 信用規制/日々公表
-    "earnings_cal":      "get_eq_earnings_cal",              # 決算発表予定 → イベント回避
-    "master":            "get_eq_master",                    # 銘柄マスタ(貸借区分/業種)
-    "calendar":          "get_mkt_calendar",                 # 営業日カレンダー
-    "investor_types":    "get_eq_investor_types",            # 投資部門別売買 → フロー
-    "breakdown":         "get_mkt_breakdown_range",          # 売買内訳
+    "short_sale_report": ["get_mkt_short_sale_report_range", "get_short_selling",
+                          "get_markets_short_selling"],
+    "short_ratio":       ["get_mkt_short_ratio_range", "get_short_selling_ratio"],
+    "margin_interest":   ["get_mkt_margin_interest_range", "get_weekly_margin_interest",
+                          "get_markets_weekly_margin_interest"],
+    "margin_alert":      ["get_mkt_margin_alert_range", "get_daily_margin_interest"],
+    # 決算 **発表予定**。⚠ 直近の予定しか返らないことが多い(過去には遡れない)
+    "earnings_cal":      ["get_eq_earnings_cal", "get_fins_announcement",
+                          "get_announcement"],
+    # ★ 決算 **実績**(DisclosedDate を持つ)。過去に遡れるのはこちら。
+    #   11.5年の「決算翌日を除外」を測るならこれが要る
+    "statements":        ["get_fins_statements", "get_statements",
+                          "get_fin_statements"],
+    "master":            ["get_eq_master", "get_listed_info", "get_list"],
+    "calendar":          ["get_mkt_calendar", "get_markets_trading_calendar",
+                          "get_trading_calendar"],
+    "investor_types":    ["get_eq_investor_types", "get_markets_trades_spec",
+                          "get_trades_spec"],
+    "breakdown":         ["get_mkt_breakdown_range", "get_markets_breakdown"],
 }
+# 候補が全滅したとき、実在メソッドを探すためのキーワード
+_HINT = {"short_sale_report": "short", "short_ratio": "short",
+         "margin_interest": "margin", "margin_alert": "margin",
+         "earnings_cal": "announce", "statements": "statement",
+         "master": "list", "calendar": "calendar",
+         "investor_types": "trades", "breakdown": "breakdown"}
 
 ap = argparse.ArgumentParser(description="lss対策用 J-Quants 追加データ一括取得")
 ap.add_argument("--days", type=int, default=760, help="遡及日数(既定760≒2年)")
@@ -58,7 +78,7 @@ ap.add_argument("--out-dir", type=str, default="jquants_extra", help="CSV出力�
 #   アドオン  : 分足・ティック(2年) 5,500円/月
 _PLAN = {"calendar": "全", "master": "全", "earnings_cal": "全",
          "investor_types": "Light", "short_sale_report": "Standard",
-         "short_ratio": "Standard", "margin_interest": "Standard",
+         "statements": "全", "short_ratio": "Standard", "margin_interest": "Standard",
          "margin_alert": "Standard", "breakdown": "Premium"}
 args = ap.parse_args()
 
@@ -117,20 +137,39 @@ def main():
           + " / ".join(f"{t}={_PLAN.get(t, '?')}" for t in targets), flush=True)
     ok = ng = 0
     for name in targets:
-        mname = DATASETS.get(name)
-        if not mname:
+        cands = DATASETS.get(name)
+        if not cands:
             print(f"  [skip] {name}: 未知の対象", flush=True)
             continue
-        method = getattr(cli, mname, None)
+        if isinstance(cands, str):
+            cands = [cands]
+        mname = next((c for c in cands if getattr(cli, c, None) is not None), None)
+        method = getattr(cli, mname, None) if mname else None
         if method is None:
-            # ⛔ 『クライアントに無い』は **ライブラリの版が古い**という意味で、
+            # ⛔ 『クライアントに無い』は **ライブラリの版が違う**という意味で、
             #   プランとは別。プラン不足なら呼べるが 403/空になる。
-            #   2026-08-28 に取り違えかけたので、はっきり書き分ける。
-            print(f"  [skip] {name}: **ライブラリに {mname} が無い** "
-                  f"→ pip install -U jquants-api-client で直る可能性",
-                  flush=True)
+            #   ★ 候補が全滅したら **実在するメソッド名を出す**。これが無いと
+            #     何を書けばいいのか分からないまま終わる(2026-09-05 の master)。
+            print(f"  [skip] {name}: 候補がどれもありません "
+                  f"({', '.join(cands)})", flush=True)
+            _kw = _HINT.get(name, "")
+            _av = sorted(m for m in dir(cli)
+                         if not m.startswith("_") and _kw in m.lower()
+                         and callable(getattr(cli, m, None)))
+            if _av:
+                print(f"      ★ **'{_kw}' を含む実在メソッド**: "
+                      f"{', '.join(_av[:12])}", flush=True)
+                print(f"      → DATASETS['{name}'] の候補に足してください",
+                      flush=True)
+            else:
+                print(f"      ⚠ '{_kw}' を含むメソッドが1つもありません。"
+                      f"クライアントの版を確認 (pip install -U jquants-api-client)",
+                      flush=True)
             ng += 1
             continue
+        if mname != cands[0]:
+            print(f"  [info] {name}: 第1候補 {cands[0]} が無いので "
+                  f"**{mname}** を使います", flush=True)
         try:
             df, _form = _try_call(method, start, now)
             if df is None or (hasattr(df, "empty") and df.empty):
