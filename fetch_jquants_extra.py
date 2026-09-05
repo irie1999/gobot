@@ -69,6 +69,8 @@ ap = argparse.ArgumentParser(description="lss対策用 J-Quants 追加データ�
 ap.add_argument("--days", type=int, default=760, help="遡及日数(既定760≒2年)")
 ap.add_argument("--only", type=str, default="", help="取得対象をカンマ区切りで限定(既定=全部)")
 ap.add_argument("--out-dir", type=str, default="jquants_extra", help="CSV出力フォルダ")
+ap.add_argument("--list-methods", action="store_true",
+                help="★ クライアントの **実在メソッドを全部** 出して終了。\n                     版によって名前が変わるので、詰まったらまずこれ")
 # ── どの項目がどのプランか (2026-08-28 時点) ────────────────────────
 #   全プラン : calendar / master / earnings_cal
 #   Light 〜 : investor_types / TOPIX四本値
@@ -76,7 +78,10 @@ ap.add_argument("--out-dir", type=str, default="jquants_extra", help="CSV出力�
 #              margin_interest(信用週末残高) / margin_alert(日々公表) / 指数四本値
 #   Premium  : breakdown(売買内訳) / **先物四本値** / 前場四本値 / 配当金
 #   アドオン  : 分足・ティック(2年) 5,500円/月
-_PLAN = {"calendar": "全", "master": "全", "earnings_cal": "全",
+# ⚠ この表は **参考**。2026-09-06 の実測では master / earnings_cal が
+#   403 "No active subscription found" だった。契約内容で変わるので
+#   ここの値を信じて「取れるはず」と判断しないこと。
+_PLAN = {"calendar": "全?", "master": "要契約確認", "earnings_cal": "要契約確認",
          "investor_types": "Light", "short_sale_report": "Standard",
          "statements": "全", "short_ratio": "Standard", "margin_interest": "Standard",
          "margin_alert": "Standard", "breakdown": "Premium"}
@@ -132,6 +137,16 @@ def main():
     targets = ([x.strip() for x in args.only.split(",") if x.strip()]
                if args.only else list(DATASETS))
     cli = get_client()
+    if args.list_methods:
+        # ★ 版で名前が変わるので、実在するものを丸ごと出す。
+        #   これを貼れば DATASETS の候補をすぐ直せる(2026-09-06)。
+        _all = sorted(m for m in dir(cli)
+                      if not m.startswith("_")
+                      and callable(getattr(cli, m, None)))
+        print(f"[methods] {type(cli).__name__} … {len(_all)}個\n")
+        for _m2 in _all:
+            print(f"    {_m2}")
+        return
     print(f"[info] 取得 {len(targets)}件 / 遡及{args.days}日 → {out.resolve()}", flush=True)
     print(f"[info] 必要プラン: "
           + " / ".join(f"{t}={_PLAN.get(t, '?')}" for t in targets), flush=True)
@@ -191,10 +206,20 @@ def main():
             ok += 1
         except Exception as e:
             _m = str(e).lower()
-            if any(k in _m for k in ("403", "forbidden", "not subscribe",
-                                     "subscription", "plan", "unauthorized",
-                                     "401")):
-                _why = "**プラン不足**(Standard 以上が要る項目です)"
+            # ⛔ 403 を全部「プラン不足」と書いてはいけない(2026-09-06 に誤記)。
+            #   J-Quants の body は2種類あり、意味がまったく違う:
+            #     "No active subscription found" … **契約そのものが無い/失効**
+            #     それ以外の 403                  … 上位プランが要る項目
+            #   前者を「Standard が要る」と書くと、契約状態の確認に行けなくなる。
+            if "no active subscription" in _m:
+                _why = ("**契約が見つかりません**(上位プランの話ではない)。"
+                        "J-Quants のマイページで契約状態を確認してください。"
+                        "\n        ⚠ 分足アドオンだけ有効で v2 の equities 系が"
+                        "未契約、ということも起こります")
+            elif any(k in _m for k in ("403", "forbidden", "not subscribe",
+                                       "subscription", "plan", "unauthorized",
+                                       "401")):
+                _why = "**プラン不足**(上位プランが要る項目)"
             elif "404" in _m or "not found" in _m:
                 _why = "エンドポイントが無い(ライブラリ/API の版違い)"
             elif "429" in _m or "rate" in _m:
