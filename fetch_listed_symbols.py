@@ -138,8 +138,17 @@ def _parse_xls(file_obj) -> pd.DataFrame:
                 "JPX の Excel フォーマットが変わった可能性があります。"
             )
 
-    df = raw[required].copy()
-    df.columns = ["code", "name", "market"]
+    # ★ 業種列があれば拾う(2026-09-06)。JPX の data_j.xls は
+    #   33業種コード/区分・17業種コード/区分・規模コード/区分 を持っている。
+    #   ⛔ 以前は3列だけ残して **捨てていた**ので、業種を J-Quants に
+    #     取りに行って 403 で詰まっていた。ここにあるなら契約は要らない。
+    _opt = [c for c in ("33業種コード", "33業種区分",
+                        "17業種コード", "17業種区分",
+                        "規模コード", "規模区分") if c in raw.columns]
+    df = raw[required + _opt].copy()
+    df.columns = (["code", "name", "market"]
+                  + ["s33", "s33name", "s17", "s17name",
+                     "scale", "scalename"][:len(_opt)])
     df = df.dropna(subset=["code"])
     df["code"]   = df["code"].str.strip().str.zfill(4)
     df["name"]   = df["name"].str.strip()
@@ -147,6 +156,9 @@ def _parse_xls(file_obj) -> pd.DataFrame:
     # コードが4桁数字のもののみ（ETF等を除外）
     df = df[df["code"].str.match(r"^\d{4}$")].copy()
     df["ticker"] = df["code"] + ".T"
+    for _c in ("s33name", "s17name", "scalename"):
+        if _c in df.columns:
+            df[_c] = df[_c].astype(str).str.strip()
     return df.reset_index(drop=True)
 
 
@@ -215,6 +227,13 @@ def main() -> None:
                         help="キャッシュを無視して再ダウンロード")
     parser.add_argument("--out",      default=None, metavar="FILE",
                         help="出力ファイル名（省略時は市場区分から自動決定）")
+    # ★ 業種CSVを吐く(2026-09-06)。J-Quants の equities/master は 403
+    #   だったが、業種は JPX の data_j.xls に入っている。契約は要らない。
+    parser.add_argument("--emit-sectors", default=None, metavar="CSV",
+                        nargs="?", const="jquants_extra/master.csv",
+                        help="銘柄→業種の CSV も書く(既定 jquants_extra/master.csv)。"
+                             "列名は analyze_gap_edge --sector-scan が読む形"
+                             "(Code / Sector33CodeName / Sector17CodeName)")
     args = parser.parse_args()
 
     print()
@@ -234,6 +253,25 @@ def main() -> None:
 
     # 市場区分フィルター
     df = filter_by_market(raw_df, args.market)
+
+    # ★ 業種CSV。**市場で絞る前の全銘柄**を書く(絞ると分析側で引けない銘柄が出る)
+    if args.emit_sectors:
+        import pathlib as _pl
+        if "s33name" not in raw_df.columns:
+            print("\n  ⛔ この data_j.xls に業種列がありません"
+                  f"(列: {list(raw_df.columns)[:8]})。"
+                  "\n     --no-cache で取り直すか、JPX の書式変更を確認してください")
+        else:
+            _o = _pl.Path(args.emit_sectors)
+            _o.parent.mkdir(parents=True, exist_ok=True)
+            _sec = raw_df[["code", "name", "s33", "s33name", "s17", "s17name"]].copy()
+            # analyze_gap_edge --sector-scan が探す列名に合わせる
+            _sec.columns = ["Code", "CompanyName", "Sector33Code",
+                            "Sector33CodeName", "Sector17Code", "Sector17CodeName"]
+            _sec.to_csv(_o, index=False, encoding="utf-8-sig")
+            _n33 = _sec["Sector33CodeName"].nunique()
+            print(f"\n  [業種] {len(_sec):,}銘柄 / {_n33}業種 → {_o.resolve()}")
+            print(f"         ⛔ J-Quants は使っていません(JPX の data_j.xls)")
 
     market_labels = {
         "prime":    "プライム",
