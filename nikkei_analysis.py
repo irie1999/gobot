@@ -659,6 +659,9 @@ _NG_PX_RECHECK = os.environ.get("LSS_NEWGAP_PX_RECHECK", "0").strip().lower() \
 #   ⚠ スキャンは共有なので計算はほぼ増えない(価格帯は後処理)。
 _NG_PXSPLIT = os.environ.get("LSS_NEWGAP_PXSPLIT", "0").strip().lower() \
     not in ("0", "false", "no", "")
+# ★ 資金スイープ(テキストレポートの末尾)。既定ON。後処理なので計算は増えない
+_NG_CAP = os.environ.get("LSS_NEWGAP_CAP", "1").strip().lower() \
+    not in ("0", "false", "no", "")
 _NG_SPAN: dict = {}          # (窓の実測) 最古日 / 最新日 / 銘柄日数
 # ★ 全変種を1つのテキストにまとめて書き出す先。**既定OFF**(2026-09-05 ユーザー指示
 #   「常にファイル出力は行わないでいい」)。毎日の .\dailyfast では出さない。
@@ -748,12 +751,23 @@ def _newgap_scan_one(sym: str, days: int, min_price: float, max_price: float) ->
 
 
 def _newgap_sim(rows: list, budget_man: float, watch: int,
-                gap_bp: float, ret1_min: float) -> dict:
+                gap_bp: float, ret1_min: float,
+                qty_mode: str = "fixed", qty: int = 0,
+                max_pct: float = 0.0) -> dict:
     """日ごとに 候補 → watch上限 → ギャップ判定 → 予算 の順で建てる。
 
     ★ この順番が実運用そのもの。**watch上限を先に掛ける**のが肝で、
       「候補は多いが朝50件しか板を読めない」という制約をここで再現する。
+
+    qty_mode:
+      "fixed" … 常に qty 株(既定 _NG_QTY=100)。**現行**
+      "equal" … 予算 ÷ その日の合格件数 を 100株単位で切り捨て(最低1単元)。
+                ⛔ 合格1件の日に予算の全部が1銘柄に入る。max_pct で頭を切る
+                   (§18.38 #3b で J が実際にこれを踏んだ)。
+    max_pct: 1銘柄の上限(予算に対する%)。0=無制限。
+    ⚠ 合格件数は 09:00 に確定するので、それで割るのは **先読みではない**。
     """
+    _q0 = int(qty or _NG_QTY)
     if not rows:
         return {}
     _df = pd.DataFrame(rows)
@@ -776,20 +790,33 @@ def _newgap_sim(rows: list, budget_man: float, watch: int,
         _missed = len(_cand[_cand["gap_bp"] >= gap_bp]) - len(_hit)
         # ⑤ 予算。ギャップ降順(強い順)に埋める
         _hit = _hit.sort_values("gap_bp", ascending=False)
+        # ★ 資金均等: 予算 ÷ 合格件数(09:00 に確定するので先読みではない)
+        _lot_cap = (_cap * max_pct / 100.0) if max_pct > 0 else _cap
+        _slot = (_cap / max(1, len(_hit))) if qty_mode == "equal" else 0.0
         _cash, _p, _n = _cap, 0.0, 0
         for _r in _hit.itertuples():
-            _cost = float(_r.entry_p) * _NG_QTY
+            if qty_mode == "equal":
+                _unit = float(_r.entry_p) * 100.0
+                # 1銘柄の上限(予算比)。⛔ 無いと合格1件の日に全額が1銘柄へ
+                _q = int(min(_slot, _lot_cap) // _unit) * 100
+                _q = max(100, _q)             # 最低1単元は建てる
+            else:
+                _q = _q0
+            _cost = float(_r.entry_p) * _q
             if _cost > _cash:
                 continue                      # 貪欲(§18.33: レポート側に揃える)
             _cash -= _cost
-            _p += float(_r.pnl)
+            _p += float(_r.pnl) / _NG_QTY * _q     # pnl は100株ぶんで持っている
             _n += 1
             _det.append({"date": _d, "symbol": _r.symbol, "ret1": _r.ret1,
                          "gap_bp": _r.gap_bp, "entry_p": _r.entry_p,
-                         "pnl": _r.pnl, "liq": _r.liq})
+                         "qty": _q,
+                         "pnl": float(_r.pnl) / _NG_QTY * _q, "liq": _r.liq})
         _days.append({"date": _d, "cand": _n_cand, "watched": len(_watched),
                       "hit": len(_hit), "built": _n, "used": _cap - _cash,
-                      "pnl": _p, "missed": _missed})
+                      "pnl": _p, "missed": _missed,
+                      # ★ 予算で落とした件数。**これが 0 なら資金は律速していない**
+                      "budget_drop": len(_hit) - _n})
     return {"days": pd.DataFrame(_days), "det": pd.DataFrame(_det)}
 
 
@@ -1195,9 +1222,75 @@ def _newgap_build(days: int, min_price: float, max_price: float,
             "trades": _newgap_rows_to_trades(_det, side),
             # ★ テキスト書き出し用の生データ(2026-09-05)。HTMLを目で写さずに済む
             "_raw": {"dd": _dd, "det": _det, "span": _sp, "side": side,
+                     "rows": _rows,
                      "variant": variant, "days": days,
                      "pmin": float(min_price or 0.0),
                      "pmax": float(max_price or 1e9)}}
+
+
+def _newgap_capital_sweep(rows: list, side: str) -> list:
+    """★ 資金が増えたらどうなるか (2026-09-06 ユーザー依頼)。
+
+    ⛔ 先に結論の形を決めておく。この掃き出しで答えるのは1つだけ:
+       **いま律速しているのは 予算 か watch50 か。**
+       `budget_drop`(合格したのに予算で建てられなかった件数)が 0 に近ければ
+       資金を増やしても何も起きない。watch50 は kabu の登録上限なので
+       外せない(§18.44/§18.45)。
+
+    ★ 3方式:
+       A 予算だけ上げる (100株固定)      … 合格が上限を超えた日だけ増える
+       B 株数を増やす   (200/300株固定)  … 純レバレッジ。÷σ は定義上ほぼ不変
+       C 資金均等       (予算÷合格件数)  … 寝ている資金を使う。集中度は上がる
+    ⚠ B の ÷σ が不変なのは「儲かるか」ではなく **リスク許容度の宣言**だから
+      (§18.38 #3b)。総額が増えたことを改善と読まないこと。
+    """
+    import numpy as _np
+    _out = []
+    _budgets = [float(x) for x in
+                os.environ.get("LSS_NEWGAP_CAP_BUDGETS",
+                               "400,600,800,1200,2000").split(",") if x.strip()]
+    _qtys = [int(x) for x in
+             os.environ.get("LSS_NEWGAP_CAP_QTYS", "100,200,300").split(",")
+             if x.strip()]
+    _maxp = float(os.environ.get("LSS_NEWGAP_CAP_MAXPCT", "25"))
+    _plan = ([("A 予算のみ", _b, "fixed", 100) for _b in _budgets]
+             + [("B 株数", 400.0, "fixed", _q) for _q in _qtys if _q != 100]
+             + [("C 資金均等", _b, "equal", 0) for _b in _budgets])
+    for _lbl, _b, _mode, _q in _plan:
+        try:
+            _s = _newgap_sim(rows, _b, _NG_WATCH, _NG_GAP_BP, _NG_RET1,
+                             qty_mode=_mode, qty=_q, max_pct=_maxp)
+            if not _s or _s["days"].empty:
+                continue
+            _dd, _det = _s["days"], _s["det"]
+            _m = _dd.copy()
+            _m["month"] = _m["date"].str[:7]
+            _mm = _m.groupby("month")["pnl"].sum()
+            _mm = _mm[_mm.index != _mm.index[-1]] if len(_mm) > 2 else _mm
+            _sd = float(_mm.std(ddof=1)) if len(_mm) > 1 else 0.0
+            _dv = _dd["pnl"].to_numpy(dtype="float64")
+            _srt = _np.sort(_dv)
+            _out.append({
+                "lbl": f"{_lbl} {_b:,.0f}万" + (f"/{_q}株" if _q and _q != 100 else ""),
+                "n": int(len(_det)),
+                "mu": float(_mm.mean()) if len(_mm) else 0.0,
+                "sd": _sd,
+                "ratio": (float(_mm.mean()) / _sd) if _sd else 0.0,
+                "tot": float(_dd["pnl"].sum()),
+                "used_med": float(_dd["used"].median()),
+                "used_max": float(_dd["used"].max()),
+                "peak_pct": float(_dd["used"].max()) / (_b * 1e4) * 100.0,
+                "util": float(_dd["used"].median()) / (_b * 1e4) * 100.0,
+                "drop": int(_dd["budget_drop"].sum()),
+                "drop_days": int((_dd["budget_drop"] > 0).mean() * 100.0),
+                "worst": float(_srt[0]) if len(_srt) else 0.0,
+                "cvar": float(_srt[:max(1, len(_srt) // 20)].mean()) if len(_srt) else 0.0,
+                "big": (float((_det["entry_p"] * _det.get("qty", _NG_QTY)).max())
+                        if not _det.empty else 0.0),
+            })
+        except Exception as _e:                           # noqa: BLE001
+            _out.append({"lbl": f"{_lbl} {_b:,.0f}万", "err": str(_e)[:60]})
+    return _out
 
 
 def _newgap_txt_report(items: list, path: str) -> None:
@@ -1344,6 +1437,44 @@ def _newgap_txt_report(items: list, path: str) -> None:
                f"{float(_r2['損益']):>+15,.0f}")
         _w("")
 
+    # ── ★ 資金が増えたら (ショートの本線だけ) ──
+    _cap_src = next((_r for _l, _r in items
+                     if _r.get("side") == "short" and not _r.get("variant")), None)
+    if _cap_src and _cap_src.get("rows") and _NG_CAP:
+        _w("=" * 78)
+        _w("■ ★ 資金が増えたらどうなるか")
+        _w("=" * 78)
+        _w("  ⛔ 答えるのは1つだけ: **律速は 予算 か watch50 か**。")
+        _w("     『予算落ち』が 0 に近ければ資金を増やしても何も起きない。")
+        _w("     watch50 は kabu の登録上限なので外せない(§18.44/§18.45)。")
+        _w("  ⚠ B(株数)の ÷σ が不変なのは定義どおり。総額が増えたことを")
+        _w("     『改善』と読まないこと。リスク許容度の宣言です(§18.38 #3b)。")
+        _w("")
+        _hd3 = (f"{'方式':<20}{'件数':>8}{'月平均':>12}{'月次σ':>12}{'÷σ':>7}"
+                f"{'稼働率':>7}{'ピーク':>13}{'予算落ち':>9}{'落ち日':>7}"
+                f"{'最悪日':>13}{'CVaR5%':>12}{'最大1銘柄':>12}")
+        _w(_hd3)
+        _w("-" * len(_hd3))
+        for _r in _newgap_capital_sweep(_cap_src["rows"], _cap_src["side"]):
+            if _r.get("err"):
+                _w(f"{_r['lbl']:<20}  ⛔ {_r['err']}")
+                continue
+            _w(f"{_r['lbl']:<20}{_r['n']:>8,}{_r['mu']:>+12,.0f}{_r['sd']:>12,.0f}"
+               f"{_r['ratio']:>7.2f}{_r['util']:>6.0f}%{_r['used_max']:>13,.0f}"
+               f"{_r['drop']:>9,}{_r['drop_days']:>6}%{_r['worst']:>+13,.0f}"
+               f"{_r['cvar']:>+12,.0f}{_r['big']:>12,.0f}")
+        _w("")
+        _w("  稼働率 = 投入中央値 ÷ 予算。低いほど資金が寝ている。")
+        _w("  予算落ち = 合格したのに予算で建てられなかった **件数**(11.5年合計)。")
+        _w("  落ち日 = そういう日の割合。**これが小さければ資金は律速していない**。")
+        _w("  最大1銘柄 = 1銘柄に入った最大額。C(資金均等)は上限を掛けても膨らむ。")
+        _w("")
+        _w("  ★ 読み方の順番:")
+        _w("    1. A の『落ち日』が小さい → 予算を増やしても効果は小さい")
+        _w("    2. B の ÷σ が A と同じ  → 純レバレッジ。儲かる話ではない")
+        _w("    3. C の ÷σ が A より高い → **ここだけが本当の改善候補**")
+        _w("       ただし『最大1銘柄』と CVaR を必ず見る(§18.38 #3b)")
+        _w("")
     _w("=" * 78)
     _w("■ このレポートが測っていないもの")
     _w("=" * 78)
