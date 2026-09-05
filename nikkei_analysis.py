@@ -633,6 +633,12 @@ _NG_WORKERS = int(os.environ.get("LSS_NEWGAP_WORKERS", "8"))
 #   スキャンは N と共有するので計算はほぼ増えない。切るなら 0。
 _NG_MIRROR_TAB = os.environ.get("LSS_NEWGAP_MIRROR", "1").strip().lower() \
     not in ("0", "false", "no", "")
+# ★ N の「株価制限なし」変種タブ (2026-09-05 ユーザー依頼)。既定OFF。
+#   dailyfast.bat が 1 にする。スキャンは N と共有(価格帯は後処理)なので
+#   計算はほぼ増えない。⚠ 100株固定なので値がさ株ほど1件の建玉が大きく、
+#   予算400万に対する集中度が変わる。総額だけで比べないこと(§18.38 #6)。
+_NG_NOPX_TAB = os.environ.get("LSS_NEWGAP_NOPX", "0").strip().lower() \
+    not in ("0", "false", "no", "")
 
 
 def _newgap_yf(code: str) -> str:
@@ -846,7 +852,8 @@ _NG_ROWS_CACHE: dict = {}
 
 
 def _newgap_build(days: int, min_price: float, max_price: float,
-                  symbols: list, side: str = "short") -> dict:
+                  symbols: list, side: str = "short",
+                  variant: str = "") -> dict:
     """★ 新方式 N を計算して {head, trades} を返す。
 
     描画(月別サマリー・日別アコーディオン)は **呼び出し側の `_dup_toggle_html`**
@@ -858,13 +865,16 @@ def _newgap_build(days: int, min_price: float, max_price: float,
     _t0 = _time.time()
     # ⛔ スキャンは1,540銘柄で重い。**N と鏡像で同じ結果を使い回す**
     #   (鏡像は符号を反転するだけなので再スキャンは要らない)。
-    _ck = (days, min_price, max_price, len(symbols))
+    # ★ スキャンは **株価制限なし**で1回だけ行い、価格帯は後から掛ける
+    #   (2026-09-05)。こうすると「株価制限なし」の変種タブが**再スキャンなし**
+    #   で出せる(5分足を触らない日足だけの処理なので後処理は一瞬)。
+    _ck = (days, len(symbols))
     _rows = _NG_ROWS_CACHE.get(_ck)
     if _rows is None:
         _rows = []
         try:
             with _TPE(max_workers=max(1, _NG_WORKERS)) as _ex:
-                _fs = {_ex.submit(_newgap_scan_one, s, days, min_price, max_price): s
+                _fs = {_ex.submit(_newgap_scan_one, s, days, 0.0, 1e12): s
                        for s in symbols}
                 for _f in _asc(_fs):
                     try:
@@ -875,6 +885,9 @@ def _newgap_build(days: int, min_price: float, max_price: float,
             return {"head": f'<div style="color:#fbbf24">⛔ 新方式Nの計算に失敗: {_e}</div>',
                     "trades": []}
         _NG_ROWS_CACHE[_ck] = _rows
+    # 価格帯はここで掛ける(建値 = D+1 の始値で判定。スキャン時と同じ基準)
+    _lo, _hi = float(min_price or 0.0), float(max_price or 1e12)
+    _rows = [r for r in _rows if _lo <= float(r["entry_p"]) <= _hi]
     if side == "long":
         _rows = _newgap_mirror_rows(_rows)
     _sim = _newgap_sim(_rows, _NG_BUDGET, _NG_WATCH, _NG_GAP_BP, _NG_RET1)
@@ -884,8 +897,9 @@ def _newgap_build(days: int, min_price: float, max_price: float,
     #   列: date / cand(前夜の候補) / watched(板を読んだ) / hit(合格) /
     #       built(予算内で建てた) / used(投入額) / pnl / missed(50件の壁で逃した)
     _ngc = os.environ.get("LSS_NEWGAP_DAYS_CSV", "").strip()
-    if _ngc and side == "short" and not (_sim.get("days") is None
-                                         or _sim["days"].empty):
+    # ⛔ 変種(株価制限なし等)は書かない。書くと本線の n_days.csv を上書きする
+    if _ngc and side == "short" and not variant and not (
+            _sim.get("days") is None or _sim["days"].empty):
         try:
             _sim["days"].to_csv(_ngc, index=False, encoding="utf-8-sig")
             print(f"  [N] 日次損益 {len(_sim['days']):,}日 → {_ngc}", flush=True)
@@ -951,7 +965,13 @@ def _newgap_build(days: int, min_price: float, max_price: float,
            f'09:00: その始値を見て <b style="color:#e2e8f0">'
            f'ギャップ ≤ −{_NG_GAP_BP:.0f}bp</b> なら<b>買い</b>。')
         + f'予算 <b style="color:#e2e8f0">{_NG_BUDGET:,.0f}万円</b> / '
-        f'{_NG_QTY}株固定 / |ギャップ|降順に充当<br>'
+        f'{_NG_QTY}株固定 / |ギャップ|降順に充当 / '
+        + (f'建値 <b style="color:#e2e8f0">{min_price:,.0f}〜{max_price:,.0f}円</b>'
+           if (min_price > 0 or max_price < 1e9) else
+           f'建値 <b style="color:#f59e0b">制限なし</b>'
+           f'（⚠ 100株固定なので値がさ株ほど1件の建玉が大きい。'
+           f'§18.38 #6 では J で「建値に識別力なし」）')
+        + '<br>'
         + ('引け: MOC で買い戻す。' if _shortside else '引け: MOC で売る。')
         + f'<b style="color:#e2e8f0">損切り・利確・delay を'
         f'1つも持たない</b><br>'
@@ -21817,16 +21837,22 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 _eh_pane += _ng_pane
             # ★ N と鏡像を両方作る(§18.56)。スキャンは _NG_ROWS_CACHE で
             #   共有するので、2つ目はほぼ計算が増えない(符号を反転するだけ)。
-            _ng_sides = [("short", "newgap", "★ 新方式N", "#fbbf24", "#fde68a")]
+            _ng_lo = _PNL_ENTRY_MIN_PRICE if _PNL_ENTRY_MIN_PRICE > 0 else 0.0
+            _ng_hi = _PNL_ENTRY_MAX_PRICE if _PNL_ENTRY_MAX_PRICE > 0 else 1e9
+            # (side, key, label, color1, color2, min_price, max_price, variant)
+            _ng_sides = [("short", "newgap", "★ 新方式N", "#fbbf24", "#fde68a",
+                          _ng_lo, _ng_hi, "")]
             if _NG_MIRROR_TAB:
                 _ng_sides.append(("long", "newgapm", "★ 鏡像(買い)",
-                                  "#34d399", "#a7f3d0"))
-            for _ng_side, _ng_key, _ng_lbl, _ng_c1, _ng_c2 in _ng_sides:
-                _ng = _newgap_build(
-                    days,
-                    _PNL_ENTRY_MIN_PRICE if _PNL_ENTRY_MIN_PRICE > 0 else 0.0,
-                    _PNL_ENTRY_MAX_PRICE if _PNL_ENTRY_MAX_PRICE > 0 else 1e9,
-                    _ng_syms, side=_ng_side)
+                                  "#34d399", "#a7f3d0", _ng_lo, _ng_hi, ""))
+            if _NG_NOPX_TAB:
+                # ★ 株価制限なし(2026-09-05)。スキャンは共有、価格帯だけ外す
+                _ng_sides.append(("short", "newgapx", "★ N 株価制限なし",
+                                  "#f59e0b", "#fcd34d", 0.0, 1e9, "nopx"))
+            for (_ng_side, _ng_key, _ng_lbl, _ng_c1, _ng_c2,
+                 _ng_pmin, _ng_pmax, _ng_var) in _ng_sides:
+                _ng = _newgap_build(days, _ng_pmin, _ng_pmax, _ng_syms,
+                                    side=_ng_side, variant=_ng_var)
                 if not (_ng and _ng.get("head")):
                     continue
                 _ng_build_one(_ng, _ng_key, _ng_lbl, _ng_c1, _ng_c2)

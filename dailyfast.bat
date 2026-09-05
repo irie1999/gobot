@@ -135,6 +135,11 @@ REM     budget: a smaller budget runs out sooner, so "filter harder" is worth
 REM     MORE at 300 than at 400 - the optimum can move.
 REM       set LSS_BUDGET_MAN=300 & .\hvar
 if not defined LSS_BUDGET_MAN set "LSS_BUDGET_MAN=400"
+REM --- N tab without the 1,000-6,000 yen entry-price band (user, 2026-09-05).
+REM     Same scan as the main N tab, only the band is dropped, so it costs
+REM     nothing extra. 100 shares fixed => pricey names make bigger positions;
+REM     compare on ratio (mean / sigma), not on the total.
+if not defined LSS_NEWGAP_NOPX set "LSS_NEWGAP_NOPX=1"
 REM --- dump every settled trade so .\fills can reconcile real fills against the test.
 REM     Without it .\fills skips its section 3 and the daily divergence never accumulates.
 if not defined LSS_TRADES_CSV set "LSS_TRADES_CSV=lss_trades.csv"
