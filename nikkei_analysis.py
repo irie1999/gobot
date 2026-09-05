@@ -639,6 +639,16 @@ _NG_MIRROR_TAB = os.environ.get("LSS_NEWGAP_MIRROR", "1").strip().lower() \
 #   予算400万に対する集中度が変わる。総額だけで比べないこと(§18.38 #6)。
 _NG_NOPX_TAB = os.environ.get("LSS_NEWGAP_NOPX", "0").strip().lower() \
     not in ("0", "false", "no", "")
+# ★ N だけ **別の窓**で見る (2026-09-05 ユーザー依頼「11年分」)。0=レポートの --days に従う。
+#   ⛔ レポートの --days を伸ばしてはいけない。lss/J/K は5分足が土台で
+#      **2024-07 より前が存在しない**(§18.6)ので、伸ばしても意味が無いうえ遅い。
+#      N は日足だけなので N のときだけ窓を伸ばす。
+#   ⛔⛔ §18.53 の罠: `fetch` に `min_start_date` を渡さないと、--days を
+#      いくら伸ばしても **キャッシュの開始日を見ない**ので黙って短いまま返る
+#      (2026-08-25 に判定窓が 1日1.3銘柄になって「不合格」と出た)。
+#      → _newgap_scan_one で min_start_date を渡し、実際に取れた期間を出す。
+_NG_DAYS = int(os.environ.get("LSS_NEWGAP_DAYS", "0"))
+_NG_SPAN: dict = {}          # (窓の実測) 最古日 / 最新日 / 銘柄日数
 
 
 def _newgap_yf(code: str) -> str:
@@ -665,7 +675,12 @@ def _newgap_scan_one(sym: str, days: int, min_price: float, max_price: float) ->
     """
     try:
         from backtest_limit_entry import fetch as _f
-        df = _f(sym, days + 260)
+        # ⛔⛔ min_start_date を渡さないと **キャッシュの開始日を見ない**ので、
+        #   days を伸ばしても黙って短いまま返る(§18.53 で判定を1回壊した)。
+        import datetime as _dtm
+        _msd = (_dtm.datetime.now().date()
+                - _dtm.timedelta(days=int(days + 400)))
+        df = _f(sym, days + 260, min_start_date=_msd)
     except Exception:
         return []
     if df is None or len(df) < 60:
@@ -863,6 +878,10 @@ def _newgap_build(days: int, min_price: float, max_price: float,
     if not _NG_TAB or not symbols:
         return {}
     _t0 = _time.time()
+    # ★ N だけ別の窓(LSS_NEWGAP_DAYS)。レポートの --days は 5分足タブ用なので伸ばさない
+    _req_days = days
+    if _NG_DAYS > 0:
+        days = _NG_DAYS
     # ⛔ スキャンは1,540銘柄で重い。**N と鏡像で同じ結果を使い回す**
     #   (鏡像は符号を反転するだけなので再スキャンは要らない)。
     # ★ スキャンは **株価制限なし**で1回だけ行い、価格帯は後から掛ける
@@ -885,6 +904,21 @@ def _newgap_build(days: int, min_price: float, max_price: float,
             return {"head": f'<div style="color:#fbbf24">⛔ 新方式Nの計算に失敗: {_e}</div>',
                     "trades": []}
         _NG_ROWS_CACHE[_ck] = _rows
+        # ★★ **実際に取れた期間**を出す(§18.53: 要求した窓が取れたと思い込まない)。
+        #   キャッシュが短いと黙って短い窓で走り、「不合格」が出るだけになる。
+        if _rows:
+            _ds = sorted({r["date"] for r in _rows})
+            _NG_SPAN[_ck] = {"lo": _ds[0], "hi": _ds[-1], "nd": len(_ds),
+                             "rows": len(_rows), "req": days}
+            _yrs = (pd.Timestamp(_ds[-1]) - pd.Timestamp(_ds[0])).days / 365.25
+            print(f"  [N] 実際に取れた期間 **{_ds[0]}〜{_ds[-1]}** "
+                  f"({_yrs:.1f}年 / {len(_ds):,}営業日 / {len(_rows):,}銘柄日 / "
+                  f"{len(_rows) / max(1, len(_ds)):.0f}銘柄/日)", flush=True)
+            if _yrs * 365.25 < days * 0.8:
+                print(f"     ⛔ **要求した {days}日({days / 365.25:.1f}年)に"
+                      f"届いていません**。yfinance のキャッシュが短い可能性。"
+                      f"$env:GOBOT_REFRESH_DATA=\"1\" で強制再取得できます",
+                      flush=True)
     # 価格帯はここで掛ける(建値 = D+1 の始値で判定。スキャン時と同じ基準)
     _lo, _hi = float(min_price or 0.0), float(max_price or 1e12)
     _rows = [r for r in _rows if _lo <= float(r["entry_p"]) <= _hi]
@@ -909,6 +943,7 @@ def _newgap_build(days: int, min_price: float, max_price: float,
         return {"head": '<div style="color:#94a3b8">新方式N: 対象データがありません</div>',
                 "trades": []}
     _dd, _det = _sim["days"], _sim["det"]
+    _sp = _NG_SPAN.get(_ck) or {}
     _el = _time.time() - _t0
 
     _tot = float(_dd["pnl"].sum())
@@ -964,6 +999,11 @@ def _newgap_build(days: int, min_price: float, max_price: float,
            if _shortside else
            f'09:00: その始値を見て <b style="color:#e2e8f0">'
            f'ギャップ ≤ −{_NG_GAP_BP:.0f}bp</b> なら<b>買い</b>。')
+        + (f'<b style="color:#f59e0b">窓 {_sp["lo"]}〜{_sp["hi"]}'
+           f'（{(pd.Timestamp(_sp["hi"]) - pd.Timestamp(_sp["lo"])).days / 365.25:.1f}年 / '
+           f'{_sp["nd"]:,}営業日）</b>'
+           f'　⚠ レポートの表示窓ではなく <code>LSS_NEWGAP_DAYS</code> です<br>'
+           if _NG_DAYS > 0 and _sp else '')
         + f'予算 <b style="color:#e2e8f0">{_NG_BUDGET:,.0f}万円</b> / '
         f'{_NG_QTY}株固定 / |ギャップ|降順に充当 / '
         + (f'建値 <b style="color:#e2e8f0">{min_price:,.0f}〜{max_price:,.0f}円</b>'
