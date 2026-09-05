@@ -240,7 +240,9 @@ def _paths_for_day(day: str, grp: pd.DataFrame):
         # ショート(side=1) は 建値-現値、ロング(side=-1) は 現値-建値
         _sgn = 1.0 if int(_r.side) > 0 else -1.0
         _pl = (float(_r.entry_p) - _px) * _sgn * int(_r.qty)
-        _series.append(pd.Series(_pl, index=_ts))
+        _series.append(pd.Series(_pl, index=_ts, name=str(_r.symbol)))
+        _GAP.setdefault(day, {})[str(_r.symbol)] = float(
+            getattr(_r, "gap_bp", 0.0) or 0.0)
         # ★ **次のバーの始値**で決済したときの含み損益も作る。
         #   検知は5分足の終値、約定はその後 = 同じバーの終値だと甘い。
         #   どちらが実運用に近いかは板次第なので、両方出して差を見る。
@@ -261,6 +263,8 @@ def _paths_for_day(day: str, grp: pd.DataFrame):
     #   ことになり、強い好転が出る。私の ⑥10件 の +70,678 はこれが主因。
     #   → 建てる前は **損益ゼロ**。ffill は建てた後の欠測にだけ効かせる。
     _m = pd.concat(_series, axis=1).ffill().fillna(0.0)
+    # ★ 銘柄別の経路を残す(大負け日の分解に使う)。同一銘柄が2枠あれば合算
+    _SYM[day] = _m.T.groupby(level=0).sum().T
     _mo = pd.concat(_sero, axis=1).ffill().fillna(0.0)
     _OPEN[day] = _mo.sum(axis=1).to_numpy(dtype="float64")
     # 累積建玉の推移(グリッド上)。「いま何円建っているか」= 武装判定の材料
@@ -284,6 +288,8 @@ def _paths_for_day(day: str, grp: pd.DataFrame):
 
 
 _OPEN: dict = {}          # 次のバー始値ベースの経路
+_SYM: dict = {}           # 日 -> 銘柄別の含み損益の経路(DataFrame)
+_GAP: dict = {}           # 日 -> {銘柄: 建値のギャップbp}
 _NG_N: set = set()        # 建玉を再現しきれず判定不能にした日
 _LATE = [0, 0]            # [遅寄りの銘柄日, 全銘柄日]
 _CUMN: dict = {}          # 累積 **件数**(グリッド上)。件数ゲート用
@@ -1138,6 +1144,162 @@ else:
               f"({_a1} {_adj[_a1]:+,.0f} → {_b1} {_adj[_b1]:+,.0f})。")
         print(f"       {len(_flip)}箇所。時刻に構造があるならこうはなりません"
               f" = **ノイズ**")
+
+# ══════════════════════════════════════════════════════════════════════
+# ★★★ 大負け日の推移分解 (2026-09-05 ユーザー依頼)
+# ══════════════════════════════════════════════════════════════════════
+#   上の「いつ畳めば」は **20日の平均**。平均は違う形を混ぜて直線に見せる
+#   (前半型と後半型を足すと直線になる)。日ごと・銘柄ごとに分解して、
+#   先に決めた4点だけを見る:
+#     1. 形   … 各日の 09:30/11:30/13:00 の進捗率(最終損失比)。前半/直線/後半
+#     2. 集中 … 最悪1銘柄の寄与率、負け銘柄の割合(薄く全部か、少数が深いか)
+#     3. 相場 … その日の日経の日中%(取れれば)。§18.60 では大負け日の81%が日経+
+#     4. 戻り … 最悪点と引けの差。最悪=引け なら「戻さない日」
+#   ⛔ これは記述であってルールではない。ここで見つけた形を条件にすると
+#      多重検定になる。**見つけたら別の窓で確かめてから**。
+print(f"\n{'=' * 96}")
+print(f"■ ★★★ 大負け日の推移分解（{a.worst_n}件以上・損益下位{a.worst_k}日）")
+print(f"{'=' * 96}")
+
+
+def _n225_intraday() -> dict:
+    """日 -> 日経の日中%(始値→終値)。取れなければ空。"""
+    try:
+        import yfinance as yf
+        _lo, _hi = _ks[0], _ks[-1]
+        _h = yf.Ticker("^N225").history(
+            start=_lo, end=str(pd.Timestamp(_hi) + pd.Timedelta(days=2)),
+            interval="1d", auto_adjust=False, actions=False)
+        return {str(_i.date()): float(_r["Close"] / _r["Open"] - 1.0) * 100.0
+                for _i, _r in _h.iterrows() if _r["Open"] > 0}
+    except Exception as _e:                       # noqa: BLE001
+        print(f"  ⚠ 日経の取得に失敗({type(_e).__name__})。相場列は省略します")
+        return {}
+
+
+def _prog(day: str, hhmm: str) -> float:
+    """hhmm 時点の含み損益 ÷ 最終損益(最終が負のときだけ意味を持つ)。"""
+    _fin = _days[day][2]
+    return (_at(day, hhmm) / _fin * 100.0) if _fin < 0 else float("nan")
+
+
+def _decomp(day: str) -> dict:
+    _idx, _path, _fin, _n, _cum = _days[day]
+    _m = _SYM.get(day)
+    _k = int(np.argmin(_path))
+    _worst_v, _worst_t = float(_path[_k]), _idx[_k].strftime("%H:%M")
+    _o = {"fin": _fin, "n": _n, "worst_v": _worst_v, "worst_t": _worst_t,
+          "p0930": _prog(day, "09:30"), "p1130": _prog(day, "11:30"),
+          "p1300": _prog(day, "13:00")}
+    if _m is not None and len(_m.columns):
+        _last = _m.iloc[-1]
+        _lose = _last[_last < 0]
+        _o["n_sym"] = int(len(_last))
+        _o["lose_pct"] = len(_lose) / max(1, len(_last)) * 100.0
+        _o["top1"] = (float(_lose.min()) / _fin * 100.0) if (_fin < 0 and len(_lose)) else float("nan")
+        _o["top1_sym"] = str(_lose.idxmin()) if len(_lose) else "—"
+        _o["top3"] = (float(_lose.nsmallest(3).sum()) / _fin * 100.0) if (_fin < 0 and len(_lose)) else float("nan")
+        # 銘柄の同方向性: 全銘柄の最終損益の符号が揃っているか
+        _o["same_dir"] = float((_last < 0).mean()) * 100.0
+    return _o
+
+
+_MKT = _n225_intraday()
+_c10d = [d for d in _ks if int(_NPOS.get(d, 0)) >= a.worst_n]
+_c10d.sort(key=lambda d: _days[d][2])
+_wk2 = _c10d[:a.worst_k]
+if not _wk2:
+    print("  対象なし")
+else:
+    print(f"  ★ 進捗% = その時刻の含み損益 ÷ 最終損失。100%より大きい = "
+          f"途中のほうが深かった(戻した)")
+    print(f"  ★ 最悪1銘柄/上位3 = その銘柄の損 ÷ 最終損失。**100%超 = "
+          f"他の銘柄は勝っていた**(1銘柄型)\n")
+    print(f"  {'日付':<11}{'件':>3}{'最終':>10}{'09:30':>7}{'11:30':>7}{'13:00':>7}"
+          f"{'最悪(時刻)':>19}{'戻し':>9}{'負銘柄':>7}{'最悪1銘柄':>16}{'上位3':>6}"
+          f"{'日経日中':>8}")
+    _rows_d = []
+    for _d in _wk2:
+        _o = _decomp(_d)
+        _rows_d.append((_d, _o))
+        _mk = _MKT.get(_d)
+        print(f"  {_d:<11}{_o['n']:>3}{_o['fin']:>+10,.0f}"
+              f"{_o['p0930']:>6.0f}%{_o['p1130']:>6.0f}%{_o['p1300']:>6.0f}%"
+              f"{_o['worst_v']:>+11,.0f}({_o['worst_t']})"
+              f"{_o['fin'] - _o['worst_v']:>+9,.0f}"
+              f"{_o.get('lose_pct', float('nan')):>6.0f}%"
+              f"{_o.get('top1', float('nan')):>5.0f}% {_o.get('top1_sym', '—'):<9}"
+              f"{_o.get('top3', float('nan')):>5.0f}%"
+              + (f"{_mk:>+8.2f}%" if _mk is not None else f"{'—':>8}"))
+
+    # ── 1. 形 ──
+    _p11 = np.array([o["p1130"] for _, o in _rows_d], dtype="float64")
+    _front = int((_p11 >= 70).sum())
+    _back = int((_p11 <= 30).sum())
+    _mid = len(_p11) - _front - _back
+    print(f"\n  1. 形（11:30 時点の進捗で分類）")
+    print(f"     前半型(≥70%) **{_front}日** / 直線型 **{_mid}日** / "
+          f"後半型(≤30%) **{_back}日**")
+    print(f"     11:30 進捗の 中央値 {np.nanmedian(_p11):.0f}% / "
+          f"平均 {np.nanmean(_p11):.0f}%")
+    if _front + _back > _mid:
+        print(f"     ⛔ **平均の直線は混合の産物**。前半型と後半型が混ざっている")
+    else:
+        print(f"     → 個々の日も直線に近い。時刻で切る余地は小さい")
+
+    # ── 2. 集中 ──
+    _t1 = np.array([o.get("top1", np.nan) for _, o in _rows_d], dtype="float64")
+    _t3 = np.array([o.get("top3", np.nan) for _, o in _rows_d], dtype="float64")
+    _lp = np.array([o.get("lose_pct", np.nan) for _, o in _rows_d], dtype="float64")
+    print(f"\n  2. 集中（少数が深いか、全部が薄いか）")
+    print(f"     最悪1銘柄の寄与 中央値 **{np.nanmedian(_t1):.0f}%** / "
+          f"上位3銘柄 **{np.nanmedian(_t3):.0f}%** / 負け銘柄の割合 中央値 "
+          f"**{np.nanmedian(_lp):.0f}%**")
+    # 比較: 10件以上の全日(勝ち日も含む)の負け銘柄割合
+    _lp_all = [ _decomp(d).get("lose_pct", np.nan) for d in _c10d ]
+    print(f"     参考: {a.worst_n}件以上の全日 {len(_c10d)}日の負け銘柄割合 中央値 "
+          f"{np.nanmedian(_lp_all):.0f}%")
+    if np.nanmedian(_t1) >= 50:
+        print(f"     → **少数銘柄型**。1銘柄が半分以上を作る。1銘柄上限で"
+              f"効く可能性(ただし §18.38 #3b で上限は測定済み)")
+    elif np.nanmedian(_lp) >= 80:
+        print(f"     → **全面安型**。8割以上の銘柄が同時に負ける = 相場。"
+              f"銘柄の選別では防げない")
+    else:
+        print(f"     → 中間。単一の型ではない")
+
+    # ── 3. 相場 ──
+    if _MKT:
+        _mk_w = [_MKT[d] for d in _wk2 if d in _MKT]
+        _mk_a = [_MKT[d] for d in _c10d if d in _MKT]
+        if _mk_w:
+            print(f"\n  3. 相場（日経の日中% 始値→終値）")
+            print(f"     大負け日: 日経+の日 **{sum(1 for x in _mk_w if x > 0)}/{len(_mk_w)}** "
+                  f"/ 平均 {np.mean(_mk_w):+.2f}%")
+            print(f"     全日    : 日経+の日 {sum(1 for x in _mk_a if x > 0)}/{len(_mk_a)} "
+                  f"/ 平均 {np.mean(_mk_a):+.2f}%")
+            print(f"     ⚠ §18.60 の再確認。関係は実在するが**寄り前には読めない**"
+                  f"(OOS R² −0.064)。日中の日経は同時に動くので予測にならない")
+
+    # ── 4. 戻り ──
+    _rb = np.array([o["fin"] - o["worst_v"] for _, o in _rows_d], dtype="float64")
+    _nz = int((_rb > 1000).sum())
+    print(f"\n  4. 戻り（最悪点 → 引け）")
+    print(f"     最悪点から引けまでに戻した額 平均 **{_rb.mean():+,.0f}円** / "
+          f"1,000円超 戻した日 **{_nz}/{len(_rb)}**")
+    _wt = [o["worst_t"] for _, o in _rows_d]
+    _late_w = sum(1 for t in _wt if t >= "14:30")
+    print(f"     最悪点が 14:30 以降 **{_late_w}/{len(_wt)}日**"
+          f"(= 引け際が最悪 = 途中で降りれば助かった形)")
+    if _late_w >= len(_wt) * 0.7:
+        print(f"     → 大負け日は**引けが最悪**。戻さない。しかし『どの日が大負けか』は"
+              f"上の『どの段階で分かるか』で否定済み")
+    else:
+        print(f"     → 最悪点は途中にあり、引けまでに戻す日が多い。"
+              f"途中で降りると戻りを捨てる(§18.62 と整合)")
+
+    print(f"\n  ⛔ ここで見えた『型』を条件にしてはいけない(20日から作った条件は"
+          f"必ず当たる)。仮説にして、別の窓・全日で確かめること")
 
 # ══════════════════════════════════════════════════════════════════════
 # ★★ 決済時刻 — 引け成行より早く畳んだらどうか (2026-09-04 ユーザー発案)
