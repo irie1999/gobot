@@ -648,6 +648,17 @@ _NG_NOPX_TAB = os.environ.get("LSS_NEWGAP_NOPX", "0").strip().lower() \
 #      (2026-08-25 に判定窓が 1日1.3銘柄になって「不合格」と出た)。
 #      → _newgap_scan_one で min_start_date を渡し、実際に取れた期間を出す。
 _NG_DAYS = int(os.environ.get("LSS_NEWGAP_DAYS", "0"))
+# ★ 09:00 に始値も帯の中か再確認する(ライブの挙動)。既定OFF。
+#   ⚠ ONにしても **watch50 の顔ぶれは前夜(前日終値)のまま**なので先読みにならない。
+_NG_PX_RECHECK = os.environ.get("LSS_NEWGAP_PX_RECHECK", "0").strip().lower() \
+    not in ("0", "false", "no", "")
+# ★ 価格帯の4分解 (2026-09-06 Codex 提案)。既定OFF。
+#   現行(1,000〜6,000) / 下限だけ撤廃(〜6,000) / 上限だけ撤廃(1,000〜) / 完全撤廃
+#   ⛔ 「制限なしが良い」の中身が **安い株**なのか **値がさ株**なのかを
+#     分けないと、最悪日 −28万を作った側が分からない。
+#   ⚠ スキャンは共有なので計算はほぼ増えない(価格帯は後処理)。
+_NG_PXSPLIT = os.environ.get("LSS_NEWGAP_PXSPLIT", "0").strip().lower() \
+    not in ("0", "false", "no", "")
 _NG_SPAN: dict = {}          # (窓の実測) 最古日 / 最新日 / 銘柄日数
 # ★ 全変種を1つのテキストにまとめて書き出す先。**既定OFF**(2026-09-05 ユーザー指示
 #   「常にファイル出力は行わないでいい」)。毎日の .\dailyfast では出さない。
@@ -715,13 +726,20 @@ def _newgap_scan_one(sym: str, days: int, min_price: float, max_price: float) ->
             continue
         if not (pc > 0 and o1 > 0 and c1 > 0 and r1 == r1):
             continue
-        if o1 < min_price or o1 > max_price:
-            continue
+        # ⛔⛔ ここで価格帯を切ってはいけない(2026-09-06 Codex 指摘、実在した)。
+        #   o1 は **D+1 の始値** = 前夜には知りえない。しかも価格帯フィルタは
+        #   watch50 より前に効くので、「前夜に選ぶ50件の顔ぶれ」が未来の始値で
+        #   決まっていた = 先読み。価格帯は _newgap_build 側で
+        #   **前日終値(pc)** に対して掛ける。
+        if min_price > 0 or max_price < 1e11:
+            if o1 < min_price or o1 > max_price:
+                continue
         out.append({
             "date": str(_idx[pos + 1].date()),
             "symbol": sym,
             "ret1": r1,                                   # 前夜に確定
             "liq": lq if lq == lq else 0.0,               # 前夜に確定(as-of)
+            "prev_close": pc,                             # ★ 前夜に確定(価格帯はこれで切る)
             "entry_p": o1,                                # D+1 の始値
             "gap_bp": (o1 - pc) / pc * 10_000.0,
             "pnl": (o1 - c1) * _NG_QTY,                   # 寄りで売って引けで買い戻す
@@ -925,9 +943,18 @@ def _newgap_build(days: int, min_price: float, max_price: float,
                       f"届いていません**。yfinance のキャッシュが短い可能性。"
                       f"$env:GOBOT_REFRESH_DATA=\"1\" で強制再取得できます",
                       flush=True)
-    # 価格帯はここで掛ける(建値 = D+1 の始値で判定。スキャン時と同じ基準)
+    # ★★ 価格帯は **前日終値** で掛ける(2026-09-06 修正)。
+    #   ⛔ 以前は D+1 の始値で切っていた = 前夜には知りえない値で
+    #     watch50 の顔ぶれを決めていた(先読み)。ライブは前夜に前日終値で絞る。
+    #   ⚠ ライブは 09:00 に始値も再確認する。それを再現するのが
+    #     LSS_NEWGAP_PX_RECHECK=1(既定OFF)。ONだと当日の始値が帯の外の
+    #     銘柄を **判定時に** 落とす(watch50 の顔ぶれは前夜のまま = 先読みなし)。
     _lo, _hi = float(min_price or 0.0), float(max_price or 1e12)
-    _rows = [r for r in _rows if _lo <= float(r["entry_p"]) <= _hi]
+    if _lo > 0 or _hi < 1e11:
+        _rows = [r for r in _rows
+                 if _lo <= float(r.get("prev_close") or r["entry_p"]) <= _hi
+                 and (not _NG_PX_RECHECK
+                      or _lo <= float(r["entry_p"]) <= _hi)]
     if side == "long":
         _rows = _newgap_mirror_rows(_rows)
     _sim = _newgap_sim(_rows, _NG_BUDGET, _NG_WATCH, _NG_GAP_BP, _NG_RET1)
@@ -22061,6 +22088,13 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 # ★ 株価制限なし(2026-09-05)。スキャンは共有、価格帯だけ外す
                 _ng_sides.append(("short", "newgapx", "★ N 株価制限なし",
                                   "#f59e0b", "#fcd34d", 0.0, 1e9, "nopx"))
+            if _NG_PXSPLIT:
+                # ★ 4分解: 下限だけ撤廃 / 上限だけ撤廃(2026-09-06)
+                #   現行と完全撤廃は上の2本があるので、間の2本だけ足す
+                _ng_sides.append(("short", "newgapxlo", "N 下限撤廃(〜上限)",
+                                  "#a78bfa", "#ddd6fe", 0.0, _ng_hi, "pxlo"))
+                _ng_sides.append(("short", "newgapxhi", "N 上限撤廃(下限〜)",
+                                  "#22d3ee", "#a5f3fc", _ng_lo, 1e9, "pxhi"))
             _ng_txt_items = []
             for (_ng_side, _ng_key, _ng_lbl, _ng_c1, _ng_c2,
                  _ng_pmin, _ng_pmax, _ng_var) in _ng_sides:
