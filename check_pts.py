@@ -81,6 +81,15 @@ def main() -> int:
 
     _now = datetime.datetime.now(JST)
     print(f"[時刻] {_now:%Y-%m-%d %H:%M:%S} JST … {_sess(_now)}")
+    # ⚠ PTS が動く時間帯でなければ、そもそも「取れない」は当たり前。
+    #   ただし **register が通るかどうかは時間帯に依存しない**ので、
+    #   市場コードの可否だけはいつでも確かめられる
+    _t = _now.hour * 60 + _now.minute
+    if not (_t >= 16 * 60 + 30 or _t < 6 * 60 or 8 * 60 + 20 <= _t < 9 * 60):
+        print(f"       ⚠ PTS の時間帯ではありません"
+              f"(ナイト 16:30〜翌6:00 / デイ 8:20〜9:00)。")
+        print(f"         ここで分かるのは **市場コードが照会に使えるか**"
+              f"だけです(それは時間帯に依存しません)")
 
     syms = [s.strip() for s in a.symbols.split(",") if s.strip()]
     if not syms:
@@ -100,42 +109,69 @@ def main() -> int:
     cli.connect()
     print(f"[接続] {'本番' if a.prod else 'デモ'} / dry_run=True\n")
 
-    rows = []
+    rows, _stale, _regfail = [], set(), {}
+    _COLS = ["ts", "exchange", "symbol", "error"] + _KEYS   # ⛔ 全行 同じ列
     for ex, lbl in _EX:
         print(f"── Exchange={ex} ({lbl}) ──")
-        _ok = 0
+        _ok, _err = 0, 0
         for s in syms:
+            _row = {c: None for c in _COLS}
+            _row.update({"ts": _now.isoformat(), "exchange": ex, "symbol": s})
             try:
                 b = cli.get_board(s, ex) or {}
             except Exception as e:                    # noqa: BLE001
+                _err += 1
+                _row["error"] = type(e).__name__
+                rows.append(_row)
                 print(f"   {s}  ⛔ {type(e).__name__}: {str(e)[:70]}")
-                rows.append({"ts": _now.isoformat(), "exchange": ex,
-                             "symbol": s, "error": type(e).__name__})
+                # ⛔ 400 が全銘柄で出るなら**この市場コードは照会に使えない**。
+                #   叩き続けても 429 を誘発するだけなので次の Exchange へ
+                if "400" in str(e) and _err >= 2:
+                    _regfail[ex] = lbl
+                    print(f"   → **Exchange={ex} は register が通りません**"
+                          f"(照会に使えない市場コード)。この市場は打ち切ります")
+                    break
                 continue
             _cp = b.get("CurrentPrice")
             _has = _cp is not None and float(_cp or 0) > 0
             _ok += 1 if _has else 0
+            # ★ 当日の値か。**前営業日の値がそのまま返る**ことがある
+            #   (kabuステーションが起動していないとキャッシュを返す)
+            _ct = str(b.get("CurrentPriceTime") or "")
+            if _ct[:10] and _ct[:10] != f"{_now:%Y-%m-%d}":
+                _stale.add(_ct[:10])
+            for k in _KEYS:
+                _row[k] = b.get(k)
+            rows.append(_row)
             print(f"   {s}  " + ("✅" if _has else "⛔値なし") + "  "
                   + " / ".join(f"{k}={b.get(k)}" for k in _KEYS[:4]))
-            rows.append({"ts": _now.isoformat(), "exchange": ex, "symbol": s,
-                         **{k: b.get(k) for k in _KEYS}})
         print(f"   → 値が付いた {_ok}/{len(syms)}銘柄\n")
 
-    # ★ 判定。**値が付いただけでは足りない**(東証の最終値をそのまま返している
-    #   だけかもしれない)。時刻が動いているかを見ること
+    # ⛔⛔ **これが最優先の警告**。古い値で走ると朝の判定まで壊れる
+    if _stale:
+        print(f"⛔⛔ **CurrentPriceTime が今日({_now:%Y-%m-%d})ではありません** "
+              f"… {', '.join(sorted(_stale))}")
+        print(f"   kabuステーションが起動していないと、前回終了時のキャッシュを"
+              f"返します。トークンも板も返るので**気づかずに走ります**。")
+        print(f"   ⚠ 朝の `.\\norder` で同じことが起きると "
+              f"**前日の始値でギャップ判定**します。起動して再実行してください\n")
+
     print("★ 読み方")
-    print("  1. Exchange=27 だけ CurrentPrice が付いて 1 が付かない → **PTS が取れている**")
-    print("  2. どの Exchange も同じ値 → 東証の最終値を返しているだけ。PTS ではない")
-    print("     `CurrentPriceTime` が **15:30 のまま**ならこれ")
-    print("  3. 全部 値なし → kabu は PTS を配信していない。別ソースが要る")
-    print("  ⚠ 夜間に複数回(例 17時/20時/23時)走らせて、**値が動くか**を必ず見ること。")
-    print("     1回だけでは 1 と 2 を見分けられません")
+    if _regfail:
+        print(f"  ⛔ **register が 400 で通らない市場: "
+              f"{', '.join(f'{k}({v})' for k, v in _regfail.items())}**")
+        print(f"     これらは **発注専用の市場コード**で、板の照会には使えません")
+        print(f"     (kabu_api.py:57「照会系は従来通り 1 でよい」)")
+    print("  ★ kabuステーションAPI に **PTS 専用の市場コードは存在しません**")
+    print("     1東証 / 3名証 / 5福証 / 6札証 / 9 SOR / 27東証＋ / 23,24 大阪先物")
+    print("     照会できるのは Exchange=1(東証)だけで、東証は夜間やっていません")
+    print("  → **kabu で PTS は取れません。** 別ソース(SBI / 楽天 RSS)が要ります")
 
     if a.save and rows:
         _p = f"pts_{_now:%Y%m%d}.csv"
         _new = not os.path.exists(_p)
         with open(_p, "a", newline="", encoding="utf-8-sig") as fh:
-            w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
+            w = csv.DictWriter(fh, fieldnames=_COLS)
             if _new:
                 w.writeheader()
             w.writerows(rows)
