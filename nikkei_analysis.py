@@ -1327,7 +1327,9 @@ def _newgap_txt_report(items: list, path: str) -> None:
     try:
         with open(path, "w", encoding="utf-8") as _f:
             _f.write("\n".join(_L) + "\n")
-        print(f"  [N] テキストレポート → {path} ({len(_L):,}行)", flush=True)
+        # ★ **絶対パス**を出す。相対だと「どこにある？」になる(2026-09-05)
+        print(f"  [N] テキストレポート → {os.path.abspath(path)} "
+              f"({len(_L):,}行)", flush=True)
     except Exception as _e:                           # noqa: BLE001
         print(f"  ⚠ [N] レポート書き出しに失敗: {_e}", flush=True)
 
