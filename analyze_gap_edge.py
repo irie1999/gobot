@@ -238,6 +238,13 @@ ap.add_argument("--explore", action="store_true",
                 help="★ 探索モード。**TRAIN(最も古い窓)だけ**で選別軸を掃く。"
                      "TEST は集計すらしない(誤って見ないためのガード)。"
                      "判定は出さない — 出た候補を --confirm で1回だけ検証する")
+ap.add_argument("--sector-scan", action="store_true",
+                help="★ 業種で切る価値があるか(2026-09-05 ユーザー発案『半導体を除外』)。"
+                     "**TRAIN だけ**で判定。①先に宣言した半導体リスト(1検定) "
+                     "②33業種の総当たり(多重検定として帰無較正) を出す。"
+                     "業種は jquants_extra/master.csv(fetch_jquants_extra --only master)")
+ap.add_argument("--sector-file", type=str, default="jquants_extra/master.csv",
+                help="銘柄マスタ CSV(Code / Sector33CodeName / Sector17CodeName)")
 ap.add_argument("--axes", type=str, default="",
                 help="探索する軸(カンマ区切り)。空なら全部。名前は --list-axes で確認")
 ap.add_argument("--list-axes", action="store_true", help="探索できる軸を並べて終了")
@@ -452,7 +459,8 @@ _NEEDS_TRAIN = bool(a.explore or a.confirm or a.confirm_both or a.sweep_regime
                     or a.sweep_grid
                     or a.sweep_ops or a.sweep_barrier or a.sweep_relax
                     or a.sweep_watch or bool(a.confirm_watch)
-                    or a.tail_diag or a.hedge or bool(a.dump_picks))
+                    or a.tail_diag or a.hedge or bool(a.dump_picks)
+                    or a.sector_scan)
 if _NEEDS_TRAIN and not a.split:
     import sys as _sys
     _sys.exit("[error] このモードは TRAIN/TEST の分割が要ります。"
@@ -3388,6 +3396,166 @@ if a.explore:
         print(f"\n  ⛔ 候補ゼロ。この母集団でも選別軸は見つかりませんでした。")
         print(f"     §18.13(15軸78検定) / §18.24 / §18.31 / §18.48⑪ と同じ結論です。")
     sys.exit(0)
+
+# ══════════════════════════════════════════════════════════════════════
+# ★ 業種で切る価値があるか (2026-09-05 ユーザー発案「半導体関連を除外」)
+# ══════════════════════════════════════════════════════════════════════
+#   ⛔ この仮説は **TEST 期間(2024-2026)の大負け20日を見て出てきた**。
+#      だから TEST で確かめても検証にならない(仮説の出所と同じデータ)。
+#      判定は **TRAIN(2015-2020)** で行い、TEST は「出所」として参考表示だけ。
+#   ⛔ 2つを分ける:
+#      ① 半導体リスト … **先に宣言した1検定**。日クラスタ t と同日シャッフルで判定
+#      ② 33業種の総当たり … 多重検定。帰無は「同日シャッフルで最悪業種を選ぶ」
+#   ★ 半導体リスト(先に固定。結果を見てから足し引きしない)
+#     半導体そのもの / 製造装置 / 材料 / 検査。AI テーマ株(フジクラ等)は
+#     「関連」の範囲が恣意的になるので **入れない**。
+_SEMI = {
+    "8035.T", "6857.T", "6146.T", "6920.T", "7735.T", "6526.T", "6723.T",
+    "6963.T", "3436.T", "4063.T", "6590.T", "6315.T", "6254.T", "6323.T",
+    "7729.T", "6871.T", "4062.T", "6976.T", "6967.T", "3445.T", "6855.T",
+    "5218.T", "4186.T", "7741.T", "6890.T", "6786.T", "6619.T", "2760.T",
+}
+if a.sector_scan:
+    import random as _rnd
+    from pathlib import Path
+    print(f"\n{'=' * 78}\n■ 業種で切る価値があるか — 判定は **TRAIN({_train_n})** だけ\n{'=' * 78}")
+    _sec33: dict = {}
+    _sec17: dict = {}
+    _sp = Path(a.sector_file)
+    if _sp.exists():
+        _mst = pd.read_csv(_sp, dtype=str, encoding="utf-8-sig")
+        _cc = next((c for c in _mst.columns if c.lower() == "code"), None)
+        _c33 = next((c for c in _mst.columns if "sector33" in c.lower()
+                     and "name" in c.lower()), None)
+        _c17 = next((c for c in _mst.columns if "sector17" in c.lower()
+                     and "name" in c.lower()), None)
+        if _cc and _c33:
+            for _r in _mst.itertuples(index=False):
+                _y = _jq_to_yf(getattr(_r, _cc))
+                _sec33[_y] = str(getattr(_r, _c33))
+                if _c17:
+                    _sec17[_y] = str(getattr(_r, _c17))
+            print(f"  業種マスタ {_sp} … {len(_sec33):,}銘柄 (33業種)")
+        else:
+            print(f"  ⚠ {_sp} に Code / Sector33CodeName が見つかりません "
+                  f"(列: {list(_mst.columns)[:8]})。②は省略します")
+    else:
+        print(f"  ⚠ {_sp} がありません。②(33業種)は省略。"
+              f"作るには: python fetch_jquants_extra.py --only master")
+
+    def _one_vs_rest(w: pd.DataFrame, flag: pd.Series, lbl: str,
+                     seeds: int) -> dict:
+        """flag=True の集団 vs それ以外。同日シャッフルで (rest − flag) の帰無。"""
+        _in, _out = w[flag], w[~flag]
+        _obs = _bp(_out) - _bp(_in)
+        _rng = _rnd.Random(a.seed)
+        _groups = [(list(g[flag.loc[g.index]].index), list(g.index),
+                    (g["pnl"] / (g["entry_p"] * a.qty) * 1e4).tolist())
+                   for _, g in w.groupby("date")]
+        _nulls = []
+        for _ in range(max(1, seeds)):
+            _iv, _ov = [], []
+            for _fi, _ai, _vs in _groups:
+                _k = len(_fi)
+                if _k == 0:
+                    _ov.extend(_vs)
+                    continue
+                _pos = list(range(len(_ai)))
+                _rng.shuffle(_pos)
+                _sel = set(_pos[:_k])
+                for _j, _v in enumerate(_vs):
+                    (_iv if _j in _sel else _ov).append(_v)
+            if _iv and _ov:
+                _nulls.append(sum(_ov) / len(_ov) - sum(_iv) / len(_iv))
+        _nulls.sort()
+        _p = (sum(1 for x in _nulls if x >= _obs) / len(_nulls)) if _nulls else 1.0
+        return {"lbl": lbl, "n_in": len(_in), "n_out": len(_out),
+                "bp_in": _bp(_in), "t_in": _cluster_t(_in),
+                "bp_out": _bp(_out), "t_out": _cluster_t(_out),
+                "bp_all": _bp(w), "t_all": _cluster_t(w),
+                "obs": _obs, "p": _p,
+                "p95": (_nulls[min(len(_nulls) - 1, int(len(_nulls) * 0.95))]
+                        if _nulls else float("nan"))}
+
+    def _show(r: dict, win: str) -> None:
+        print(f"    [{win}] {r['lbl']}: {r['n_in']:,}件  bp **{r['bp_in']:+.1f}** "
+              f"(日t {r['t_in']:+.2f})   その他 {r['n_out']:,}件 "
+              f"bp {r['bp_out']:+.1f} (日t {r['t_out']:+.2f})")
+        print(f"           除外すると 全体 {r['bp_all']:+.1f} → {r['bp_out']:+.1f} "
+              f"({r['bp_out'] - r['bp_all']:+.1f}bp)   "
+              f"差(その他−対象) {r['obs']:+.1f}bp / 帰無95% {r['p95']:+.1f} "
+              f"/ 片側p={r['p']:.3f}")
+
+    _trp, _tep = _pool_of(_train), _pool_of(_test)
+    # ── ① 半導体(先に宣言した1検定) ──
+    print(f"\n  ① 半導体リスト({len(_SEMI)}銘柄・先に固定) — **1検定**")
+    _ftr = _trp["symbol"].isin(_SEMI)
+    if int(_ftr.sum()) < 100:
+        print(f"    ⚠ TRAIN に半導体が {int(_ftr.sum())}件しかありません。判定不能")
+        _r1 = None
+    else:
+        _r1 = _one_vs_rest(_trp, _ftr, "半導体", a.seeds)
+        _show(_r1, f"TRAIN {_train_n}")
+        # 先に宣言した合格条件: 対象の bp<0 かつ 日t≤−2 かつ 差が帰無95%超
+        _ok = (_r1["bp_in"] < 0 and _r1["t_in"] <= -2.0 and _r1["obs"] > _r1["p95"])
+        print(f"    判定(先に宣言: 対象bp<0 かつ 日t≤−2 かつ 差が帰無95%超): "
+              + ("✅ **除外する根拠がある**" if _ok else "⛔ **除外する根拠なし**"))
+        if not _ok:
+            if _r1["bp_in"] >= _r1["bp_all"]:
+                print(f"    → 半導体は全体と同じか**むしろ良い**。除外すると母集団が減るだけ")
+            elif _r1["obs"] <= _r1["p95"]:
+                print(f"    → 悪く見えるが**同日シャッフルの帯の中**。銘柄を入れ替えても出る差")
+    if len(_tep) and int(_tep["symbol"].isin(_SEMI).sum()) >= 100:
+        _r1t = _one_vs_rest(_tep, _tep["symbol"].isin(_SEMI), "半導体", a.seeds)
+        _show(_r1t, f"TEST {_test_n} ⚠仮説の出所")
+        print(f"    ⚠ TEST は仮説を思いついた期間そのもの。ここが悪く出るのは"
+              f"**当たり前**で証拠にならない。判定は TRAIN のみ")
+
+    # ── ② 33業種の総当たり(多重検定) ──
+    if _sec33:
+        print(f"\n  ② 33業種の総当たり — **多重検定**。帰無は『同日シャッフルで最悪業種を選ぶ』")
+        _w = _trp.copy()
+        _w["_sec"] = _w["symbol"].map(_sec33).fillna("(不明)")
+        _rows = []
+        for _s, _g in _w.groupby("_sec"):
+            if len(_g) >= 200:
+                _rows.append((_s, len(_g), _bp(_g), _cluster_t(_g)))
+        _rows.sort(key=lambda x: x[2])
+        print(f"    {'業種':<14}{'件数':>8}{'bp/件':>8}{'日t':>7}")
+        for _s, _n, _b, _t in _rows[:6]:
+            print(f"    {_s:<14}{_n:>8,}{_b:>+8.1f}{_t:>+7.2f}   ← 悪い側")
+        print(f"    {'…':<14}")
+        for _s, _n, _b, _t in _rows[-3:]:
+            print(f"    {_s:<14}{_n:>8,}{_b:>+8.1f}{_t:>+7.2f}")
+        # 帰無: 同日で業種ラベルをシャッフルし、**最悪業種の bp** を取る
+        _rng = _rnd.Random(a.seed)
+        _groups = [(list(g["_sec"]),
+                    (g["pnl"] / (g["entry_p"] * a.qty) * 1e4).tolist())
+                   for _, g in _w.groupby("date")]
+        _nulls = []
+        for _ in range(max(1, a.seeds)):
+            _acc: dict = {}
+            for _ls, _vs in _groups:
+                _l2 = list(_ls)
+                _rng.shuffle(_l2)
+                for _k, _v in zip(_l2, _vs):
+                    _acc.setdefault(_k, []).append(_v)
+            _c = [sum(v) / len(v) for k, v in _acc.items() if len(v) >= 200]
+            if _c:
+                _nulls.append(min(_c))
+        _nulls.sort()
+        _p05 = _nulls[max(0, int(len(_nulls) * 0.05))] if _nulls else float("nan")
+        _med = _nulls[len(_nulls) // 2] if _nulls else float("nan")
+        _wst = _rows[0] if _rows else None
+        if _wst:
+            print(f"\n    最悪業種 {_wst[0]} {_wst[2]:+.1f}bp  /  帰無(最悪を選ぶ) 中央 "
+                  f"{_med:+.1f} / 5%点 {_p05:+.1f}")
+            print("    " + ("✅ 帯の外(5%)。**ただし33業種から最悪を選んだ1回**。"
+                            "別の窓で同じ業種が最悪でなければノイズ"
+                            if _wst[2] < _p05 else
+                            "⛔ **帯の中**。33業種から最悪を選べばこの程度は必ず出る"))
+    print(f"\n  ★ 前提: N の稼働率は約40%(§18.55)。**除外で空いた予算は使い道が無い**ので、"
+          f"除外の利得は『対象のbpがマイナスであること』だけ。プラスなら除外は純損")
 
 if a.confirm:
     _cax, _, _cq = a.confirm.partition(":")
