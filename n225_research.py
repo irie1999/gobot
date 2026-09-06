@@ -150,19 +150,23 @@ def _parkinson_rv(high: pd.Series, low: pd.Series, window: int) -> pd.Series:
     return np.sqrt(lr2.rolling(window).mean())
 
 
-def make_features(panel: pd.DataFrame, target: str, asof: str = "preopen") -> pd.DataFrame:
+def make_features(panel: pd.DataFrame, target: str, asof: str = "at_open") -> pd.DataFrame:
     """
     「その予測時点で確実に使える情報」だけで特徴量を作る。
 
     asof で情報境界を切り替える (09:00 前が締切という運用要件に対応):
 
-      "strict"  … 前営業日の東京大引け以降・当日 09:00 までに確定した情報のみ。
+      "strict"  … 前営業日の東京大引け以降・当日 09:00:00 までに確定した情報のみ。
                   当日のギャップは一切使わない。最も保守的で、リーク疑義がゼロ。
-      "preopen" … strict + 当日ギャップ。日経先物 (大取デイセッションは 08:45 開始、
-                  CME は 05:15 まで) が 09:00 前に観測できるため、ギャップは
-                  実務上「寄り前に既知」と扱える。ただしここでは現物始値を
-                  先物示唆値の代理として使っており、08:59 先物との差 (数 bp) ぶんの
-                  近似が入る。厳密な検証は必ず "strict" と併記すること。
+      "at_open" … strict + 当日ギャップ (日経の現物始値)。09:00:00 の板寄せで確定する
+                  値なので「寄り前」ではなく「寄りと同時」。これを使ってよいのは、
+                  発注системが以下の順序を実測で満たす場合に限る:
+
+                      日経始値の受信 → 予測計算の完了 → 最初の発注送信
+
+                  順序が逆なら未来情報。また、始値を待つために発注を遅らせるなら
+                  その待機コストを必ず差し引くこと (n225_veto.py --wait-cost)。
+                  旧名 "preopen" はエイリアスとして残してある。
 
     ギャップを使えるのは target="day" のときだけ (gap / c2c 自身の予測には使えない)。
     """
@@ -215,8 +219,8 @@ def make_features(panel: pd.DataFrame, target: str, asof: str = "preopen") -> pd
     f["month_sin"] = np.sin(2 * np.pi * panel.index.month / 12)
     f["month_cos"] = np.cos(2 * np.pi * panel.index.month / 12)
 
-    # ── 当日ギャップ (target="day" かつ asof="preopen" のときのみ) ──
-    if target == "day" and asof == "preopen":
+    # ── 当日ギャップ (target="day" かつ asof="at_open" のときのみ) ──
+    if target == "day" and asof in ("at_open", "preopen"):
         f["open_gap"]   = tg["gap"]
         f["open_gap_z"] = tg["gap"] / rv_d.shift(1).replace(0, np.nan)
         if "gspc_close" in panel:
@@ -448,7 +452,7 @@ def report_coefficients(cols: list[str], models: list, top: int = 18) -> None:
 # ══════════════════════════════════════════════════════════════
 def run_direction(panel: pd.DataFrame, target: str, args) -> list[dict]:
     tg = make_targets(panel)
-    feats = make_features(panel, target, asof=getattr(args, "asof", "preopen"))
+    feats = make_features(panel, target, asof=getattr(args, "asof", "at_open"))
 
     data = feats.copy()
     data["_y"] = tg[target]
@@ -462,7 +466,7 @@ def run_direction(panel: pd.DataFrame, target: str, args) -> list[dict]:
     X     = data.to_numpy(dtype=float)
     y_bin = (y_ret > 0).astype(int)
 
-    print(f"\n■ ターゲット: {target}   asof: {getattr(args, 'asof', 'preopen')}   有効行: {len(data)}  "
+    print(f"\n■ ターゲット: {target}   asof: {getattr(args, 'asof', 'at_open')}   有効行: {len(data)}  "
           f"({data.index[0].date()} .. {data.index[-1].date()})   特徴量: {len(cols)}")
     print(f"  walk-forward: min_train={args.min_train}, step={args.step}, embargo={args.embargo}")
     print(f"  コスト: 片道 {args.cost_bps:.1f}bps / 建玉閾値: p>0.5±{args.threshold:.3f}")
@@ -666,9 +670,12 @@ def main() -> int:
     ap.add_argument("--years",     type=int,   default=15, help="取得年数 (default: 15)")
     ap.add_argument("--target",    default="day", choices=["day", "gap", "c2c"],
                     help="方向予測のターゲット (default: day)")
-    ap.add_argument("--asof",      default="preopen", choices=["strict", "preopen"],
-                    help="情報境界。strict=当日ギャップを使わない / preopen=09:00前に観測できる"
-                         "ギャップ (先物示唆値) を使う (default: preopen)")
+    ap.add_argument("--asof",      default="at_open",
+                    choices=["strict", "at_open", "preopen"],
+                    help="情報境界。strict=当日ギャップを使わない / "
+                         "at_open=09:00:00 の日経始値を使う (使用条件は make_features の "
+                         "docstring 参照)。preopen は at_open の旧名エイリアス "
+                         "(default: at_open)")
     ap.add_argument("--task",      default="direction", choices=["direction", "vol"],
                     help="direction=方向予測 / vol=HAR-RV ボラ予測")
     ap.add_argument("--min-train", type=int,   default=DEFAULT_MIN_TRAIN, dest="min_train")
