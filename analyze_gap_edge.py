@@ -531,21 +531,6 @@ _SIDE = -1.0 if a.side == "long" else 1.0
 #   r_all は直後に始値ベースへ絞り直すので、他の分析の母集団は1行も変わらない。
 _KEEP_CAND = bool(a.sweep_cands)
 
-# ★★ β を測るための日経の **日中(始値→終値)** リターン。--beta-scan のときだけ取る。
-#   ⛔ 終値どうしのリターンではない。N は日中しか持たないので、夜間のギャップを
-#     含めた β を当てても意味がない(§18.19 で持ち越しは棄却済み)。
-_N225_ID = None
-if a.beta_scan:
-    try:
-        _nk = ble.fetch("^N225", a.days + 420, min_start_date=_MIN_START)
-        _nk.index = pd.to_datetime(_nk.index).normalize()
-        _N225_ID = ((_nk["close"] - _nk["open"]) / _nk["open"] * 100.0)
-        print(f"[info] 日経の日中リターン {len(_N225_ID):,}日"
-              f"({str(_N225_ID.index.min())[:10]}〜{str(_N225_ID.index.max())[:10]})"
-              f" / β の窓 {a.beta_win}日")
-    except Exception as _e:                                   # noqa: BLE001
-        sys.exit(f"[error] 日経を取れないので β を測れません: "
-                 f"{type(_e).__name__}: {_e}")
 if a.side == "both" and not (a.sweep_ops or a.confirm_both or a.sweep_regime
                              or a.search_switch or a.sweep_size):
     sys.exit("[error] --side both は --sweep-ops / --confirm-both / "
@@ -573,6 +558,31 @@ ble._ENTRY_TYPE_FORCE = None
 ble._INTRADAY_5M = False
 
 STRATS = ["MACDTF", "A7", "RSI2", "DON", "VOLTF", "MOM"]
+
+# ★★ β を測るための日経の **日中(始値→終値)** リターン。--beta-scan のときだけ取る。
+#   ⛔ 終値どうしのリターンではない。N は日中しか持たないので、夜間のギャップを
+#     含めた β を当てても意味がない(§18.19 で持ち越しは棄却済み)。
+#   ★ 取得は preopen_market._load_ohlc を使う。--hedge が同じ経路で動いており
+#     ^N225 で実績がある(ble.fetch は日本株用の処理が入っていて未検証)。
+_N225_ID = None
+if a.beta_scan:
+    # ⛔ **コードのバグをデータの問題として報告しない**(2026-09-06 に踏んだ)。
+    #   ble 未定義の NameError を「日経を取れません」と出して、原因の切り分けに
+    #   遠回りした。import/名前解決の失敗はそのまま送出する。
+    from preopen_market import _load_ohlc as _n225_ohlc     # noqa: E402
+    _tdy = ble.datetime.now(ble.JST).date()      # _MIN_START と同じ経路
+    _e0 = (_tdy - _td(days=a.days + 460)).isoformat()
+    _e1 = (_tdy + _td(days=2)).isoformat()
+    _nk = _n225_ohlc("^N225", _e0, _e1)
+    if len(_nk) < 300:
+        sys.exit(f"[error] 日経の日足が {len(_nk)}日しか取れず β を測れません"
+                 f"(要求 {_e0}〜{_e1})。ネットワークか yfinance を確認してください")
+    _N225_ID = pd.Series(
+        {pd.Timestamp(_k): (_v[1] / _v[0] - 1.0) * 100.0
+         for _k, _v in _nk.items()}).sort_index()
+    print(f"[info] 日経の日中(始値→終値)リターン {len(_N225_ID):,}日 "
+          f"({str(_N225_ID.index.min())[:10]}〜{str(_N225_ID.index.max())[:10]})"
+          f" / β の窓 {a.beta_win}日")
 
 
 def _jq_to_yf(code: str) -> str:
