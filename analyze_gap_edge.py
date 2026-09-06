@@ -2435,7 +2435,10 @@ if a.beta_scan:
             _po = _po[_po["beta"].notna() & (_po["beta"] != 0.0)]
             if _po.empty:
                 continue
-            _ndb = max(1, _po["date"].nunique())
+            # ⛔ 分母は **全営業日**。プールの日数(取引があった日だけ)にすると
+            #   投入/日 が過大に出て、--sweep-size の表と並べられない
+            #   (2026-09-06: 90%残しで248万 と出たが、--sweep-size の基準は160万)。
+            _ndb = max(1, _wf["date"].nunique())
             _bb = _tailb(_make_ops_sim(_wf, _pool_of(_wf), _ndb)[0](
                 50, a.budget_man or 400.0, 0, False))
             if not _bb:
