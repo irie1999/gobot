@@ -324,9 +324,11 @@ class PrevSign:
 #  4. Walk-forward
 # ══════════════════════════════════════════════════════════════
 def walk_forward(X: np.ndarray, y: np.ndarray, make_model,
-                 min_train: int, step: int, embargo: int) -> tuple[np.ndarray, np.ndarray]:
+                 min_train: int, step: int, embargo: int,
+                 collect: list | None = None) -> tuple[np.ndarray, np.ndarray]:
     """
     expanding window walk-forward。訓練末尾から embargo 日を purge する。
+    collect を渡すと各 fold の学習済みモデルを追記する (係数の確認用)。
     戻り値: (テスト行のインデックス, 予測確率)
     """
     idx_out, p_out = [], []
@@ -340,6 +342,8 @@ def walk_forward(X: np.ndarray, y: np.ndarray, make_model,
             split = end
             continue
         model = make_model().fit(Xtr, ytr)
+        if collect is not None:
+            collect.append(model)
         p = np.asarray(model.predict_proba(X[split:end]), dtype=float)
         idx_out.append(np.arange(split, end))
         p_out.append(p)
@@ -415,6 +419,30 @@ def print_table(rows: list[dict], title: str) -> None:
     print("─" * 118)
 
 
+def report_coefficients(cols: list[str], models: list, top: int = 18) -> None:
+    """
+    各 fold のロジスティック係数 (標準化後) を集計して表示する。
+
+    「エッジがどの特徴量から来ているか」を見るためのもの。
+    標準化済みなので係数の絶対値がそのまま影響力の目安になる。
+    符号が正 = その特徴量が大きいほど『日中上昇』の確率を上げる。
+    fold 間で符号が反転している特徴量は不安定で、信用してはいけない。
+    """
+    W = np.array([m.w for m in models])          # (fold, 1+n_features)
+    mean, sd = W[:, 1:].mean(axis=0), W[:, 1:].std(axis=0)
+    order = np.argsort(-np.abs(mean))[:top]
+
+    print(f"\n■ ロジスティック係数 (標準化後, {len(models)} fold の平均)")
+    print("─" * 72)
+    print(f"{'特徴量':<20}{'平均係数':>12}{'fold間σ':>12}{'符号一致率':>12}")
+    print("─" * 72)
+    for i in order:
+        agree = float(np.mean(np.sign(W[:, 1 + i]) == np.sign(mean[i])))
+        print(f"{cols[i]:<20}{mean[i]:>+12.4f}{sd[i]:>12.4f}{agree*100:>11.0f}%")
+    print("─" * 72)
+    print("  符号一致率が 100% に近い特徴量ほど安定。80% を切るものは実質ノイズ。")
+
+
 # ══════════════════════════════════════════════════════════════
 #  6. 方向予測タスク
 # ══════════════════════════════════════════════════════════════
@@ -452,8 +480,11 @@ def run_direction(panel: pd.DataFrame, target: str, args) -> list[dict]:
         print("  [info] sklearn 未導入のため GBDT はスキップします (pip install scikit-learn)")
 
     rows = []
+    coef_models: list = []
     for name, factory in candidates:
-        idx, p = walk_forward(X, y_bin, factory, args.min_train, args.step, args.embargo)
+        collect = coef_models if (name == "logistic" and args.coef) else None
+        idx, p = walk_forward(X, y_bin, factory, args.min_train, args.step,
+                              args.embargo, collect=collect)
         if len(idx) == 0:
             continue
         rows.append(evaluate(name, y_bin[idx], y_ret[idx], p, args.cost_bps, args.threshold))
@@ -464,6 +495,8 @@ def run_direction(panel: pd.DataFrame, target: str, args) -> list[dict]:
           f"Bonferroni 閾値は {0.05/max(len(candidates),1):.4f}。")
     if target in ("gap", "c2c"):
         print("  ※ gap / c2c で高い的中率が出ても、夜間先物が織り込み済みのため取引価値は限定的。")
+    if coef_models:
+        report_coefficients(cols, coef_models)
     return rows
 
 
@@ -646,6 +679,9 @@ def main() -> int:
     ap.add_argument("--threshold", type=float, default=0.0,
                     help="建玉する確信度の閾値。p>0.5+threshold で買い")
     ap.add_argument("--lam",       type=float, default=5.0, help="ロジスティックの L2 罰則")
+    ap.add_argument("--coef",      action="store_true",
+                    help="ロジスティック係数 (標準化後) を fold 平均で表示し、"
+                         "エッジがどの特徴量から来ているかを確認する")
     ap.add_argument("--panel",     default=str(PANEL_CSV), help="パネル CSV のパス")
     args = ap.parse_args()
 
