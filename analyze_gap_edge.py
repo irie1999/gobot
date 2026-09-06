@@ -245,6 +245,9 @@ ap.add_argument("--sector-scan", action="store_true",
                      "業種は jquants_extra/master.csv(fetch_jquants_extra --only master)")
 ap.add_argument("--sector-file", type=str, default="jquants_extra/master.csv",
                 help="銘柄マスタ CSV(Code / Sector33CodeName / Sector17CodeName)")
+ap.add_argument("--sector-cap-seeds", type=int, default=12,
+                help="⑤同業種上限の『同数をランダムに落とした帯』の本数(既定12)。"
+                     "1本ごとに予算シミュを回すので重い。帰無較正の --seeds とは別物")
 ap.add_argument("--axes", type=str, default="",
                 help="探索する軸(カンマ区切り)。空なら全部。名前は --list-axes で確認")
 ap.add_argument("--list-axes", action="store_true", help="探索できる軸を並べて終了")
@@ -3640,6 +3643,34 @@ if a.sector_scan:
     #     除外は業種そのものを否定するが、上限は偏りだけを削る。別物なので分ける。
     if _sec33:
         print(f"\n  ⑤ 同業種の同日集中に上限 — **除外とは別の検定**")
+        # ★★ ここは **期待値の検定ではない**(2026-09-06 ユーザー指摘)。
+        #   稼働率40%なので空いた枠は埋まらず、平均損益は必ず下がる(④の結論)。
+        #   それでも **CVaR・最悪日・MaxDD が十分に軽くなるなら保険として成立する**。
+        #   平均が下がることは不合格の理由にならない。見るのは左裾だけ。
+        def _tail5(_res, _ond):
+            """日次パネルから 月次(平均/σ/÷σ) と 左裾(CVaR5%/最悪日/MaxDD)。"""
+            _dd = _res["daily"]
+            _mm: dict = {}
+            for _d, _v in _dd.items():
+                _mm[str(_d)[:7]] = _mm.get(str(_d)[:7], 0.0) + _v[0] + _v[1]
+            _mv = np.array([_mm[k] for k in sorted(_mm)], float)
+            _dv = np.array([_dd[k][0] + _dd[k][1] for k in sorted(_dd)], float)
+            if len(_mv) < 3 or len(_dv) < 20:
+                return None
+            _mu, _sd = float(_mv.mean()), float(_mv.std(ddof=1))
+            # CVaR5% = 最悪5%の日の平均(負の値。0に近いほど軽い)
+            _k = max(1, int(round(len(_dv) * 0.05)))
+            _cv = float(np.sort(_dv)[:_k].mean())
+            # MaxDD は日次累積曲線の最大落ち込み(正の大きさ)。
+            # ⚠ 曲線の**先頭に 0 を置く**。置かないと初日から下げ続けた場合に
+            #   1日目の損失が山として扱われ、MaxDD が過小になる(検算で発覚)。
+            _cum = np.concatenate(([0.0], np.cumsum(_dv)))
+            _dd_max = float(np.max(np.maximum.accumulate(_cum) - _cum))
+            return {"mu": _mu, "sd": _sd, "r": (_mu / _sd if _sd else 0.0),
+                    "cvar": _cv, "worst": float(_dv.min()), "mdd": _dd_max}
+
+        _RNG5 = np.random.default_rng(20260906)
+        _mono: dict = {}
         for _wn3, _wf3 in (("TRAIN", _train), ("TEST", _test)):
             if _wf3 is None or not len(_wf3):
                 continue
@@ -3650,29 +3681,95 @@ if a.sector_scan:
             _p4["_sec"] = _p4["symbol"].map(_sec33).fillna("(不明)")
             _nd3 = max(1, _p4["date"].nunique())
             _mo3 = _nd3 / 20.0
-            _b4 = _make_ops_sim(_wf3, _p4, _nd3)[0](50, a.budget_man or 400.0,
-                                                    0, False)
-            _out4 = [f"      {_wn3:<6} 上限なし {_b4['pnl']:>+12,.0f}"]
-            for _cap4 in (2, 3, 4):
+            _sim4 = _make_ops_sim(_wf3, _p4, _nd3)[0]
+            _b4 = _sim4(50, a.budget_man or 400.0, 0, False)
+            _bt4 = _tail5(_b4, _nd3)
+            _pairs4 = list(map(tuple, _p4[["date", "symbol"]].to_numpy()))
+            _all4 = set(_pairs4)
+
+            def _run_drop(_drop):
+                """(日付,銘柄) の集合を落として予算シミュを回す。"""
+                _x = _wf3[[(_d, _s) not in _drop
+                           for _d, _s in zip(_wf3["date"], _wf3["symbol"])]]
+                return _make_ops_sim(_x, _pool_of(_x), _nd3)[0](
+                    50, a.budget_man or 400.0, 0, False)
+
+            print(f"\n    【{_wn3}】 ★ 見るのは **左裾**。平均が下がるのは織り込み済み")
+            print(f"      {'上限':<10}{'月平均':>11}{'月次σ':>10}{'÷σ':>7}"
+                  f"{'CVaR5%':>11}{'最悪日':>11}{'MaxDD':>12}"
+                  f"{'等価σ縮小の月平均':>20}")
+            if _bt4 is None:
+                print(f"      ⚠ 日数が足りず判定不能")
+                continue
+            print(f"      {'なし ★基準':<10}{_bt4['mu']:>+11,.0f}{_bt4['sd']:>10,.0f}"
+                  f"{_bt4['r']:>7.2f}{_bt4['cvar']:>+11,.0f}{_bt4['worst']:>+11,.0f}"
+                  f"{_bt4['mdd']:>12,.0f}{'—':>20}")
+            _seq = [_bt4]
+            for _cap4 in (4, 3, 2):          # 緩い→きつい の順(単調性を見るため)
                 # 同じ日・同じ業種は |ギャップ| 上位 _cap4 件まで。
-                # ⛔ 上と同じ理由で **元フレーム側から落とす**。合格候補
+                # ⛔ ④と同じ理由で **元フレーム側から落とす**。合格候補
                 #   (_p4)の中で上限を超えた (日付,銘柄) を特定して除く。
                 _keep = set(map(tuple, _p4.sort_values("gap_bp", ascending=False)
                                 .groupby(["date", "_sec"]).head(_cap4)
                                 [["date", "symbol"]].to_numpy()))
-                _drop = set(map(tuple, _p4[["date", "symbol"]].to_numpy())) - _keep
-                _wf3x = _wf3[[(_d, _s) not in _drop
-                              for _d, _s in zip(_wf3["date"], _wf3["symbol"])]]
-                _r4 = _make_ops_sim(_wf3x, _pool_of(_wf3x),
-                                    _nd3)[0](50, a.budget_man or 400.0, 0, False)
-                _out4.append(f"        同業種 {_cap4}件まで {_r4['pnl']:>+12,.0f} "
-                             f"(差 {_r4['pnl'] - _b4['pnl']:>+11,.0f} / "
-                             f"月 {(_r4['pnl'] - _b4['pnl']) / _mo3:>+8,.0f}円)")
-            print("\n".join(_out4))
-        print(f"      ⚠ TRAIN と TEST で **同じ上限**が良くなければ固定できません(§18.36)")
+                _drop = _all4 - _keep
+                _t4 = _tail5(_run_drop(_drop), _nd3)
+                if _t4 is None:
+                    print(f"      {_cap4}件まで: 判定不能")
+                    continue
+                _seq.append(_t4)
+                # 等価σ縮小 = 基準を同じσまで小さくしたときの月平均。
+                #   これを上回らなければ「レバレッジを落としただけ」(§18.38 #3b)
+                _f = (_t4["sd"] / _bt4["sd"]) if _bt4["sd"] else 1.0
+                _eq = _bt4["mu"] * _f
+                print(f"      {str(_cap4) + '件まで':<10}{_t4['mu']:>+11,.0f}"
+                      f"{_t4['sd']:>10,.0f}{_t4['r']:>7.2f}{_t4['cvar']:>+11,.0f}"
+                      f"{_t4['worst']:>+11,.0f}{_t4['mdd']:>12,.0f}"
+                      f"{_eq:>+16,.0f}{'  ✅' if _t4['mu'] > _eq else '  ⛔':>4}")
+                # ★ 同数をランダムに落とした帯。**件数を減らすだけで裾は軽くなる**
+                #   ので、これを超えなければ「業種で落としたから」ではない(§18.24)
+                _bd = []
+                for _s5 in range(max(2, a.sector_cap_seeds)):
+                    _idx = _RNG5.choice(len(_pairs4), size=len(_drop),
+                                        replace=False)
+                    _rt = _tail5(_run_drop({_pairs4[i] for i in _idx}), _nd3)
+                    if _rt:
+                        _bd.append(_rt)
+                if len(_bd) >= 2:
+                    _bc = np.array([x["cvar"] for x in _bd], float)
+                    _bm = np.array([x["mdd"] for x in _bd], float)
+                    _z = ((_t4["cvar"] - _bc.mean()) / _bc.std(ddof=1)
+                          if _bc.std(ddof=1) else 0.0)
+                    print(f"          ランダムに同数({len(_drop):,}件)落とす帯"
+                          f"({len(_bd)}本): CVaR 中央 {np.median(_bc):>+10,.0f}"
+                          f" / MaxDD 中央 {np.median(_bm):>10,.0f}"
+                          f"   → 業種で落とした場合の z={_z:+.2f}"
+                          f"{'  帯の外' if abs(_z) >= 2.0 else '  帯の中'}")
+            # なし→4→3→2 で CVaR が軽く(=0に近く)なり続けたか
+            if len(_seq) == 4:
+                _mono[_wn3] = all(_seq[i + 1]["cvar"] >= _seq[i]["cvar"]
+                                  for i in range(3))
+                print(f"      単調性(なし→4→3→2 で CVaR が軽くなり続ける): "
+                      + ("✅" if _mono[_wn3] else "⛔ 単調でない"))
+        print(f"\n      ⚠ TRAIN と TEST で **同じ上限**が良くなければ固定できません(§18.36)")
+        # ★★ 判定は **回す前に宣言済み**(2026-09-06)。結果を見て 2/3/4 から選ばない。
+        print(f"      ★ 事前宣言: **両窓で単調に裾が改善しなければ終了**。"
+              f"結果を見て 2/3/4件 から選ぶことはできません")
+        if len(_mono) == 2:
+            if all(_mono.values()):
+                print(f"      → 両窓とも単調。**等価σ縮小 と ランダム帯 の両方を"
+                      f"超えた上限だけ**が候補に残ります")
+            else:
+                _ng = [k for k, v in _mono.items() if not v]
+                print(f"      → ⛔ **{'/'.join(_ng)} で単調でない = 終了**。"
+                      f"同業種集中で左裾を軽くする研究もここで閉じます")
 
     print(f"\n  ★ 前提: N の稼働率は約40%(§18.55)。**除外で空いた予算は使い道が無い**ので、"
           f"除外の利得は『対象のbpがマイナスであること』だけ。プラスなら除外は純損")
+    print(f"  ⚠ ただしこれは **平均損益についてだけ**の話です(2026-09-06 訂正)。"
+          f"\n     平均を少し犠牲にしても CVaR・最悪日・MaxDD が十分軽くなるなら"
+          f"保険として成立しうるので、\n     ①②④(期待値の検定)と ⑤(左裾の検定)は"
+          f"**別の問い**として読むこと")
     print(f"  ⛔⛔ **業種は「今の」上場一覧の遡及適用**です(上場廃止は不明・業種変更は未反映)。"
           f"\n     ここで何が出ても **探索用**。即ルール化しないと先に宣言しています")
 
