@@ -360,6 +360,15 @@ ap.add_argument("--sweep-market", action="store_true",
                      "『その日は建てない』ルールが作れるか。総当たり+帰無較正。"
                      "⚠ §18.34b は lss で候補ゼロだったが **113営業日しか"
                      "なかった**。N は2,843営業日ある")
+ap.add_argument("--beta-scan", action="store_true",
+                help="★★ **βを圧縮する余地があるか**の事前チェック。個別銘柄の"
+                     "日中β(始値→終値 / 対日経)を測り、候補集合の中でどれだけ"
+                     "散らばっているかを出す。散らばりが小さければ圧縮の余地は"
+                     "無いのでそこで終了。βと1件あたりbpの相関も出す(αを失うか)")
+ap.add_argument("--beta-win", type=int, default=120,
+                help="β を推定する窓(営業日)。既定120")
+ap.add_argument("--beta-win2", type=int, default=250,
+                help="β の2本目の窓。1本目との相関で **散らばりが本物か推定ノイズか** を切り分ける。既定250",)
 ap.add_argument("--sweep-cands", action="store_true",
                 help="★★ **前夜の候補数**(前日リターン閾値を満たした銘柄数)で"
                      "『その日は建てない』ルールが作れるか。外部データも契約も"
@@ -471,7 +480,7 @@ _BOTH_PASS = {
 
 _NEEDS_TRAIN = bool(a.explore or a.confirm or a.confirm_both or a.sweep_regime
                     or a.search_switch or a.sweep_size or a.sweep_market
-                    or a.sweep_cands or a.sweep_grid
+                    or a.sweep_cands or a.beta_scan or a.sweep_grid
                     or a.sweep_ops or a.sweep_barrier or a.sweep_relax
                     or a.sweep_watch or bool(a.confirm_watch)
                     or a.tail_diag or a.hedge or bool(a.dump_picks)
@@ -521,6 +530,22 @@ _SIDE = -1.0 if a.side == "long" else 1.0
 # ★ --sweep-cands のときだけ、価格帯を **前日終値**でも通した行を残す。
 #   r_all は直後に始値ベースへ絞り直すので、他の分析の母集団は1行も変わらない。
 _KEEP_CAND = bool(a.sweep_cands)
+
+# ★★ β を測るための日経の **日中(始値→終値)** リターン。--beta-scan のときだけ取る。
+#   ⛔ 終値どうしのリターンではない。N は日中しか持たないので、夜間のギャップを
+#     含めた β を当てても意味がない(§18.19 で持ち越しは棄却済み)。
+_N225_ID = None
+if a.beta_scan:
+    try:
+        _nk = ble.fetch("^N225", a.days + 420, min_start_date=_MIN_START)
+        _nk.index = pd.to_datetime(_nk.index).normalize()
+        _N225_ID = ((_nk["close"] - _nk["open"]) / _nk["open"] * 100.0)
+        print(f"[info] 日経の日中リターン {len(_N225_ID):,}日"
+              f"({str(_N225_ID.index.min())[:10]}〜{str(_N225_ID.index.max())[:10]})"
+              f" / β の窓 {a.beta_win}日")
+    except Exception as _e:                                   # noqa: BLE001
+        sys.exit(f"[error] 日経を取れないので β を測れません: "
+                 f"{type(_e).__name__}: {_e}")
 if a.side == "both" and not (a.sweep_ops or a.confirm_both or a.sweep_regime
                              or a.search_switch or a.sweep_size):
     sys.exit("[error] --side both は --sweep-ops / --confirm-both / "
@@ -615,6 +640,23 @@ def _scan(sym: str) -> list[dict]:
     # 過熱の窓は1日が最適か? 2日・3日も並べる(ret1 と同じく _SIDE を掛ける)
     _ret2, _ret3 = _c.pct_change(2) * 100.0, _c.pct_change(3) * 100.0
     _volr = _v / _v.rolling(20).mean().replace(0.0, float("nan"))
+    # ★★ β = 日経が日中 +1% のとき この銘柄が日中 何% 動くか(2026-09-06)。
+    #   N は **日中しか持たない**ので、終値どうしではなく **始値→終値** で測る。
+    #   ⛔ 先読みではない: D の日中リターンは D の引けで確定 = 前夜に分かる。
+    #     rolling は D を含む直近 W 日で、D+1 は一切使わない。
+    _beta = _beta2 = None
+    if _N225_ID is not None:
+        _sid = ((_c - df["open"]) / df["open"] * 100.0)
+        _mid = _N225_ID.reindex(df.index)
+        _mvr = _mid.rolling(max(20, a.beta_win)).var().replace(0.0, float("nan"))
+        _beta = _sid.rolling(max(20, a.beta_win)).cov(_mid) / _mvr
+        # ★★ 2本目は **重ならない1つ前の窓**(単純にラグを掛ける)。
+        #   ⛔ 長い窓(250日)と比べてはいけない。直近120日を共有するので
+        #     **推定ノイズまで相関し**、真のβ差がゼロでも相関0.76 が出る
+        #     (2026-09-06 の合成データ検算で確認)。
+        #   重ならない窓どうしなら、相関はそのまま
+        #   「**過去のβが次の期間のβを言い当てるか**」= 選択に使えるか になる。
+        _beta2 = _beta.shift(max(20, a.beta_win) + 10)
     _sl, _s = [], 0                                       # 連続上昇日数(D時点まで)
     for _u in (_c > _c.shift(1)).fillna(False).tolist():
         _s = _s + 1 if _u else 0
@@ -685,6 +727,8 @@ def _scan(sym: str) -> list[dict]:
             # ★ --sweep-cands のときだけ持つ。o1_in で r_all を復元し、
             #   pc_in で『前夜の候補数』を数える(2026-09-06)
             **({"o1_in": _o1_in, "pc_in": _pc_in} if _KEEP_CAND else {}),
+            **({"beta": _fv(_beta, pos),
+               "beta2": _fv(_beta2, pos)} if _beta is not None else {}),
             "atr": _fv(_atr_v, pos) or 0.0,    # D 時点の ATR(前夜に確定)
             # ── 選別軸(D時点で確定) ──
             "atr_pct": _fv(_atr_pct, pos),
@@ -1301,6 +1345,8 @@ def _make_ops_sim(_src_all, _pool_df, _ond):
                     "d1_close": float(getattr(_r, "d1_close", 0.0) or 0.0),
                     "d2_open": _sf(getattr(_r, "d2_open", None)),
                     "atr": float(getattr(_r, "atr", 0.0) or 0.0),
+                    "beta": _sf(getattr(_r, "beta", None)),   # --beta-scan 用
+                    "beta2": _sf(getattr(_r, "beta2", None)),
                     "pnl": _pp,
                 })
                 _seen_sym[_r.symbol] = _d
@@ -2227,6 +2273,115 @@ if a.tail_diag:
           f"明確に上回るか")
     print(f"    ④ 多変量の **out-of-sample R²** と TEST の実額。ここが本番")
     print(f"  ⛔ ①②が小さいのに③④で何か出たら、それは多重検定の産物です")
+    print(f"  {'=' * 68}")
+    sys.exit(0)
+
+if a.beta_scan:
+    # ══════════════════════════════════════════════════════════════════
+    # ★★ β を圧縮する余地があるか — **本番の前の事前チェック**
+    # ══════════════════════════════════════════════════════════════════
+    #   ⛔ これは「どれが儲かるか」の予測ではない。**曝露を下げるだけ**。
+    #     9回ヌルだった選別軸(BTスコア/流動性/業種…)とは種類が違う。
+    #   ★ 天井は R² から決まっている(2026-09-06 実測 R²=0.238):
+    #       β を完全に消す  → σ ×√(1−R²)=0.873 → 同σまで戻して **+14.5%**
+    #       β を k 倍にする → σ ×√(1−R²(1−k²))
+    #     先物はこれを完全に取れるが 660円/日 = 平均の24% を払うので負ける。
+    #     選択なら払わないが **β をゼロにはできない**。だから散らばりが全て。
+    print(f"\n{'=' * 78}")
+    print(f"■ β を圧縮する余地があるか(事前チェック)")
+    print(f"{'=' * 78}")
+    print(f"  β = 日経が日中+1% のとき その銘柄が日中 何% 動くか"
+          f"(始値→終値 / 窓{a.beta_win}日 / D時点で確定)")
+    print(f"  ⛔ 予測ではありません。**曝露だけ**を下げます")
+
+    _bt_all = {}
+    for _t, _df in (("TRAIN", _train), ("TEST", _test)):
+        if _df is None or _df.empty or "beta" not in _df.columns:
+            continue
+        _nd = max(1, _df["date"].nunique())
+        _sim, _, _ = _make_ops_sim(_df, _pool_of(_df), _nd)
+        _pk = pd.DataFrame(_sim(50, a.budget_man or 400.0, 0, False)["picks"])
+        if _pk.empty:
+            continue
+        _pk = _pk[_pk["beta"].notna() & (_pk["beta"] != 0.0)]
+        _bt_all[_t] = (_pk, _nd)
+
+    if not _bt_all:
+        sys.exit("[error] β 付きの建玉がありません(日経の期間が足りない可能性)")
+
+    for _t, (_pk, _nd) in _bt_all.items():
+        _b = _pk["beta"].to_numpy(float)
+        _ex = (_pk["entry_p"] * _pk["qty"]).to_numpy(float)
+        _wb = float((_b * _ex).sum() / _ex.sum())          # 建玉加重の平均β
+        print(f"\n  ── {_t} ── 実際に建てた {len(_pk):,}件 / {_nd:,}営業日")
+        print(f"    {'最小':>8}{'5%':>8}{'25%':>8}{'中央':>8}{'75%':>8}"
+              f"{'95%':>8}{'最大':>8}{'建玉加重平均':>12}")
+        print("    " + "".join(f"{np.percentile(_b, p):>8.2f}"
+                               for p in (0, 5, 25, 50, 75, 95, 100))
+              + f"{_wb:>12.2f}")
+        # ★★ 見えている散らばりは本物か、それとも推定ノイズか。
+        #   個別βは R²=0.24 しかないので残差が支配的で、120日でも SE は大きい。
+        #   ノイズなら「高βを落とす」は **高ノイズを落としている**だけで、
+        #   実際の曝露は下がらない。2つの窓の相関で切り分ける。
+        if "beta2" in _pk.columns:
+            _b2 = _pk["beta2"].to_numpy(float)
+            _ok2 = np.isfinite(_b2) & (_b2 != 0.0)
+            if _ok2.sum() > 50:
+                _cr = float(np.corrcoef(_b[_ok2], _b2[_ok2])[0, 1])
+                print(f"\n    β(直近{a.beta_win}日) と β(その前の{a.beta_win}日) "
+                      f"の相関 = **{_cr:+.3f}**  (n={int(_ok2.sum()):,})")
+                print(f"      窓が重ならないので、これは **過去のβが次の期間の"
+                      f"βを言い当てるか** そのものです")
+                print(f"      → " + ("⛔ **0.3未満。見えている散らばりはほぼ推定"
+                                     "ノイズで、高βを落としても曝露は下がりません**"
+                                     if _cr < 0.3 else
+                                     "⚠ 0.3〜0.5。散らばりの半分以下しか本物でない"
+                                     if _cr < 0.5 else
+                                     "✅ βは持続する。選択に使えます"))
+                print(f"      ⚠ 実効的に下げられるβ差は、下の表の値に"
+                      f"およそ **{max(0.0, _cr):.2f} を掛けた**ぶんです")
+        # ★ どこまで下げられるか。**βの低い順に N% だけ残す**(=高βを落とす)
+        print(f"\n    βの低い順に残したときの 建玉加重平均β と 天井")
+        print(f"    {'残す割合':<10}{'件数':>8}{'平均β':>8}{'β比':>7}"
+              f"{'σ削減':>8}{'同σでの月平均の伸び':>20}")
+        _o = np.argsort(_b)
+        for _keep in (1.0, 0.9, 0.75, 0.5, 0.25):
+            _k = max(1, int(len(_b) * _keep))
+            _i = _o[:_k]
+            _w2 = float((_b[_i] * _ex[_i]).sum() / _ex[_i].sum())
+            _kr = _w2 / _wb if _wb else 1.0
+            # σ ×√(1−R²(1−k²))。R² は実測(--hedge と同じ 0.238)を使う
+            _R2 = 0.238
+            _sr = float(np.sqrt(max(1e-9, 1.0 - _R2 * (1.0 - _kr ** 2))))
+            print(f"    {f'{_keep * 100:.0f}%':<10}{_k:>8,}{_w2:>8.2f}"
+                  f"{_kr:>7.2f}{(_sr - 1) * 100:>7.1f}%"
+                  f"{(1 / _sr - 1) * 100:>19.1f}%")
+        print(f"    ⚠ 『同σでの月平均の伸び』は **α を1円も失わない**前提の"
+              f"天井です。実際はここから下がります")
+
+        # ★★ α を失うか — β の分位ごとの 1件あたり bp
+        #   高βの銘柄にエッジが乗っているなら、落とすと利益が直接減る
+        _q = np.clip(np.digitize(_b, np.percentile(_b, [20, 40, 60, 80])), 0, 4)
+        _bp5 = (_pk["pnl"].to_numpy(float) / _ex * 10_000.0)
+        print(f"\n    β分位ごとの 1件あたり bp(高βにエッジが乗っていないか)")
+        print(f"    {'分位':<6}{'件数':>8}{'平均β':>8}{'bp/件':>9}{'円/件':>10}")
+        for _i2 in range(5):
+            _m2 = _q == _i2
+            if not _m2.any():
+                continue
+            print(f"    Q{_i2 + 1:<5}{int(_m2.sum()):>8,}{_b[_m2].mean():>8.2f}"
+                  f"{_bp5[_m2].mean():>9.1f}"
+                  f"{_pk['pnl'].to_numpy(float)[_m2].mean():>10,.0f}")
+
+    print(f"\n  {'=' * 68}")
+    print(f"  ★ 判定(回す前に宣言):")
+    print(f"    ・**建玉加重βを 20% 以上下げられる**(残す割合50%で β比 ≤0.80)")
+    print(f"      → 下げられなければ天井が +1% 未満なので **ここで終了**")
+    print(f"    ・**β分位ごとの bp/件 が単調に増えていない**")
+    print(f"      → 高βにエッジが乗っているなら、落とすと α を失う")
+    print(f"    両方を満たしたときだけ本番(ランダム間引き帯 × 等価σ/CVaR)へ")
+    print(f"  ⛔ 天井が +5% でも、月次σ に対しては 0.03σ 程度です。"
+          f"執行(遅延1分で −10.4bp / エッジ +15.7bp)のほうが1桁大きい")
     print(f"  {'=' * 68}")
     sys.exit(0)
 
