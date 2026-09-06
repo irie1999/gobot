@@ -393,6 +393,12 @@ ap.add_argument("--min-density", type=float, default=0.10,
                      "『測定不能』にするか(既定0.10=1/10)")
 a = ap.parse_args()
 
+# ★★ 判定窓が「未使用」かどうか。**ラベルを嘘にしないための唯一のスイッチ**
+#   `--min-ret1` は §18.54 の `--explore` が **最も古い窓(TRAIN)で**見つけた閾値。
+#   渡された実行は、その窓に対しては in-sample であって OOS ではない。
+#   2026-09-06 まで「★ 未使用(判定対象)」と表示し続けていた(表示だけの誤り)。
+_INSAMPLE_THR = float(getattr(a, "min_ret1", 0.0) or 0.0) > 0.0
+
 # ⛔ 数値リストの引数は **スキャンの前に** 検証する。
 #   スキャンは1,540銘柄 × 数千日で10分級。末尾に `]` が紛れただけで
 #   10分走ってから ValueError で落ちるのは無駄が大きい(2026-08-27 に発生)。
@@ -982,9 +988,12 @@ if a.split:
         _judge_win = _segs[0][0]          # 最も古い = 未使用期間
         print(f"\n  ★★ **判定するのは最も古い窓だけ** = {_judge_win} "
               f"({_segs[0][1]['date'].nunique():,}営業日)")
+        # ⛔ `--min-ret1` は §18.54 の `--explore` が **この窓で**見つけた閾値。
+        #   渡された時点で最も古い窓は「未使用」ではない。嘘のラベルを出さない。
         _dens = []
         for _i, (_nm, _seg) in enumerate(_segs):
-            _tag = "★ 未使用(判定対象)" if _i == 0 else "既見(参考)"
+            _tag = ("⚠ 既見(閾値の出所 / in-sample)" if _INSAMPLE_THR
+                    else "★ 未使用(判定対象)") if _i == 0 else "既見(参考)"
             _d = len(_seg) / max(1, _seg["date"].nunique())
             _dens.append(_d)
             print(f"     {_nm}  {_seg['date'].nunique():>5,}営業日  "
@@ -3947,6 +3956,10 @@ if _DENSITY_FAIL:
 elif a.min_gap_bp <= 0:
     # 閾値なし = ギャップ仮説を測っていない。記録は残すが試行には数えない。
     _result = "参考(閾値なし)"
+elif _INSAMPLE_THR:
+    # ⛔ 判定窓が閾値の出所 = OOS の試行ではない。記録は残すが数えない。
+    #   数えると「何回 独立に試したか」が水増しされ、多重検定の補正が狂う。
+    _result = f"参考(in-sample {_result})"
 print(f"\n  {'=' * 60}")
 if _DENSITY_FAIL:
     print(f"  ⛔⛔ **測定不能。上の判定は読まないこと。**")
@@ -3954,6 +3967,12 @@ if _DENSITY_FAIL:
     print(f"     判定窓にデータが入っていないので、①②が落ちるのは当たり前。")
     print(f"     **これは仮説の不合格ではない。** 試行回数にも数えない。")
     print(f"     → キャッシュを遡らせて測り直すこと(--no-refetch を付けない)。")
+elif _ok_all and _INSAMPLE_THR:
+    print(f"  ⚠ **全条件 合格。ただし in-sample。新しい証拠ではありません。**")
+    print(f"     --min-ret1 {a.min_ret1:.3f} は §18.54 の --explore が")
+    print(f"     **この判定窓で**見つけた閾値です。同じ窓に当てはめて通っても、")
+    print(f"     『閾値が窓に合っている』ことの確認にしかなりません。")
+    print(f"     → 未使用の窓で測りたければ --min-ret1 を外すか、窓をずらすこと。")
 elif _ok_all:
     print(f"  ✅ **全条件 合格。土台がある。**")
     print(f"     ⛔ ここでパラメータ(sm/tm/delay/予算)を足して最適化しないこと。")
