@@ -518,6 +518,9 @@ _RET1_MIN = 1.753
 #   both は **short 向きでスキャンして、あとから鏡像を複製する**。
 #   2回スキャンすると10分×2かかるうえ、母集団がズレる余地ができる。
 _SIDE = -1.0 if a.side == "long" else 1.0
+# ★ --sweep-cands のときだけ、価格帯を **前日終値**でも通した行を残す。
+#   r_all は直後に始値ベースへ絞り直すので、他の分析の母集団は1行も変わらない。
+_KEEP_CAND = bool(a.sweep_cands)
 if a.side == "both" and not (a.sweep_ops or a.confirm_both or a.sweep_regime
                              or a.search_switch or a.sweep_size):
     sys.exit("[error] --side both は --sweep-ops / --confirm-both / "
@@ -643,7 +646,17 @@ def _scan(sym: str) -> list[dict]:
         if not (pc > 0 and o1 > 0 and c1 > 0):
             continue
         # 建値(= D+1 の始値)で価格フィルタ。実運用と同じく「その日いくらで建てるか」
-        if o1 < a.min_price or o1 > a.max_price:
+        #   ★ live(`nexec`)も 09:00 の始値が帯の中かで合否を決めるので、
+        #     **売買の判定としては先読みではない**(始値は発注前に分かる)。
+        # ⛔ ただし **前夜の候補数**を数えるには使えない。前夜のリスト
+        #   (`n_paper --collect`)は前日終値で切るので、
+        #   「前日終値 5,900 → 始値 6,100」の銘柄は前夜には候補で、
+        #   ここで continue すると行そのものが消えて数えられない。
+        #   → --sweep-cands のときだけ前日終値ベースの行も残し、
+        #     r_all は直後に o1 で絞り直して**従来と1行も変えない**。
+        _o1_in = a.min_price <= o1 <= a.max_price
+        _pc_in = a.min_price <= pc <= a.max_price
+        if not (_o1_in or (_KEEP_CAND and _pc_in)):
             continue
         _st = sig_days.get(d0, [])
         out.append({
@@ -669,6 +682,9 @@ def _scan(sym: str) -> list[dict]:
             # 持つ。⛔ 通常のバックテストでは一切使わない(使えば先読み)。
             "d2_open": (float(df["open"].iloc[pos + 2])
                         if pos + 2 < len(_idx) else None),
+            # ★ --sweep-cands のときだけ持つ。o1_in で r_all を復元し、
+            #   pc_in で『前夜の候補数』を数える(2026-09-06)
+            **({"o1_in": _o1_in, "pc_in": _pc_in} if _KEEP_CAND else {}),
             "atr": _fv(_atr_v, pos) or 0.0,    # D 時点の ATR(前夜に確定)
             # ── 選別軸(D時点で確定) ──
             "atr_pct": _fv(_atr_pct, pos),
@@ -937,6 +953,16 @@ with ThreadPoolExecutor(max_workers=a.workers) as ex:
 if not _rows:
     sys.exit("[error] 1件も集まりませんでした")
 r_all = pd.DataFrame(_rows)
+# ★ 前夜の候補(前日終値ベース)を別に取り分け、r_all は始値ベースに戻す。
+#   ⛔ ここで戻さないと **他の全分析の母集団が変わる**(§18.38「土台を先に決める」)
+r_cand = None
+if _KEEP_CAND:
+    r_cand = r_all
+    _n_before = len(r_all)
+    r_all = r_all[r_all["o1_in"]].drop(columns=["o1_in", "pc_in"]).copy()
+    print(f"[info] 前夜の候補用に {_n_before - len(r_all):,}銘柄日を追加保持"
+          f"(前日終値は帯の中だが始値が帯の外)。"
+          f"r_all は {len(r_all):,}銘柄日 = 従来どおり")
 r_all["band"] = r_all["gap_bp"].map(_band)
 if a.out:
     r_all.to_csv(a.out, index=False, encoding="utf-8-sig")
@@ -2188,10 +2214,10 @@ if a.sweep_cands:
           f"{a.min_price:,.0f}〜{a.max_price:,.0f}円  → **前日の引けで確定**")
     print(f"  ⚠ 近い測定は3回とも仮説と逆か無相関(§18.58 / §18.13 / §18.24)。"
           f"期待値の低いスクリーニングです")
-    print(f"  ⛔ 価格帯は **D+1 の始値**に掛かっています(scan の実装)。"
-          f"実際の前夜リストは前日終値で切るので、\n"
-          f"     候補数は厳密には『前夜に分かる数』ではありません。"
-          f"**通ったときだけ前日終値で作り直す**こと")
+    print(f"  ★ 候補数は **前日終値** で帯を切って数えます(2026-09-06 修正)。"
+          f"始値で切ると『前日終値5,900→始値6,100』の\n"
+          f"     銘柄が行ごと消えて数えられません"
+          f"(消えるのは大きくギャップアップした銘柄 = 測りたい量と相関します)")
 
     def _tailc(_y, _mo):
         """日次配列から 月次(平均/σ/÷σ) と 左裾(CVaR5%/最悪日/MaxDD)。"""
@@ -2216,8 +2242,13 @@ if a.sweep_cands:
                                  max(1, _df["date"].nunique()))
         _r = _f(50, a.budget_man or 400.0, 0, False)
         _pn = {d: (v[0] + v[1]) for d, v in _r["daily"].items()}
-        # 候補数 = その日 ret1 の閾値を満たした銘柄数(ギャップ判定の前)
-        _cd = (_df[_df["ret1"] >= a.min_ret1].groupby("date").size().to_dict())
+        # 候補数 = その日 ret1 の閾値を満たし、**前日終値**が帯の中の銘柄数。
+        #   ⛔ ギャップ判定(09:00)の前。r_cand を使うのは、r_all だと
+        #     始値が帯の外に出た銘柄が消えているため(上の ★ 参照)
+        _lo5, _hi5 = min(_df["date"]), max(_df["date"])
+        _cw = r_cand[(r_cand["date"] >= _lo5) & (r_cand["date"] <= _hi5)
+                     & r_cand["pc_in"]]
+        _cd = (_cw[_cw["ret1"] >= a.min_ret1].groupby("date").size().to_dict())
         _dl = sorted(set(_cd) | set(_pn))
         _y = np.array([_pn.get(d, 0.0) for d in _dl], float)
         _n1 = np.array([float(_cd.get(d, 0)) for d in _dl], float)
