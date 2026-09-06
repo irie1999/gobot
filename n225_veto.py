@@ -59,6 +59,7 @@ from n225_research import (
     Gbdt,
     LogisticL2,
     PANEL_CSV,
+    attach_intraday,
     load_panel,
     make_features,
     make_synthetic_panel,
@@ -495,6 +496,250 @@ def wait_cost_report(df: pd.DataFrame, score_col: str, args, rows: list[dict]) -
 
 
 # ══════════════════════════════════════════════════════════════
+#  事前登録の主判定 (docs/preregistration_n225_veto.md §3)
+# ══════════════════════════════════════════════════════════════
+def walk_forward_annual(X, y, dates, make_model, first_test_year, embargo):
+    """
+    年次 walk-forward。各年の予測は、その年の開始時点までのデータのみで学習する。
+    事前登録 §3.2 の「年次 WF」の実装。
+    """
+    years = sorted({d.year for d in dates if d.year >= first_test_year})
+    idx_out, p_out = [], []
+    for yr in years:
+        test = np.where(np.array([d.year == yr for d in dates]))[0]
+        train_end = int(test[0]) - embargo
+        if train_end < 100 or len(test) == 0:
+            continue
+        ytr = y[:train_end]
+        if len(np.unique(ytr)) < 2:
+            continue
+        model = make_model().fit(X[:train_end], ytr)
+        idx_out.append(test)
+        p_out.append(np.asarray(model.predict_proba(X[test]), dtype=float))
+    if not idx_out:
+        return np.array([], dtype=int), np.array([])
+    return np.concatenate(idx_out), np.concatenate(p_out)
+
+
+def improvement_ci(df: pd.DataFrame, mask: np.ndarray, args,
+                   n_boot: int = 2000, alpha: float = 0.05) -> dict:
+    """
+    月ブロック・ブートストラップで「改善量 Δ」の信頼区間を出す。
+    事前登録 §3.4 条件 A: Δ の 95% 信頼区間がゼロをまたがないこと。
+
+    月ブロックごと復元抽出することで、月内の自己相関を保ったまま
+    Δ (選択的 veto − 一律縮小) の標本分布を作る。
+    """
+    minv, nmon = month_index(df.index)
+    blocks = [np.where(minv == m)[0] for m in range(nmon)]
+    x = df["pnl"].to_numpy(dtype=float)
+    r = df["r_day"].to_numpy(dtype=float)
+    beta = rolling_beta(df["pnl"], df["r_day"]).to_numpy() if args.mode == "hedge" else None
+    rng = np.random.default_rng(11)
+
+    d_ratio, d_cvar, d_total = [], [], []
+    for _ in range(n_boot):
+        draw = rng.choice(nmon, size=nmon, replace=True)
+        idx = np.concatenate([blocks[m] for m in draw])
+        mi = np.concatenate([np.full(len(blocks[m]), k) for k, m in enumerate(draw)])
+        xb, mb = x[idx], mask[idx]
+        rb = r[idx]
+        bb = beta[idx] if beta is not None else None
+
+        adj, traded = apply_action(xb, mb, args, rb, bb)
+        st = risk_stats(adj - traded * args.wait_cost, mi, nmon)
+
+        expo = float(np.where(mb, args.veto_size if args.mode == "shrink" else
+                              (1.0 if args.mode == "hedge" else 0.0), 1.0).mean())
+        uni = risk_stats(xb * expo - args.wait_cost * (expo > 0), mi, nmon)
+
+        d_ratio.append(st["m_ratio"] - uni["m_ratio"])
+        d_cvar.append(st["cvar_per_mean"] - uni["cvar_per_mean"])
+        d_total.append(st["total"] - float(xb.sum()))
+
+    def _ci(v):
+        a = np.asarray(v, dtype=float)
+        a = a[np.isfinite(a)]
+        if len(a) < 10:
+            return (float("nan"),) * 3
+        return (float(np.median(a)),
+                float(np.percentile(a, 100 * alpha / 2)),
+                float(np.percentile(a, 100 * (1 - alpha / 2))))
+
+    return {"d_ratio": _ci(d_ratio), "d_cvar": _ci(d_cvar), "d_total": _ci(d_total),
+            "n_boot": n_boot}
+
+
+def annual_report(df: pd.DataFrame, mask: np.ndarray, args) -> list[dict]:
+    """事前登録 §3.4 条件 C: 年別に Δ(月平均÷σ) の符号を見る。"""
+    x = df["pnl"].to_numpy(dtype=float)
+    r = df["r_day"].to_numpy(dtype=float)
+    beta = rolling_beta(df["pnl"], df["r_day"]).to_numpy() if args.mode == "hedge" else None
+    years = sorted({d.year for d in df.index})
+
+    print(f"\n【条件C】年別の再現性")
+    print("─" * 92)
+    print(f"{'年':<8}{'日数':>7}{'警報日':>8}{'現行N 月平均/σ':>16}{'veto 月平均/σ':>15}"
+          f"{'Δ':>9}{'現行N 累計':>13}{'veto 累計':>13}")
+    print("─" * 92)
+    rows = []
+    for yr in years:
+        sel = np.array([d.year == yr for d in df.index])
+        if sel.sum() < 60:
+            continue
+        sub = df[sel]
+        mi, nm = month_index(sub.index)
+        xs, ms = x[sel], mask[sel]
+        adj, traded = apply_action(xs, ms, args, r[sel],
+                                   beta[sel] if beta is not None else None)
+        base = risk_stats(xs, mi, nm)
+        veto = risk_stats(adj - traded * args.wait_cost, mi, nm)
+        delta = veto["m_ratio"] - base["m_ratio"]
+        rows.append({"year": yr, "delta": delta, "base": base, "veto": veto,
+                     "alarms": int(ms.sum())})
+        print(f"{yr:<8}{int(sel.sum()):>7}{int(ms.sum()):>8}{base['m_ratio']:>16.3f}"
+              f"{veto['m_ratio']:>15.3f}{delta:>+9.3f}{base['total']:>13.2f}"
+              f"{veto['total']:>13.2f}")
+    print("─" * 92)
+    pos = sum(1 for x_ in rows if x_["delta"] > 0)
+    print(f"  Δ が正の年: {pos} / {len(rows)}")
+    return rows
+
+
+def run_preregistered(panel: pd.DataFrame, args, n_pnl: pd.Series | None) -> int:
+    """
+    docs/preregistration_n225_veto.md §3 の主判定を、そのまま 1 回だけ実行する。
+    警報率・処置・モデル・期間は固定。ここで数字を見てから設定を変えてはいけない。
+    """
+    print("=" * 92)
+    print(" 事前登録された主判定 (docs/preregistration_n225_veto.md §3)")
+    print("=" * 92)
+    print("  モデル   : ロジスティック回帰 (L2)")
+    print("  目的変数 : 日経 始値→終値 > 0 (単純上昇)")
+    print(f"  情報境界 : {args.asof}")
+    print(f"  初期学習 : {args.train_start} 〜 {args.first_test_year - 1}-12-31")
+    print(f"  年次 WF  : {args.first_test_year} 〜 {args.seal_year - 1}")
+    print(f"  封印     : {args.seal_year}-01-01 以降")
+    print("  主ルール : 上昇確率 上位 10% の日だけ N を停止")
+    print("  合格条件 : A=Δの95%CIがゼロをまたがない / B=一律10%縮小に勝つ / C=年別で再現")
+    print("=" * 92)
+
+    args.strong_pct = 0.0
+    args.model = "logistic"
+    args.mode = "stop"
+
+    tg = make_targets(panel)
+    feats = make_features(panel, "day", asof=args.asof)
+    data = feats.copy()
+    data["_r"] = tg["day"]
+    data = data.replace([np.inf, -np.inf], np.nan).dropna()
+
+    lo = pd.Timestamp(args.train_start)
+    hi = pd.Timestamp(f"{args.seal_year}-01-01")
+    data = data[(data.index >= lo) & (data.index < hi)]
+    if data.empty:
+        raise SystemExit(f"[error] {args.train_start} 〜 {args.seal_year} に有効行がありません。")
+
+    r_day = data.pop("_r")
+    y = (r_day.to_numpy() > 0).astype(int)
+    X = data.to_numpy(dtype=float)
+    print(f"\n■ 有効行 {len(data)}  ({data.index[0].date()} .. {data.index[-1].date()})  "
+          f"特徴量 {X.shape[1]}")
+
+    fut_cols = [c for c in data.columns if c.startswith("fut_")]
+    if args.asof == "pre0900" and not fut_cols:
+        print("\n  [warn] fut_* 特徴量がありません。--intraday を指定していない場合、")
+        print("         この実行は strict と同じ情報しか使っていません (ドライラン)。")
+
+    idx, p = walk_forward_annual(X, y, list(data.index),
+                                 lambda: LogisticL2(lam=args.lam),
+                                 args.first_test_year, args.embargo)
+    if len(idx) == 0:
+        raise SystemExit("[error] 年次 walk-forward が実行できませんでした。期間を確認してください。")
+
+    df = pd.DataFrame({"score": p, "r_day": r_day.to_numpy()[idx]}, index=data.index[idx])
+    df["y_strong"] = (df["r_day"] > 0).astype(int)
+    if n_pnl is None:
+        print("\n  [!] N の実損益が未指定のため代理損益を使います。")
+        print("      代理損益は r_day の線形変換なので、条件 A/B/C の判定は同義反復に近く、")
+        print("      運用判断には使えません。配管確認としてのみ読んでください。")
+        df["pnl"] = surrogate_n_pnl(df["r_day"], args.r2, args.surrogate_sharpe)
+    else:
+        df["pnl"] = n_pnl.reindex(df.index)
+    df = df.dropna()
+    print(f"■ OOS {len(df)} 日  ({df.index[0].date()} .. {df.index[-1].date()})")
+
+    # ── 主ルール: 上位 10% ────────────────────────────────────
+    n = len(df)
+    k = max(int(round(n * 0.10)), 1)
+    sc = df["score"].to_numpy()
+    mask = sc >= np.partition(sc, n - k)[n - k]
+    print(f"■ 警報日 {int(mask.sum())} 日 ({mask.mean()*100:.1f}%)")
+
+    precision_report(df, "score", args)
+    rows = veto_report(df, "score", args)
+    row10 = min(rows, key=lambda r_: abs(r_["q"] - 0.10))
+
+    # ── 条件A ────────────────────────────────────────────────
+    ci = improvement_ci(df, row10["mask"], args, n_boot=args.bootstrap)
+    print(f"\n【条件A】改善量 Δ の 95% 信頼区間 (月ブロック・ブートストラップ {ci['n_boot']} 回)")
+    print("─" * 74)
+    print(f"{'指標':<28}{'中央値':>12}{'2.5%':>12}{'97.5%':>12}{'判定':>10}")
+    print("─" * 74)
+    okA = True
+    for label, key, vs in (("月平均/σ  (vs 一律縮小)", "d_ratio", True),
+                           ("CVaR/平均 (vs 一律縮小)", "d_cvar", False),
+                           ("累計損益  (vs veto なし)", "d_total", False)):
+        med, lo_, hi_ = ci[key]
+        crosses = not (lo_ > 0 or hi_ < 0)
+        if vs:
+            okA = (lo_ > 0)
+        print(f"{label:<28}{med:>+12.3f}{lo_:>+12.3f}{hi_:>+12.3f}"
+              f"{('またぐ' if crosses else 'またがない'):>10}")
+    print("─" * 74)
+    print(f"  条件A (月平均/σ の CI がゼロをまたがない) → {'合格' if okA else '不合格'}")
+    print("  ※ CVaR/平均 の区間は広くなりやすい。再標本で月平均がゼロ近傍になると比が発散するため。")
+    print("    条件A の判定は月平均/σ のみで行い、CVaR/平均 は参考値として読む。")
+
+    # ── 条件B ────────────────────────────────────────────────
+    d_ratio = row10["st"]["m_ratio"] - row10["uni"]["m_ratio"]
+    d_cvar  = row10["st"]["cvar_per_mean"] - row10["uni"]["cvar_per_mean"]
+    okB = d_ratio > 0 and d_cvar > 0
+    print(f"\n【条件B】一律 10% 縮小との比較")
+    print(f"  Δ 月平均/σ  = {d_ratio:+.3f}   Δ CVaR/平均 = {d_cvar:+.3f}"
+          f"  → {'合格' if okB else '不合格'}")
+
+    # ── 条件C ────────────────────────────────────────────────
+    ann = annual_report(df, row10["mask"], args)
+    pos = sum(1 for a in ann if a["delta"] > 0)
+    okC = len(ann) > 0 and pos > len(ann) / 2
+    print(f"  条件C (Δ が正の年が過半) → {'合格' if okC else '不合格'}")
+
+    # ── 総合 ─────────────────────────────────────────────────
+    print("\n" + "=" * 92)
+    print(" 総合判定")
+    print("=" * 92)
+    for lab, ok in (("A 改善区間がゼロをまたがない", okA),
+                    ("B 一律 10% 縮小より良い", okB),
+                    ("C 年別でも再現する", okC)):
+        print(f"  {'✓' if ok else '✗'}  {lab}")
+    allok = okA and okB and okC
+    print("─" * 92)
+    if allok:
+        print("  → 3 条件すべて合格。事前登録 §5 に従い、2025 年以降を 1 回だけ開封してよい。")
+        print("    開封後の設定変更は一切しないこと。")
+    else:
+        print("  → 不合格。事前登録 §4 に従い、")
+        print("    『公開・取得可能な 09:00 前情報による危険日予測』は閉じる。")
+        print("    代替は (1) N 側の銘柄選別を厳しくする (2) ボラレジームでサイズ調整")
+        print("           (3) 損切りルールの見直し。")
+    if n_pnl is None:
+        print("\n  ※ ただし今回は代理損益。この判定は運用判断に使えない。")
+    print("=" * 92)
+    return 0 if allok else 1
+
+
+# ══════════════════════════════════════════════════════════════
 #  実行
 # ══════════════════════════════════════════════════════════════
 def analyse(df: pd.DataFrame, score_col: str, args, label: str = "") -> None:
@@ -587,9 +832,19 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--npnl", default=None, help="N の日次損益 CSV (date,pnl)")
     ap.add_argument("--panel", default=str(PANEL_CSV))
-    ap.add_argument("--asof", default="at_open", choices=["strict", "at_open", "preopen"],
-                    help="情報境界。strict=当日ギャップ不使用 / "
-                         "at_open=09:00:00 の日経始値を使う (default)")
+    ap.add_argument("--asof", default="at_open",
+                    choices=["strict", "pre0900", "at_open", "preopen"],
+                    help="情報境界。strict=当日情報なし / "
+                         "pre0900=08:45-08:59 の先物のみ (09:00 前に確定) / "
+                         "at_open=09:00:00 の日経始値も使う (default)")
+    ap.add_argument("--intraday", default=None,
+                    help="n225_intraday.py --build が出力した先物特徴量 CSV")
+    ap.add_argument("--preregistered", action="store_true",
+                    help="docs/preregistration_n225_veto.md §3 の主判定を 1 回だけ実行する")
+    ap.add_argument("--train-start", default="2016-07-19", dest="train_start")
+    ap.add_argument("--first-test-year", type=int, default=2019, dest="first_test_year")
+    ap.add_argument("--seal-year", type=int, default=2025, dest="seal_year")
+    ap.add_argument("--annual", action="store_true", help="年別の再現性テーブルも出す")
     ap.add_argument("--model", default="logistic", choices=["logistic", "gbdt", "both"])
     ap.add_argument("--mode", default="stop", choices=["stop", "shrink", "hedge"],
                     help="警報日の処置。stop=建てない / shrink=縮小 / "
@@ -623,7 +878,9 @@ def main() -> int:
         return run_selftest(args)
 
     n_pnl = load_n_pnl(Path(args.npnl)) if args.npnl else None   # 先に検証して早く失敗させる
-    panel = load_panel(Path(args.panel))
+    panel = attach_intraday(load_panel(Path(args.panel)), args.intraday)
+    if args.preregistered:
+        return run_preregistered(panel, args, n_pnl)
     run(panel, args, n_pnl)
     return 0
 

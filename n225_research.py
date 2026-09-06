@@ -124,6 +124,25 @@ def load_panel(path: Path = PANEL_CSV) -> pd.DataFrame:
     return df.sort_index()
 
 
+def attach_intraday(panel: pd.DataFrame, path: str | Path | None) -> pd.DataFrame:
+    """n225_intraday.py --build の出力 (先物 寄り前特徴量) をパネルに結合する。"""
+    if not path:
+        return panel
+    p = Path(path)
+    if not p.exists():
+        raise SystemExit(f"[error] {p} がありません。"
+                         f"先に `python n225_intraday.py --build <dir>` を実行してください。")
+    intra = pd.read_csv(p, index_col=0, parse_dates=True).sort_index()
+    cols = [c for c in intra.columns if c.startswith("fut_")]
+    if not cols:
+        raise SystemExit(f"[error] {p} に fut_* 列がありません。")
+    out = panel.join(intra[cols], how="left")
+    have = int(out[cols[0]].notna().sum())
+    print(f"  先物特徴量 {len(cols)} 列を結合: {have}/{len(out)} 日で利用可能 "
+          f"({intra.index[0].date()} .. {intra.index[-1].date()})")
+    return out
+
+
 # ══════════════════════════════════════════════════════════════
 #  2. ターゲットと特徴量
 # ══════════════════════════════════════════════════════════════
@@ -158,6 +177,11 @@ def make_features(panel: pd.DataFrame, target: str, asof: str = "at_open") -> pd
 
       "strict"  … 前営業日の東京大引け以降・当日 09:00:00 までに確定した情報のみ。
                   当日のギャップは一切使わない。最も保守的で、リーク疑義がゼロ。
+      "pre0900" … strict + 08:45〜08:59 の先物特徴量 (`fut_*`)。
+                  08:59:59 に確定するので 09:00:00 より前に予測を完了できる。
+                  現物始値は使わない。事前登録 (docs/preregistration_n225_veto.md)
+                  の主判定はこの境界を使う。待機コストがゼロになるのが利点。
+                  パネルに fut_* 列が無ければ strict と同じになる。
       "at_open" … strict + 当日ギャップ (日経の現物始値)。09:00:00 の板寄せで確定する
                   値なので「寄り前」ではなく「寄りと同時」。これを使ってよいのは、
                   発注системが以下の順序を実測で満たす場合に限る:
@@ -219,7 +243,12 @@ def make_features(panel: pd.DataFrame, target: str, asof: str = "at_open") -> pd
     f["month_sin"] = np.sin(2 * np.pi * panel.index.month / 12)
     f["month_cos"] = np.cos(2 * np.pi * panel.index.month / 12)
 
-    # ── 当日ギャップ (target="day" かつ asof="at_open" のときのみ) ──
+    # ── 先物 寄り前ウィンドウ (08:45-08:59)。09:00:00 より前に確定 ──
+    if target == "day" and asof in ("pre0900", "at_open", "preopen"):
+        for col in [c for c in panel.columns if c.startswith("fut_")]:
+            f[col] = panel[col]
+
+    # ── 当日ギャップ (現物始値。09:00:00 と同時に確定) ──
     if target == "day" and asof in ("at_open", "preopen"):
         f["open_gap"]   = tg["gap"]
         f["open_gap_z"] = tg["gap"] / rv_d.shift(1).replace(0, np.nan)
@@ -744,11 +773,14 @@ def main() -> int:
     ap.add_argument("--target",    default="day", choices=["day", "gap", "c2c"],
                     help="方向予測のターゲット (default: day)")
     ap.add_argument("--asof",      default="at_open",
-                    choices=["strict", "at_open", "preopen"],
-                    help="情報境界。strict=当日ギャップを使わない / "
-                         "at_open=09:00:00 の日経始値を使う (使用条件は make_features の "
-                         "docstring 参照)。preopen は at_open の旧名エイリアス "
-                         "(default: at_open)")
+                    choices=["strict", "pre0900", "at_open", "preopen"],
+                    help="情報境界。strict=当日情報なし / "
+                         "pre0900=08:45-08:59 の先物のみ (09:00:00 より前に確定) / "
+                         "at_open=09:00:00 の日経始値も使う。"
+                         "preopen は at_open の旧名エイリアス (default: at_open)")
+    ap.add_argument("--intraday", default=None,
+                    help="n225_intraday.py --build が出力した先物特徴量 CSV。"
+                         "パネルに結合して asof=pre0900 で使う")
     ap.add_argument("--task",      default="direction", choices=["direction", "vol"],
                     help="direction=方向予測 / vol=HAR-RV ボラ予測")
     ap.add_argument("--min-train", type=int,   default=DEFAULT_MIN_TRAIN, dest="min_train")
@@ -778,12 +810,12 @@ def main() -> int:
             return 0
 
     if args.buckets:
-        bucket_report(load_panel(Path(args.panel)))
+        bucket_report(attach_intraday(load_panel(Path(args.panel)), args.intraday))
         if not args.eval:
             return 0
 
     if args.eval:
-        panel = load_panel(Path(args.panel))
+        panel = attach_intraday(load_panel(Path(args.panel)), args.intraday)
         if args.task == "vol":
             run_vol(panel, args)
         else:
