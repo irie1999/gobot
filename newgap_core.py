@@ -20,11 +20,25 @@ import os
 import numpy as np
 import pandas as pd
 
+# ⛔⛔ **モジュールの先頭で import する**(2026-09-06 の不具合)。
+#   以前は _newgap_scan_one の中で `from backtest_limit_entry import fetch`
+#   していた。この関数は ThreadPoolExecutor から同時に呼ばれるので、
+#   **初回だけ** 複数スレッドが未初期化のモジュールを掴み、
+#   「partially initialized module から fetch を import できない」が起きる。
+#   それを直後の `except Exception: return []` が飲むので、
+#   **全銘柄が黙って空になり、0銘柄日として何事もなく完走**していた
+#   (2回目以降はモジュールが初期化済みなので再現しない = 気づきにくい)。
+#   ここで先に初期化しておけばスレッドは触るだけになる。
+from backtest_limit_entry import fetch as _NG_FETCH               # noqa: E402
+
 _NG_RET1 = float(os.environ.get("LSS_NEWGAP_RET1", "1.753"))     # 前日リターン下限(%)
 _NG_GAP_BP = float(os.environ.get("LSS_NEWGAP_BP", "100"))       # ギャップ下限(bp)
 _NG_WATCH = int(os.environ.get("LSS_NEWGAP_WATCH", "50"))        # 朝読める上限(0=無制限)
 _NG_BUDGET = float(os.environ.get("LSS_NEWGAP_BUDGET", "400"))   # 予算(万円)
 _NG_QTY = 100
+# ★ スキャンで落ちた銘柄を例外の種類ごとに数える。**全滅を黙って通さない**ための門番。
+#   dict への書き込みは GIL 下で原子的なので、スレッドから触っても壊れない。
+_NG_FAIL: dict = {}
 _NG_WORKERS = int(os.environ.get("LSS_NEWGAP_WORKERS", "8"))
 
 
@@ -51,14 +65,16 @@ def _newgap_scan_one(sym: str, days: int, min_price: float, max_price: float) ->
        120日平均なので先読みになる(§18.51 B4)。ここでは使わない。
     """
     try:
-        from backtest_limit_entry import fetch as _f
         # ⛔⛔ min_start_date を渡さないと **キャッシュの開始日を見ない**ので、
         #   days を伸ばしても黙って短いまま返る(§18.53 で判定を1回壊した)。
         import datetime as _dtm
         _msd = (_dtm.datetime.now().date()
                 - _dtm.timedelta(days=int(days + 400)))
-        df = _f(sym, days + 260, min_start_date=_msd)
-    except Exception:
+        df = _NG_FETCH(sym, days + 260, min_start_date=_msd)
+    except Exception as _e:                                       # noqa: BLE001
+        # ★ 黙って捨てない。**何件どんな理由で落ちたか**を数える。
+        #   全銘柄が同じ理由で落ちれば呼び出し側が気づける。
+        _NG_FAIL[type(_e).__name__] = _NG_FAIL.get(type(_e).__name__, 0) + 1
         return []
     if df is None or len(df) < 60:
         return []

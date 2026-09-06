@@ -88,8 +88,21 @@ with ThreadPoolExecutor(max_workers=max(1, a.workers)) as _ex:
         if _done % 200 == 0:
             print(f"  … {_done:,}/{len(_syms):,}銘柄 / {len(_rows):,}銘柄日",
                   flush=True)
+# ⛔⛔ **全滅を黙って通さない**(2026-09-06 の不具合)。初回だけ並列 import が
+#   競合して全銘柄が空になり、0銘柄日のまま何事もなく完走していた。
+#   落ちた理由の内訳を必ず出し、ほぼ全滅なら中止する。
+if C._NG_FAIL:
+    _tot_f = sum(C._NG_FAIL.values())
+    print(f"\n[warn] スキャンで {_tot_f:,}銘柄が落ちました: "
+          + " / ".join(f"{k}×{v:,}" for k, v in sorted(C._NG_FAIL.items())))
+    if _tot_f >= len(_syms) * 0.5:
+        sys.exit(f"[error] **{_tot_f:,}/{len(_syms):,}銘柄が落ちています**。"
+                 f"結果を使わないでください。\n"
+                 f"        ImportError が多いなら並列 import の競合"
+                 f"(newgap_core を先に import してあるか確認)。\n"
+                 f"        それ以外ならネットワークかキャッシュを確認。")
 if not _rows:
-    sys.exit("[error] スキャン結果が空です")
+    sys.exit("[error] スキャン結果が空です(上の内訳を見てください)")
 
 # ★★ 実際に取れた期間。要求した窓が取れたと思い込まない(§18.53)
 _ds = sorted({r["date"] for r in _rows})

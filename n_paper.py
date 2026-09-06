@@ -67,7 +67,17 @@ from pathlib import Path
 
 import pandas as pd
 
+# ⛔⛔ **ここで import する**(2026-09-06)。以前は _scan_one の中で
+#   import していたが、あの関数は ThreadPoolExecutor から同時に呼ばれる。
+#   朝は必ずコールドスタートなので、**初回だけ**複数スレッドが未初期化の
+#   モジュールを掴んで失敗し、直後の `except Exception: return None` が
+#   それを飲む → **候補が黙って空/短くなる**。n_capital.py で実際に
+#   全銘柄が空になった(2回目以降は再現しないので気づきにくい)。
+import backtest_limit_entry as _BLE
+
 JST = timezone(timedelta(hours=9))
+# スキャンで落ちた銘柄を例外の種類ごとに数える。全滅を黙って通さない門番。
+_SCAN_FAIL: dict = {}
 
 # ── 新方式N のパラメータ (§18.54)。レポート(nikkei_analysis._NG_*)と同じ既定 ──
 RET1_MIN = float(os.environ.get("LSS_NEWGAP_RET1", "1.753"))   # 前日リターン下限(%)
@@ -237,9 +247,9 @@ def _scan_one(sym: str) -> dict | None:
        まだ存在しないので触らない。
     """
     try:
-        import backtest_limit_entry as ble
-        df = ble.fetch(sym, 260)
-    except Exception:
+        df = _BLE.fetch(sym, 260)
+    except Exception as _e:                                  # noqa: BLE001
+        _SCAN_FAIL[type(_e).__name__] = _SCAN_FAIL.get(type(_e).__name__, 0) + 1
         return None
     if df is None or len(df) < 25:
         return None
@@ -291,6 +301,15 @@ def do_collect() -> None:
                 r = None
             if r:
                 rows.append(r)
+    # ⛔ 全滅を黙って通さない。朝の候補が空/短いまま発注に進むのを防ぐ。
+    if _SCAN_FAIL:
+        _tf = sum(_SCAN_FAIL.values())
+        print(f"[warn] スキャンで {_tf:,}銘柄が落ちました: "
+              + " / ".join(f"{k}x{v:,}" for k, v in sorted(_SCAN_FAIL.items())), flush=True)
+        if _tf >= len(syms) * 0.5:
+            sys.exit(f"[error] **{_tf:,}/{len(syms):,}銘柄が落ちています**。"
+                     f"候補リストを作らずに中止します。\n"
+                     f"        この状態で .\\nexec に進むと、候補が欠けたまま発注します。")
     # 前夜の絞り込み: 前日リターン + 価格帯
     # ⚠ レポートは **建値(当日の始値)** で価格を切るが、前夜には始値が無い。
     #    ここは **前日終値** で切る。境界付近は入れ替わる(既知のズレ)。
