@@ -3738,13 +3738,21 @@ if a.sector_scan:
                 if len(_bd) >= 2:
                     _bc = np.array([x["cvar"] for x in _bd], float)
                     _bm = np.array([x["mdd"] for x in _bd], float)
+                    _bw = np.array([x["worst"] for x in _bd], float)
                     _z = ((_t4["cvar"] - _bc.mean()) / _bc.std(ddof=1)
                           if _bc.std(ddof=1) else 0.0)
+                    # ⛔⛔ **片側で判定する**(2026-09-06 の設計ミス)。当初 abs(z)>=2 で
+                    #   『帯の外』と出していたが、CVaR は負なので **z<0 は
+                    #   「ランダムに落とすより裾が重い」= 業種で落とすほうが悪い**。
+                    #   それを『帯の外』と表示するのは合格に見えて逆。方向を必ず書く。
+                    _dir = ("✅ ランダムより軽い" if _z >= 2.0 else
+                            "⛔ **ランダムより重い**" if _z <= -2.0 else
+                            "帯の中(ランダムと区別できない)")
                     print(f"          ランダムに同数({len(_drop):,}件)落とす帯"
                           f"({len(_bd)}本): CVaR 中央 {np.median(_bc):>+10,.0f}"
-                          f" / MaxDD 中央 {np.median(_bm):>10,.0f}"
-                          f"   → 業種で落とした場合の z={_z:+.2f}"
-                          f"{'  帯の外' if abs(_z) >= 2.0 else '  帯の中'}")
+                          f" / 最悪日 中央 {np.median(_bw):>+11,.0f}"
+                          f" / MaxDD 中央 {np.median(_bm):>10,.0f}")
+                    print(f"            → 業種で落とした場合 z={_z:+.2f}  {_dir}")
             # なし→4→3→2 で CVaR が軽く(=0に近く)なり続けたか
             if len(_seq) == 4:
                 _mono[_wn3] = all(_seq[i + 1]["cvar"] >= _seq[i]["cvar"]
@@ -3759,6 +3767,10 @@ if a.sector_scan:
             if all(_mono.values()):
                 print(f"      → 両窓とも単調。**等価σ縮小 と ランダム帯 の両方を"
                       f"超えた上限だけ**が候補に残ります")
+                print(f"      ⛔ ランダム帯は **z≥+2 でなければ合格ではありません**。"
+                      f"z≤−2 は『ランダムに同数落とすより裾が重い』"
+                      f"\n         = 業種という基準が**逆に効いている**ので、"
+                      f"単調性が ✅ でもそこで終了です")
             else:
                 _ng = [k for k, v in _mono.items() if not v]
                 print(f"      → ⛔ **{'/'.join(_ng)} で単調でない = 終了**。"
