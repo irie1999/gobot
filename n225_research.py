@@ -504,6 +504,79 @@ def run_direction(panel: pd.DataFrame, target: str, args) -> list[dict]:
     return rows
 
 
+def bucket_report(panel: pd.DataFrame, n_gap: int = 5, n_vol: int = 3) -> None:
+    """
+    ギャップ × 直近ボラ のバケット別に、当日の日中リターンを集計する。
+
+    ロジスティックの上位係数 (open_gap / open_gap_z / gap_vs_us) は互いに強く
+    相関しているため、個別係数の符号だけでは「継続なのかフェードなのか」を
+    読み取れない。ここでは経験的な 2 次元表で実際の形を見る。
+
+    ⚠ これは全期間の記述統計 (in-sample) であって検証ではない。
+      「モデルが何を使っているか」を解釈するためのもの。
+      エッジの有無の判定は walk-forward の結果 (--eval) で行うこと。
+    """
+    tg = make_targets(panel)
+    rv = _parkinson_rv(panel["n225_high"], panel["n225_low"], 22).shift(1)
+    df = pd.DataFrame({"gap": tg["gap"], "day": tg["day"], "rv": rv}).dropna()
+    df["gap_z"] = df["gap"] / df["rv"]
+    df["gb"] = pd.qcut(df["gap"], n_gap, labels=False)
+    df["vb"] = pd.qcut(df["rv"], n_vol, labels=False)
+
+    edges = df.groupby("gb")["gap"].agg(["min", "max"])
+    vol_edges = df.groupby("vb")["rv"].agg(["min", "max"])
+
+    vol_labels = ["低ボラ", "中ボラ", "高ボラ"][:n_vol] if n_vol <= 3 else \
+                 [f"ボラ{v+1}" for v in range(n_vol)]
+
+    print("\n■ ギャップ × 直近ボラ 別の当日 日中リターン平均 "
+          f"({len(df)} 日, {df.index[0].date()} .. {df.index[-1].date()})")
+    print("─" * 88)
+    head1 = "ギャップ帯".ljust(16)
+    head2 = "".ljust(16)
+    for v in range(n_vol):
+        vlo = vol_edges.loc[v, "min"] * 100
+        vhi = vol_edges.loc[v, "max"] * 100
+        head1 += vol_labels[v].rjust(20)
+        head2 += ("%.2f-%.2f%%" % (vlo, vhi)).rjust(20)
+    head1 += "全体".rjust(14)
+    print(head1)
+    print(head2)
+    print("─" * 88)
+
+    for g in range(n_gap):
+        lo = edges.loc[g, "min"] * 100
+        hi = edges.loc[g, "max"] * 100
+        line = ("%+.2f%% .. %+.2f%%" % (lo, hi)).ljust(16)
+        for v in range(n_vol):
+            cell = df[(df["gb"] == g) & (df["vb"] == v)]
+            if len(cell):
+                line += ("%+.3f%% (n=%d)" % (cell["day"].mean() * 100, len(cell))).rjust(20)
+            else:
+                line += "-".rjust(20)
+        row = df[df["gb"] == g]
+        line += ("%+.3f%%" % (row["day"].mean() * 100)).rjust(14)
+        print(line)
+    print("─" * 88)
+    print("  読み方: ギャップアップ帯 (下の行) で日中リターンが")
+    print("    正 → ギャップ継続 (N には逆風。警報を出すべき日)")
+    print("    負 → ギャップ埋め  (N には順風。建ててよい日)")
+    print("  低ボラ列と高ボラ列で符号が変わるなら、"
+          "ギャップの『絶対値』ではなく『ボラ比』が効いている。")
+
+    # ボラ比で切った 1 次元表 (N の判断に直結する形)
+    df["zb"] = pd.qcut(df["gap_z"], 10, labels=False)
+    print(f"\n■ ギャップ/直近ボラ (gap_z) 十分位 別の当日 日中リターン")
+    print("─" * 74)
+    print(f"{'十分位':<10}{'gap_z 範囲':>22}{'日数':>8}{'日中平均':>13}{'上昇率':>10}{'>+0.5%率':>11}")
+    print("─" * 74)
+    for z, g in df.groupby("zb"):
+        rng = f"{g['gap_z'].min():+.2f} .. {g['gap_z'].max():+.2f}"
+        print(f"{'Z'+str(int(z)+1):<10}{rng:>22}{len(g):>8}{g['day'].mean()*100:>12.3f}%"
+              f"{(g['day']>0).mean()*100:>9.1f}%{(g['day']>0.005).mean()*100:>10.1f}%")
+    print("─" * 74)
+
+
 # ══════════════════════════════════════════════════════════════
 #  7. ボラ予測タスク (HAR-RV)
 # ══════════════════════════════════════════════════════════════
@@ -686,6 +759,9 @@ def main() -> int:
     ap.add_argument("--threshold", type=float, default=0.0,
                     help="建玉する確信度の閾値。p>0.5+threshold で買い")
     ap.add_argument("--lam",       type=float, default=5.0, help="ロジスティックの L2 罰則")
+    ap.add_argument("--buckets",   action="store_true",
+                    help="ギャップ × 直近ボラ のバケット別に日中リターンを集計し、"
+                         "継続とフェードの境目を経験的に見る (記述統計)")
     ap.add_argument("--coef",      action="store_true",
                     help="ロジスティック係数 (標準化後) を fold 平均で表示し、"
                          "エッジがどの特徴量から来ているかを確認する")
@@ -698,6 +774,11 @@ def main() -> int:
     if args.build:
         print("■ パネル構築中...")
         build_panel(args.years)
+        if not args.eval:
+            return 0
+
+    if args.buckets:
+        bucket_report(load_panel(Path(args.panel)))
         if not args.eval:
             return 0
 

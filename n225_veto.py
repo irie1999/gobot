@@ -78,6 +78,16 @@ N_PERM       = 2000
 # ══════════════════════════════════════════════════════════════
 def load_n_pnl(path: Path) -> pd.Series:
     """CSV (date,pnl) を読み込む。列名が合わなければ先頭2列を使う。"""
+    if not path.exists():
+        raise SystemExit(
+            f"[error] {path} が見つかりません。\n"
+            f"  N の日次損益 CSV を用意するか、--npnl を外して代理損益で走らせてください。\n"
+            f"    python n225_veto.py --asof at_open        # 代理損益 (判定1 の precision は意味を持つ)\n"
+            f"  CSV の形式 (先頭2列を日付・損益として読みます。ヘッダ名は任意):\n"
+            f"    date,pnl\n"
+            f"    2024-01-04,-12500\n"
+            f"    2024-01-05,8300\n"
+            f"  1 日 1 行に集約されていなくても、同じ日付の行は自動で合計します。")
     df = pd.read_csv(path)
     date_col = next((c for c in df.columns if c.lower() in
                      ("date", "日付", "day", "trade_date", "record_date")), df.columns[0])
