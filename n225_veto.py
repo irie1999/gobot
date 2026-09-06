@@ -227,19 +227,27 @@ def precision_report(df: pd.DataFrame, score_col: str, args) -> None:
 
     d = df.copy()
     d["dec"] = pd.qcut(d[score_col].rank(method="first"), 10, labels=False)
+    d["y_up"] = (d["r_day"] > 0).astype(int)
     base = float(d["y_strong"].mean())
+    base_up = float(d["y_up"].mean())
 
-    print("─" * 92)
+    print("─" * 104)
     print(f"{'デシル':<8}{'日数':>7}{'平均スコア':>11}{'日経日中平均':>13}"
-          f"{'precision':>11}{'lift':>8}{'N平均損益':>12}{'N累計損益':>13}")
-    print("─" * 92)
+          f"{'P(>0)':>9}{'P(>閾値)':>11}{'lift':>8}{'N平均損益':>12}{'N累計損益':>13}")
+    print("─" * 104)
     for dec, g in d.groupby("dec"):
         prec = float(g["y_strong"].mean())
         print(f"{'D'+str(int(dec)+1):<8}{len(g):>7}{g[score_col].mean():>11.3f}"
-              f"{g['r_day'].mean()*100:>12.3f}%{prec*100:>10.1f}%{prec/base:>8.2f}"
+              f"{g['r_day'].mean()*100:>12.3f}%{g['y_up'].mean()*100:>8.1f}%"
+              f"{prec*100:>10.1f}%{prec/base:>8.2f}"
               f"{g['pnl'].mean():>12.4f}{g['pnl'].sum():>13.2f}")
-    print("─" * 92)
-    print(f"  全期間の基準率 (無条件の強上昇率): {base*100:.1f}%")
+    print("─" * 104)
+    print(f"  基準率: 単純上昇 P(>0) = {base_up*100:.1f}%   "
+          f"強上昇 P(>+{args.strong_pct:.2f}%) = {base*100:.1f}%")
+    print(f"  ※ precision の目標値をどちらの定義に対して置くかで難易度が全く違う。"
+          f"目標 {args.precision_target:.1f}% は\n"
+          f"    単純上昇なら lift {args.precision_target/100/base_up:.2f} 相当、"
+          f"強上昇なら lift {args.precision_target/100/base:.2f} 相当。")
 
     hi = d[d["dec"] == 9]
     lo = d[d["dec"] == 0]
@@ -262,9 +270,15 @@ def precision_report(df: pd.DataFrame, score_col: str, args) -> None:
     p_one = 0.5 * math.erfc(-z / math.sqrt(2))            # 片側: 期待より悪い確率
     ok2 = d10_pnl < 0 and p_one < 0.05
 
-    print(f"\n  判定1  D10 precision = {d10_prec*100:.1f}%  (基準率 {base*100:.1f}%, "
-          f"lift {d10_prec/base:.2f}, 目標 {args.precision_target:.1f}%) → "
-          f"{'合格' if ok1 else '不合格'}")
+    d10_up = float(hi["y_up"].mean())
+    print(f"\n  判定1  D10 precision")
+    print(f"           強上昇 P(>+{args.strong_pct:.2f}%) = {d10_prec*100:.1f}%  "
+          f"(基準率 {base*100:.1f}%, lift {d10_prec/base:.2f}) → "
+          f"{'合格' if ok1 else '不合格'} (目標 {args.precision_target:.1f}%)")
+    print(f"           単純上昇 P(>0)      = {d10_up*100:.1f}%  "
+          f"(基準率 {base_up*100:.1f}%, lift {d10_up/base_up:.2f}) → "
+          f"{'合格' if d10_up*100 >= args.precision_target else '不合格'} "
+          f"(同じ目標を単純上昇に当てた場合)")
     print(f"  判定2  D10 の N 累計損益 = {d10_pnl:+.2f}  "
           f"(同数ランダム抽出の期待値 {exp_sum:+.2f} ± {sd_sum:.2f}, 片側 p={p_one:.3f}) → "
           f"{'合格' if ok2 else '不合格'}")
@@ -496,9 +510,18 @@ def run(panel: pd.DataFrame, args, n_pnl: pd.Series | None) -> None:
     scores = build_scores(panel, args)
 
     if n_pnl is None:
-        print("\n[!] N の実損益が未指定のため代理損益で検証します "
+        print("\n" + "!" * 88)
+        print("[!] N の実損益が未指定のため代理損益で検証します "
               f"(日経日中との R^2={args.r2:.3f}, 日次σ=1, 年率Sharpe≈{args.surrogate_sharpe:.1f})。")
-        print("    銘柄選択・約定の効果は含まれません。配管確認用であって運用判断の根拠にはなりません。")
+        print("")
+        print("    ⚠ 代理損益は r_day の線形変換として作られており、スコアが予測しているのは")
+        print("      まさにその r_day です。したがって【判定2〜6 が有意になるのは半ば同義反復】で、")
+        print("      実損益での結果を先取りするものではありません。")
+        print("")
+        print("    代理損益で情報を持つのは【判定1 (precision / lift)】だけです。")
+        print("    判定1 は N の損益を一切使わないので、実損益が無くても意味のある一次判定になります。")
+        print("    判定2〜6 を運用判断に使うには --npnl で実損益を渡してください。")
+        print("!" * 88)
         pnl = surrogate_n_pnl(scores["r_day"], args.r2, args.surrogate_sharpe)
     else:
         pnl = n_pnl.reindex(scores.index)
