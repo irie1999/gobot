@@ -1159,6 +1159,10 @@ def _make_ops_sim(_src_all, _pool_df, _ond):
         """
         _cap = budget_man * 10_000.0
         _tot, _cnt, _used, _miss = 0.0, 0, 0.0, 0
+        # ★ サイジングが本当に効いたかの診断(2026-09-06)。
+        #   floor= 100株の床に当たって**下げられなかった**回数
+        #   capskip= 1単元が金額上限を超えて建てなかった回数
+        _floor_hit, _capskip = 0, 0
         # ⚠ 候補は「ret1 で絞る前の全銘柄日」。watch は候補に掛かる
         _src = _src_all if a.pool == "all" else _pool_df
         if half == 1:
@@ -1229,7 +1233,15 @@ def _make_ops_sim(_src_all, _pool_df, _ond):
             _cash, _n = _cap, 0
             # ★ サイジング。1件あたりの株数を決める(100株単位)。
             #   pnl は 100株 で計算済みなので、株数の比で伸縮する。
+            # ⛔⛔ **equal は『予算÷件数』なので、平準化ではなくレバレッジ**
+            #   (2026-09-06 発覚)。1件の日は 1,700株 まで膨らみ、投入が
+            #   162万 → 350万 に増える。平均もσも同じ比率で伸びるので
+            #   月平均÷σ は動かず、それを見て「サイジングは無効」と結論していた。
+            #   → level は **目標エクスポージャを固定**(予算ではない)。
+            #     平均投入を変えずに日ごとのばらつきだけを潰せる。
             _tgt = (_cap / max(len(_hit), 1)) if sizing == "equal" else 0.0
+            if sizing == "level" and size_arg > 0:
+                _tgt = size_arg * 1e4 / max(len(_hit), 1)
             for _r in _hit.itertuples():
                 if max_n > 0 and _n >= max_n:
                     break
@@ -1237,17 +1249,28 @@ def _make_ops_sim(_src_all, _pool_df, _ond):
                     continue
                 _px = float(_r.entry_p)
                 _lot = a.qty
-                if sizing == "equal" and _px > 0:
-                    _lot = max(a.qty, int(_tgt / (_px * a.qty)) * a.qty)
+                if sizing in ("equal", "level") and _px > 0 and _tgt > 0:
+                    _want = int(_tgt / (_px * a.qty)) * a.qty
+                    if _want < a.qty:
+                        _floor_hit += 1        # 100株の床に当たった = 下げられない
+                    _lot = max(a.qty, _want)
                 elif sizing == "atr" and size_arg > 0:
                     _at = float(getattr(_r, "atr", 0.0) or 0.0)
                     if _at > 0:
                         _lot = max(a.qty,
                                    int(size_arg / (_at * a.qty)) * a.qty)
+                # ⛔⛔ **cap / atr は基準(100株固定)と定義上まったく同じ**
+                #   (2026-09-06 発覚)。_lot は既に a.qty なので
+                #   min(a.qty, max(a.qty, X)) は必ず a.qty。上限は永久に効かない。
+                #   ATR も ATR×100 > size_arg なら int(...)=0 → max で 100。
+                #   建値1,000〜6,000円・ATR 2〜3% ではほぼ全件そうなる。
+                #   → 4本のうち3本が基準の複製で、それを別の腕として比較していた。
+                #   ここは **1単元が上限を超えたら建てない**(本当の上限)に直す。
                 if sizing == "cap" and size_arg > 0:
-                    _lot = min(_lot, max(a.qty,
-                                         int(size_arg * 1e4 / (_px * a.qty)) * a.qty))
-                elif sizing in ("equal", "atr") and size_arg > 0:
+                    if _px * a.qty > size_arg * 1e4:
+                        _capskip += 1
+                        continue           # 1単元でも上限超え → その銘柄は建てない
+                elif sizing in ("equal", "level", "atr") and size_arg > 0:
                     _lot = min(_lot, max(a.qty,
                                          int(size_arg * 1e4 / (_px * a.qty)) * a.qty))
                 _scale = _lot / a.qty
@@ -1293,6 +1316,7 @@ def _make_ops_sim(_src_all, _pool_df, _ond):
             _cnt += _n
             _used += _cap - _cash
         return {"pnl": _tot, "n": _cnt, "used": _used / _ond,
+                "floor": _floor_hit, "capskip": _capskip,
                 "picks": _picks,
                 "miss": _miss, "per": (_tot / _cnt if _cnt else 0.0),
                 "daily": _daily, "byside": _byside,
@@ -1721,7 +1745,14 @@ if a.hedge:
         _mu = float(_v.mean())
         _sd2 = float(_v.std(ddof=1)) if len(_v) > 1 else 0.0
         _t = _mu / (_sd2 / _math.sqrt(len(_v))) if _sd2 > 0 else 0.0
-        return _mu, _sd2, (_mu / _sd2 if _sd2 else 0.0), _t, int((_v > 0).sum()), len(_v)
+        # ★★ **σ だけで採点しない**(2026-09-06)。ヘッジの値打ちの本体は
+        #   「大負け日の損失を直接相殺すること」で、σ 経由の効果より大きい
+        #   可能性がある。日次CVaR5% と 最悪日 を必ず併記する。
+        _dv = np.asarray(_p, float)
+        _k5 = max(1, int(round(len(_dv) * 0.05)))
+        return (_mu, _sd2, (_mu / _sd2 if _sd2 else 0.0), _t,
+                int((_v > 0).sum()), len(_v),
+                float(np.sort(_dv)[:_k5].mean()), float(_dv.min()))
 
     def _apply(_p, _mkt, _capv, _h):
         """ヘッジ後の日次損益。日経が +x% のとき +_need*_h*x/1 を得る。"""
@@ -1741,18 +1772,31 @@ if a.hedge:
             print(f"\n  ── TEST({_test_n}) {len(_kd):,}営業日 ──")
             print(f"    ⚠ TEST の β = {float(_bt[0]):+,.0f}円/1% "
                   f"(TRAIN {_beta:+,.0f})。**大きく違えば比率を固定できません**")
-        print(f"    {'比率':<8}{'月平均':>12}{'月次σ':>12}{'÷σ':>8}"
-              f"{'t':>8}{'プラス月':>10}")
+        print(f"    {'比率':<6}{'月平均':>11}{'月次σ':>11}{'÷σ':>6}"
+              f"{'CVaR5%':>10}{'最悪日':>11}{'等価σ':>11}{'等価CVaR':>11}"
+              f"{'等価最悪日':>11}")
         _base = None
+        _bmu = _bsd = _bcv = _bwd = None
         for _h in _hs:
             _q = _apply(_pn, _mk, _cap, _h)
-            _mu, _sd2, _rt, _t, _pos, _nm = _stat(_q)
+            _mu, _sd2, _rt, _t, _pos, _nm, _cv5, _wd5 = _stat(_q)
             if _h == 0.0:
-                _base = _rt
-            _mk2 = " ★現行" if _h == 0.0 else (
-                "  ✅" if (_base is not None and _rt > _base * 1.10) else "")
-            print(f"    {_h:<8.2f}{_mu:>+12,.0f}{_sd2:>12,.0f}{_rt:>8.2f}"
-                  f"{_t:>+8.2f}{f'{_pos}/{_nm}':>10}{_mk2}")
+                _base, _bmu, _bsd, _bcv, _bwd = _rt, _mu, _sd2, _cv5, _wd5
+            # ★ 等価縮小 = 基準を同じリスクまで小さくしたときの月平均。
+            #   これを上回らなければ「0.8倍で取引した」だけ(§18.38 #3b)。
+            #   ⛔ σ だけでなく **CVaR と 最悪日** でも出す。ヘッジの狙いは
+            #     裾の直接相殺なので、σ 等価だけで採点すると過小評価になる。
+            _e1 = (_bmu * (_sd2 / _bsd)) if _bsd else 0.0
+            _e2 = (_bmu * (_cv5 / _bcv)) if _bcv else 0.0
+            _e3 = (_bmu * (_wd5 / _bwd)) if _bwd else 0.0
+            _w = ("★現行" if _h == 0.0 else
+                  "".join(c for c, ok in (("σ", _mu > _e1), ("C", _mu > _e2),
+                                          ("W", _mu > _e3)) if ok) or "—")
+            print(f"    {_h:<6.2f}{_mu:>+11,.0f}{_sd2:>11,.0f}{_rt:>6.2f}"
+                  f"{_cv5:>+10,.0f}{_wd5:>+11,.0f}{_e1:>+11,.0f}"
+                  f"{_e2:>+11,.0f}{_e3:>+11,.0f}  {_w}")
+        print(f"      ✅の読み方: σ/C/W = 等価σ / 等価CVaR / 等価最悪日 を"
+              f"上回った指標。**1つも付かなければ ただの縮小**")
 
     print(f"\n  {'=' * 68}")
     print(f"  ★ 判定:")
@@ -2596,17 +2640,40 @@ if a.sweep_size:
                 "worst": float(_v2.min()), "neg": int((_v2 < 0).sum()),
                 "nm": len(_v2), "wd": float(_dv.min()),
                 "n": res["n"], "used": _us,
+                # ★★ 左裾。**σ で採点すると裾の改善が見えない**(2026-09-06)。
+                #   日次CVaR5% = 最悪5%の日の平均 / MaxDD は累積曲線(先頭0)
+                "cvar": float(np.sort(_dv)[:max(1, int(round(len(_dv) * .05)))]
+                              .mean()),
+                "mdd": float(np.max(np.maximum.accumulate(
+                    np.concatenate(([0.0], np.cumsum(_dv))))
+                    - np.concatenate(([0.0], np.cumsum(_dv))))),
+                # ★ 日次エクスポージャの散らばり。平準化が効いたかはここで見る。
+                #   σ ∝ 1/√(1+CV²) なので CV が落ちていなければ平準化していない
+                "ecv": (lambda _e: float(_e.std(ddof=1) / _e.mean())
+                        if len(_e) > 2 and _e.mean() > 0 else 0.0)(
+                    np.array([v[0] + v[1] for v in res["dcap"].values()], float)),
+                "floor": int(res.get("floor", 0)),
+                "capskip": int(res.get("capskip", 0)),
                 # ★ 資本効率 = 月平均 ÷ 実際に使った額。
                 #   これが横ばいなら **レバレッジを動かしただけ**(§18.38 #3b)。
                 "eff": (_mu / _us * 100.0 if _us > 0 else 0.0)}
 
+    # ★★ 2026-09-06 に入れ替え。旧 cap30/cap40/atr3000/atr5000 は
+    #   **基準(100株固定)と定義上まったく同じ数字を返していた**(上の ⛔ 参照)。
+    #   3本が基準の複製で、それを別の腕として比較していたので「サイジングは無効」
+    #   という結論はその3本については無意味だった。
+    # ★ level = **目標エクスポージャを固定**して日ごとのばらつきだけ潰す。
+    #   equal(予算÷件数)はレバレッジなので、これとは別物。
+    #   162万 = 現行の投入中央値。ここを揃えれば平均投入を変えずに測れる。
     _SZ = [("qty", 0.0, "100株固定 ★現行"),
-           ("equal", 0.0, "金額均等(予算÷件数)"),
+           ("level", 120.0, "平準化 目標120万/日"),
+           ("level", 162.0, "平準化 目標162万/日(現行の中央値)"),
+           ("level", 200.0, "平準化 目標200万/日"),
+           ("level", 300.0, "平準化 目標300万/日"),
+           ("equal", 0.0, "金額均等(予算÷件数) ⚠レバレッジ"),
            ("equal", 50.0, "金額均等 上限50万"),
-           ("cap", 30.0, "100株固定 上限30万"),
-           ("cap", 40.0, "100株固定 上限40万"),
-           ("atr", 3000.0, "ATR均等(1件3千円risk)"),
-           ("atr", 5000.0, "ATR均等(1件5千円risk)")]
+           ("cap", 30.0, "1単元30万超は建てない"),
+           ("cap", 50.0, "1単元50万超は建てない")]
     _CAPN = [0, 20, 13, 8, 5]
 
     _sims = {}
@@ -2621,11 +2688,18 @@ if a.sweep_size:
     print(f"     月平均もσも同じ比率で増えているなら、それは"
           f"**レバレッジを上げただけ**で\n     リスクは減っていません"
           f"(資本効率が横ばいならそれ)。§18.28 / §18.38 #3b")
-    print(f"\n  {'サイジング':<24}{'上限':>6}"
-          + "".join(f"{t + ' 月平均':>13}{'σ':>10}{'÷σ':>7}"
-                   f"{'最悪月':>12}{'負月':>6}{'投入/日':>9}{'効率%':>7}"
+    print(f"  ★★ **左裾は σ ではなく CVaR/最悪日 で見る**(2026-09-06 追加)。"
+          f"σ を 20% 下げて平均も 20% 下げただけなら\n"
+          f"     それは『0.8倍で取引した』であって リスク管理ではない"
+          f"(資本効率が横ばい = それ)")
+    print(f"  ★ 投入CV = 日次エクスポージャの変動係数。"
+          f"共通ファクターが効く戦略では σ ∝ 1/√(1+CV²) なので、\n"
+          f"     **CV が落ちていなければ平準化していない**")
+    print(f"\n  {'サイジング':<26}{'上限':>5}"
+          + "".join(f"{t + ' 月平均':>12}{'÷σ':>6}{'CVaR5%':>10}"
+                   f"{'最悪日':>11}{'投入/日':>9}{'投入CV':>7}{'効率%':>7}"
                    for t in _sims))
-    print("  " + "-" * (30 + 64 * len(_sims)))
+    print("  " + "-" * (32 + 62 * len(_sims)))
     _rows2 = []
     for _sz, _sa, _lb in _SZ:
         for _mn in _CAPN:
@@ -2641,24 +2715,50 @@ if a.sweep_size:
     _b2 = next(x for x in _rows2 if x[0][0] == "qty" and x[0][3] == 0)
     # TRAIN の 月平均÷σ 降順
     _rows2.sort(key=lambda x: -x[1]["TRAIN"]["r"])
-    for _key, _r2 in _rows2[:16]:
-        _sz, _sa, _lb, _mn = _key
-        _s3 = f"  {_lb:<24}{('なし' if _mn == 0 else str(_mn)):>6}"
+    _bs = _b2[1]
+
+    def _line(_lb, _mn, _r2):
+        _s3 = f"  {_lb:<26}{('なし' if _mn == 0 else str(_mn)):>5}"
         for _t in _sims:
             _x = _r2[_t]
-            _s3 += (f"{_x['mu']:>+13,.0f}{_x['sd']:>10,.0f}{_x['r']:>7.2f}"
-                    f"{_x['worst']:>+12,.0f}{_x['neg']:>4}/{_x['nm']}"
-                    f"{_x['used'] / 1e4:>8,.0f}万{_x['eff']:>7.2f}")
-        print(_s3)
-    print("  " + "-" * (30 + 64 * len(_sims)))
-    _bs = _b2[1]
-    _s3 = f"  {'★現行(100株/上限なし)':<24}{'なし':>6}"
-    for _t in _sims:
-        _x = _bs[_t]
-        _s3 += (f"{_x['mu']:>+13,.0f}{_x['sd']:>10,.0f}{_x['r']:>7.2f}"
-                f"{_x['worst']:>+12,.0f}{_x['neg']:>4}/{_x['nm']}"
-                f"{_x['used'] / 1e4:>8,.0f}万{_x['eff']:>7.2f}")
-    print(_s3)
+            _s3 += (f"{_x['mu']:>+12,.0f}{_x['r']:>6.2f}{_x['cvar']:>+10,.0f}"
+                    f"{_x['wd']:>+11,.0f}{_x['used'] / 1e4:>8,.0f}万"
+                    f"{_x['ecv']:>7.2f}{_x['eff']:>7.2f}")
+        return _s3
+
+    # ⛔⛔ **基準と1円も違わない腕を別の腕として並べない**(2026-09-06 の反省)。
+    #   旧 cap30/cap40/atr は定義上 100株固定と同じで、それを比較していた。
+    _dupe = []
+    for _key, _r2 in _rows2[:20]:
+        _sz, _sa, _lb, _mn = _key
+        if _mn == 0 and _sz != "qty" and all(
+                abs(_r2[t]["mu"] - _bs[t]["mu"]) < 0.01 for t in _sims):
+            _dupe.append(_lb)
+            continue
+        print(_line(_lb, _mn, _r2))
+    print("  " + "-" * (32 + 62 * len(_sims)))
+    print(_line("★現行(100株/上限なし)", 0, _bs))
+    if _dupe:
+        print(f"\n  ⛔ **基準と1円も違わない腕**(表から除外): "
+              f"{', '.join(sorted(set(_dupe)))}")
+        print(f"     これを別の腕として比べても情報はありません。"
+              f"実装かパラメータが効いていない可能性")
+
+    # ── サイジングが本当に効いたかの診断 ──────────────────────────
+    print(f"\n  ── 診断: 平準化は物理的に可能か ──")
+    print(f"    ⛔ **100株が最小単位**なので、候補が多い日は下に刻めない。"
+          f"床に当たった割合が高いほど平準化は効かない")
+    print(f"    {'サイジング':<26}{'建てた件数':>10}{'床に当たった':>12}"
+          f"{'上限で見送り':>12}{'投入CV':>8}")
+    _ft0, _ond0 = _sims["TRAIN"]
+    for _sz, _sa, _lb in _SZ:
+        _rr = _ft0(50, 400.0, 0, False, sizing=_sz, size_arg=_sa)
+        _mm = _mstat2(_rr, _ond0)
+        if not _mm:
+            continue
+        _fp = (_mm["floor"] / max(1, _rr["n"] + _mm["capskip"]) * 100.0)
+        print(f"    {_lb:<26}{_rr['n']:>10,}{_mm['floor']:>9,}"
+              f"({_fp:>4.1f}%){_mm['capskip']:>12,}{_mm['ecv']:>8.2f}")
 
     # ── 前半/後半 ────────────────────────────────────────────────
     print(f"\n  ── 上位5つを TRAIN の前半/後半でも見る ──")
