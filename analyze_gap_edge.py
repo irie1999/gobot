@@ -360,6 +360,12 @@ ap.add_argument("--sweep-market", action="store_true",
                      "『その日は建てない』ルールが作れるか。総当たり+帰無較正。"
                      "⚠ §18.34b は lss で候補ゼロだったが **113営業日しか"
                      "なかった**。N は2,843営業日ある")
+ap.add_argument("--sweep-cands", action="store_true",
+                help="★★ **前夜の候補数**(前日リターン閾値を満たした銘柄数)で"
+                     "『その日は建てない』ルールが作れるか。外部データも契約も"
+                     "要らない自前の量。**軸は3本固定**(n_cand / n_cand_ma5 / "
+                     "n_cand50) x 5分位 = 15検定。ランダム日落としの帯と"
+                     "等価σ縮小まで見る。--min-ret1 が必須")
 ap.add_argument("--sweep-size", action="store_true",
                 help="★★ **マイナス月を抑えられるか**。サイジング × 1日の件数上限"
                      "を掃いて、月次σ・最悪月・マイナス月数で見る。"
@@ -465,7 +471,7 @@ _BOTH_PASS = {
 
 _NEEDS_TRAIN = bool(a.explore or a.confirm or a.confirm_both or a.sweep_regime
                     or a.search_switch or a.sweep_size or a.sweep_market
-                    or a.sweep_grid
+                    or a.sweep_cands or a.sweep_grid
                     or a.sweep_ops or a.sweep_barrier or a.sweep_relax
                     or a.sweep_watch or bool(a.confirm_watch)
                     or a.tail_diag or a.hedge or bool(a.dump_picks)
@@ -2151,6 +2157,244 @@ if a.tail_diag:
           f"明確に上回るか")
     print(f"    ④ 多変量の **out-of-sample R²** と TEST の実額。ここが本番")
     print(f"  ⛔ ①②が小さいのに③④で何か出たら、それは多重検定の産物です")
+    print(f"  {'=' * 68}")
+    sys.exit(0)
+
+if a.sweep_cands:
+    # ══════════════════════════════════════════════════════════════════
+    # ★★ **前夜の候補数**で「その日は建てない」ルールが作れるか
+    # ══════════════════════════════════════════════════════════════════
+    #   ★ なぜ別枠か: 候補数は **前日の引けで確定する**(前日リターンと価格帯
+    #     だけで決まる)ので、外部データも契約も要らない。§18.60 の
+    #     『寄り前に読めるか』と同じ土俵だが、自前の量である点が違う。
+    #
+    #   ⚠ 近いものを3回測って、いずれも仮説と逆か無相関:
+    #     §18.58 その日の**合格件数** 相関 −0.028 / ワースト8日中5日が1〜7件の日
+    #     §18.13 lss の『同日発注数』  TRAIN 全帯マイナス・TEST は少ない日ほど悪い
+    #     §18.24 日内流動性上位N件      非単調・全て t<1.3
+    #   ⚠ 上限も見えている(§18.60): 事後 R² 0.235 × 寄り前から読める R² 0.045
+    #     = **事前に出せる R² の天井 0.0105**。候補数は「**前日**の相場」なので
+    #     その中でも弱い側。→ 低い期待値のスクリーニングとして回す。
+    #
+    #   ⛔ **軸は3本に固定**(2026-09-06 に宣言)。増やすと §18.34b の二の舞。
+    if a.min_ret1 <= 0:
+        sys.exit("[error] --sweep-cands は --min-ret1 が必須です。"
+                 "『前夜の候補』は前日リターンの閾値で定義されるので、"
+                 "閾値が無いと候補数がただの銘柄数になります")
+    print(f"\n{'=' * 78}")
+    print(f"■ 前夜の候補数で『その日は建てない』ルールが作れるか")
+    print(f"{'=' * 78}")
+    print(f"  候補 = 前日リターン ≥+{a.min_ret1:.3f}% かつ 建値 "
+          f"{a.min_price:,.0f}〜{a.max_price:,.0f}円  → **前日の引けで確定**")
+    print(f"  ⚠ 近い測定は3回とも仮説と逆か無相関(§18.58 / §18.13 / §18.24)。"
+          f"期待値の低いスクリーニングです")
+    print(f"  ⛔ 価格帯は **D+1 の始値**に掛かっています(scan の実装)。"
+          f"実際の前夜リストは前日終値で切るので、\n"
+          f"     候補数は厳密には『前夜に分かる数』ではありません。"
+          f"**通ったときだけ前日終値で作り直す**こと")
+
+    def _tailc(_y, _mo):
+        """日次配列から 月次(平均/σ/÷σ) と 左裾(CVaR5%/最悪日/MaxDD)。"""
+        _u = np.unique(_mo)
+        _m = np.array([_y[_mo == x].sum() for x in _u], float)
+        if len(_m) < 3 or len(_y) < 20:
+            return None
+        _mu, _sd = float(_m.mean()), float(_m.std(ddof=1))
+        _k = max(1, int(round(len(_y) * 0.05)))
+        _cum = np.concatenate(([0.0], np.cumsum(_y)))   # 先頭に 0(§18.64)
+        return {"mu": _mu, "sd": _sd, "r": (_mu / _sd if _sd else 0.0),
+                "cvar": float(np.sort(_y)[:_k].mean()), "worst": float(_y.min()),
+                "mdd": float(np.max(np.maximum.accumulate(_cum) - _cum)),
+                "neg": int((_m < 0).sum())}
+
+    # ── 日次パネル。候補数は **生のフレーム**から、損益は予算シミュから ──
+    _CP: dict = {}
+    for _t, _df in (("TRAIN", _train), ("TEST", _test)):
+        if _df is None or _df.empty:
+            continue
+        _f, _, _ = _make_ops_sim(_df, _pool_of(_df),
+                                 max(1, _df["date"].nunique()))
+        _r = _f(50, a.budget_man or 400.0, 0, False)
+        _pn = {d: (v[0] + v[1]) for d, v in _r["daily"].items()}
+        # 候補数 = その日 ret1 の閾値を満たした銘柄数(ギャップ判定の前)
+        _cd = (_df[_df["ret1"] >= a.min_ret1].groupby("date").size().to_dict())
+        _dl = sorted(set(_cd) | set(_pn))
+        _y = np.array([_pn.get(d, 0.0) for d in _dl], float)
+        _n1 = np.array([float(_cd.get(d, 0)) for d in _dl], float)
+        # MA5 は当日を含む直近5日。すべて前夜に確定している
+        _ma = np.array([float(np.mean(_n1[max(0, i - 4):i + 1]))
+                        for i in range(len(_n1))], float)
+        _CP[_t] = {
+            "y": _y, "mo": np.array([int(str(d)[:4]) * 12 + int(str(d)[5:7])
+                                     for d in _dl]),
+            "X": {"n_cand": _n1, "n_cand_ma5": _ma,
+                  "n_cand50": np.minimum(_n1, 50.0)},
+            "days": _dl}
+
+    if "TRAIN" not in _CP:
+        sys.exit("[error] TRAIN の日次パネルが作れません")
+
+    print(f"\n  ── 候補数の分布 ──")
+    print(f"    {'窓':<7}{'営業日':>7}{'中央':>7}{'平均':>8}{'最小':>6}{'最大':>7}"
+          f"{'50超の日':>10}")
+    for _t, _p in _CP.items():
+        _n1 = _p["X"]["n_cand"]
+        _o50 = float((_n1 > 50).mean()) * 100.0
+        print(f"    {_t:<7}{len(_n1):>7,}{np.median(_n1):>7,.0f}"
+              f"{_n1.mean():>8,.1f}{_n1.min():>6,.0f}{_n1.max():>7,.0f}"
+              f"{_o50:>9.1f}%")
+    _o50T = float((_CP["TRAIN"]["X"]["n_cand"] > 50).mean()) * 100.0
+    if _o50T >= 80.0:
+        print(f"    ⚠ TRAIN の {_o50T:.0f}% の日が50超 = "
+              f"**n_cand50 はほぼ定数**。軸として機能しません(宣言どおり報告)")
+
+    # ── ルール = 「その分位の日は建てない」。3軸 × 5分位 = 15検定 ──
+    _AXC = ["n_cand", "n_cand_ma5", "n_cand50"]
+    _RC = [(k, q) for k in _AXC for q in range(1, 6)]
+
+    def _cutsQ(_v):
+        return [float(np.percentile(_v, p)) for p in (20, 40, 60, 80)]
+
+    def _apc(_y, _v, _q, _cuts):
+        """分位 _q(1..5)の日を落とす。**切り方は TRAIN で決めて TEST に当てる**"""
+        _lo = -np.inf if _q == 1 else _cuts[_q - 2]
+        _hi = np.inf if _q == 5 else _cuts[_q - 1]
+        _z = _y.copy()
+        _z[(_v >= _lo) & (_v < _hi)] = 0.0
+        return _z
+
+    _CUT = {k: _cutsQ(_CP["TRAIN"]["X"][k]) for k in _AXC}
+    _base = {t: _tailc(_p["y"], _p["mo"]) for t, _p in _CP.items()}
+    print(f"\n  ── 基準(全部建てる) ──")
+    for _t, _b in _base.items():
+        if _b:
+            print(f"    {_t:<7} 月平均 {_b['mu']:>+10,.0f} / σ {_b['sd']:>9,.0f}"
+                  f" / ÷σ {_b['r']:.2f} / CVaR5% {_b['cvar']:>+9,.0f}"
+                  f" / 最悪日 {_b['worst']:>+10,.0f} / MaxDD {_b['mdd']:>10,.0f}")
+
+    _rows: dict = {}
+    for _t, _p in _CP.items():
+        _bt = _base[_t]
+        if not _bt:
+            continue
+        print(f"\n  【{_t}】 分位の切り方は **TRAIN で決めた値**を使用")
+        print(f"    {'軸':<13}{'分位':>4}{'落とす日':>8}{'月平均':>11}{'÷σ':>6}"
+              f"{'CVaR5%':>11}{'最悪日':>11}{'MaxDD':>11}{'等価σ縮小':>11}")
+        for _k, _q in _RC:
+            _v = _p["X"][_k]
+            _z = _apc(_p["y"], _v, _q, _CUT[_k])
+            _nd5 = int((_z == 0.0).sum() - (_p["y"] == 0.0).sum())
+            _st = _tailc(_z, _p["mo"])
+            if not _st:
+                continue
+            _eq = _bt["mu"] * ((_st["sd"] / _bt["sd"]) if _bt["sd"] else 1.0)
+            _rows[(_t, _k, _q)] = (_st, _eq, _nd5)
+            print(f"    {_k:<13}{'Q' + str(_q):>4}{_nd5:>8,}"
+                  f"{_st['mu']:>+11,.0f}{_st['r']:>6.2f}{_st['cvar']:>+11,.0f}"
+                  f"{_st['worst']:>+11,.0f}{_st['mdd']:>11,.0f}"
+                  f"{_eq:>+11,.0f}{'  ✅' if _st['mu'] > _eq else '  ⛔'}")
+
+    # ── ①TRAIN と TEST で同じ分位が最悪か ──
+    print(f"\n  ── ① TRAIN と TEST で **同じ分位が最悪**か ──")
+    _same_q = {}
+    for _k in _AXC:
+        _w = {}
+        for _t in _CP:
+            _c = [(q, _rows[(_t, _k, q)][0]["r"]) for q in range(1, 6)
+                  if (_t, _k, q) in _rows]
+            if _c:
+                # 落として ÷σ が最も上がる分位 = その分位が最悪だった
+                _w[_t] = max(_c, key=lambda x: x[1])[0]
+        _ok = len(_w) == 2 and len(set(_w.values())) == 1
+        _same_q[_k] = (_ok, _w)
+        print(f"    {_k:<13}" + " / ".join(f"{t}=Q{q}" for t, q in _w.items())
+              + ("   ✅ 一致" if _ok else "   ⛔ 入れ替わる"))
+
+    # ── ②ランダムに同数の日を落とした帯(⑤の教訓。片側で判定) ──
+    print(f"\n  ── ② ランダムに **同数の日** を落とした帯 "
+          f"({max(2, a.sector_cap_seeds)}本) ──")
+    print(f"    ⛔ 日を落とせば裾は必ず軽くなる。帯を超えなければ"
+          f"『候補数で落としたから』ではない(§18.34b)")
+    _rng4 = np.random.default_rng(20260906)
+    _band_ok = {}
+    for _t, _p in _CP.items():
+        _nz = np.flatnonzero(_p["y"] != 0.0)
+        for _k in _AXC:
+            for _q in range(1, 6):
+                if (_t, _k, _q) not in _rows:
+                    continue
+                _st, _eq, _nd5 = _rows[(_t, _k, _q)]
+                if _nd5 <= 0 or _nd5 >= len(_nz):
+                    continue
+                _bc, _br = [], []
+                for _ in range(max(2, a.sector_cap_seeds)):
+                    _z2 = _p["y"].copy()
+                    _z2[_rng4.choice(_nz, size=_nd5, replace=False)] = 0.0
+                    _s2 = _tailc(_z2, _p["mo"])
+                    if _s2:
+                        _bc.append(_s2["cvar"]); _br.append(_s2["r"])
+                if len(_bc) < 2:
+                    continue
+                _bc = np.array(_bc, float)
+                _z4 = ((_st["cvar"] - _bc.mean()) / _bc.std(ddof=1)
+                       if _bc.std(ddof=1) else 0.0)
+                _band_ok[(_t, _k, _q)] = _z4
+    for _k in _AXC:
+        for _q in range(1, 6):
+            _zs = {t: _band_ok[(t, _k, _q)] for t in _CP
+                   if (t, _k, _q) in _band_ok}
+            if not _zs:
+                continue
+            _lbl = " / ".join(f"{t} z={z:+.2f}" for t, z in _zs.items())
+            _pass = all(z >= 2.0 for z in _zs.values()) and len(_zs) == 2
+            print(f"    {_k:<13}Q{_q}  {_lbl:<34}"
+                  + ("✅ 両窓でランダムより軽い" if _pass else
+                     "⛔ ランダムより重い" if any(z <= -2.0 for z in _zs.values())
+                     else "帯の中(ランダムと区別できない)"))
+
+    # ── ③帰無較正。**損益の側**を日ブロック保持で巡回シフト(§18.34b) ──
+    print(f"\n  ── ③ 帰無較正 ({max(10, a.switch_nulls)}本 / "
+          f"**損益を日ブロック保持で巡回シフト**) ──")
+    _pT = _CP["TRAIN"]
+    _obsT = max(_rows[("TRAIN", k, q)][0]["r"] for k, q in _RC
+                if ("TRAIN", k, q) in _rows)
+    _rng5 = np.random.default_rng(20260906)
+    _nl3 = []
+    for _ in range(max(10, a.switch_nulls)):
+        _sh = int(_rng5.integers(20, len(_pT["y"]) - 20))
+        _ys = np.roll(_pT["y"], _sh)
+        _nl3.append(max(_tailc(_apc(_ys, _pT["X"][k], q, _CUT[k]),
+                               _pT["mo"])["r"] for k, q in _RC))
+    _nl3 = np.array(_nl3, float)
+    _p95 = float(np.percentile(_nl3, 95))
+    print(f"    実測の最良 ÷σ  **{_obsT:.3f}**   基準(全部建てる) "
+          f"{_base['TRAIN']['r']:.3f}")
+    print(f"    帰無の最良 ÷σ  中央 {float(np.median(_nl3)):.3f} / "
+          f"95%点 **{_p95:.3f}** / 最大 {float(_nl3.max()):.3f}")
+    print(f"    p値 = **{float((_nl3 >= _obsT).mean()):.3f}**")
+
+    print(f"\n  {'=' * 68}")
+    _cand_ok = [(k, q) for k in _AXC for q in range(1, 6)
+                if _same_q[k][0]
+                and all(_band_ok.get((t, k, q), -9.9) >= 2.0 for t in _CP)
+                and all(_rows[(t, k, q)][0]["mu"] > _rows[(t, k, q)][1]
+                        for t in _CP if (t, k, q) in _rows)]
+    if _obsT > _p95 and _cand_ok:
+        print(f"  ★ **通りました**: " + ", ".join(f"{k} Q{q}" for k, q in _cand_ok))
+        print(f"     ⛔ ただし価格帯が D+1 の始値に掛かっています。"
+              f"**前日終値で作り直してから**でないと採用できません")
+    else:
+        _why = []
+        if _obsT <= _p95:
+            _why.append("帰無の中")
+        if not _cand_ok:
+            _why.append("①分位の一致 ②ランダム帯の外(軽い側) ③等価σ縮小 "
+                        "を**すべて満たす分位が無い**")
+        print(f"  ⛔ **不合格({' / '.join(_why)})。前夜の候補数では"
+              f"『建てない日』は作れません。**")
+        print(f"     §18.58(合格件数) §18.13(同日発注数) §18.24(日内上位N)"
+              f" と同じ結論。これで4回目")
+    print(f"  ⛔ 結果を見て分位を選ばないこと(回す前に宣言済み)")
     print(f"  {'=' * 68}")
     sys.exit(0)
 
