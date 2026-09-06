@@ -599,8 +599,9 @@ def main() -> int:
     if args.selftest:
         return run_selftest(args)
 
+    n_pnl = load_n_pnl(Path(args.npnl)) if args.npnl else None   # 先に検証して早く失敗させる
     panel = load_panel(Path(args.panel))
-    run(panel, args, load_n_pnl(Path(args.npnl)) if args.npnl else None)
+    run(panel, args, n_pnl)
     return 0
 
 
