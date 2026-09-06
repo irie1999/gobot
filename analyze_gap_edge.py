@@ -367,6 +367,15 @@ ap.add_argument("--beta-scan", action="store_true",
                      "無いのでそこで終了。βと1件あたりbpの相関も出す(αを失うか)")
 ap.add_argument("--beta-win", type=int, default=120,
                 help="β を推定する窓(営業日)。既定120")
+ap.add_argument("--beta-run", action="store_true",
+                help="★★ β圧縮の**本番**。日ごとに β の低い順に一定割合だけ残し、"
+                     "予算シミュを通す。**同数をランダムに落とした帯**と"
+                     "**等価σ/CVaR/最悪日**で採点する。"
+                     "既定は TRAIN だけ(TEST は --beta-run-test で開く)")
+ap.add_argument("--beta-run-test", action="store_true",
+                help="--beta-run で TEST も出す。⛔ TEST は使うたびに減る")
+ap.add_argument("--beta-keeps", type=str, default="0.9,0.75,0.5",
+                help="残す割合(日ごとの β 下位)。既定 0.9,0.75,0.5")
 ap.add_argument("--beta-win2", type=int, default=250,
                 help="β の2本目の窓。1本目との相関で **散らばりが本物か推定ノイズか** を切り分ける。既定250",)
 ap.add_argument("--sweep-cands", action="store_true",
@@ -2382,6 +2391,126 @@ if a.beta_scan:
             print(f"    Q{_i2 + 1:<5}{int(_m2.sum()):>8,}{_b[_m2].mean():>8.2f}"
                   f"{_bp5[_m2].mean():>9.1f}"
                   f"{_pk['pnl'].to_numpy(float)[_m2].mean():>10,.0f}")
+
+    # ══════════════════════════════════════════════════════════════
+    # ★★ 本番 — 日ごとに β の低い順に残して予算シミュを通す
+    # ══════════════════════════════════════════════════════════════
+    #   ⛔ 上の表からは合成結果を計算できない。取引を半分捨てると
+    #     ①曝露が減って σ も減る(ただの縮小) と
+    #     ②分散が効かなくなって 1円あたりの固有リスクは上がる
+    #     が逆向きに効くため。予算シミュを通すしかない(2026-09-06)。
+    if a.beta_run:
+        print(f"\n{'=' * 78}")
+        print(f"■ β圧縮の本番 — 日ごとに β の低い順に残す")
+        print(f"{'=' * 78}")
+        print(f"  ⛔ **TEST はこの事前チェックで既に印字してしまいました**"
+              f"(設計ミス)。まず TRAIN で落ちるかを見ます")
+        _KEEPS = [float(x) for x in a.beta_keeps.split(",") if x.strip()]
+        _RNGB = np.random.default_rng(20260906)
+
+        def _tailb(_res):
+            _dd = _res["daily"]
+            _mm: dict = {}
+            for _d, _v in _dd.items():
+                _mm[str(_d)[:7]] = _mm.get(str(_d)[:7], 0.0) + _v[0] + _v[1]
+            _mv = np.array([_mm[k] for k in sorted(_mm)], float)
+            _dv = np.array([_dd[k][0] + _dd[k][1] for k in sorted(_dd)], float)
+            if len(_mv) < 3 or len(_dv) < 20:
+                return None
+            _mu, _sd = float(_mv.mean()), float(_mv.std(ddof=1))
+            _cum = np.concatenate(([0.0], np.cumsum(_dv)))
+            return {"mu": _mu, "sd": _sd, "r": (_mu / _sd if _sd else 0.0),
+                    "cvar": float(np.sort(_dv)[
+                        :max(1, int(round(len(_dv) * .05)))].mean()),
+                    "worst": float(_dv.min()), "n": int(_res["n"]),
+                    "used": float(_res["used"]),
+                    "mdd": float(np.max(np.maximum.accumulate(_cum) - _cum))}
+
+        _wins = [("TRAIN", _train)] + ([("TEST", _test)] if a.beta_run_test
+                                       and _test is not None else [])
+        for _wn, _wf in _wins:
+            if _wf is None or _wf.empty or "beta" not in _wf.columns:
+                continue
+            _po = _pool_of(_wf)
+            _po = _po[_po["beta"].notna() & (_po["beta"] != 0.0)]
+            if _po.empty:
+                continue
+            _ndb = max(1, _po["date"].nunique())
+            _bb = _tailb(_make_ops_sim(_wf, _pool_of(_wf), _ndb)[0](
+                50, a.budget_man or 400.0, 0, False))
+            if not _bb:
+                continue
+            _allp = list(map(tuple, _po[["date", "symbol"]].to_numpy()))
+            # ★ 日ごとの β 順位(%)。**その日の候補の中で**切るので live で実装できる
+            _rk = _po.groupby("date")["beta"].rank(pct=True, method="first")
+            print(f"\n  ── {_wn} ── 基準 {_bb['n']:,}件 / 月平均 "
+                  f"{_bb['mu']:>+,.0f} / ÷σ {_bb['r']:.2f} / "
+                  f"CVaR {_bb['cvar']:>+,.0f} / 最悪日 {_bb['worst']:>+,.0f}")
+            print(f"    {'残す':<7}{'件数':>8}{'月平均':>11}{'÷σ':>6}"
+                  f"{'CVaR5%':>10}{'最悪日':>11}{'投入/日':>9}"
+                  f"{'等価σ':>10}{'等価CVaR':>10}{'等価最悪':>10}")
+            for _kp in _KEEPS:
+                _keepset = set(map(tuple,
+                                   _po[_rk <= _kp][["date", "symbol"]].to_numpy()))
+                _drop = set(_allp) - _keepset
+                if not _drop:
+                    continue
+                _wx = _wf[[(_d, _s) not in _drop
+                           for _d, _s in zip(_wf["date"], _wf["symbol"])]]
+                _st = _tailb(_make_ops_sim(_wx, _pool_of(_wx), _ndb)[0](
+                    50, a.budget_man or 400.0, 0, False))
+                if not _st:
+                    continue
+                _e1 = _bb["mu"] * (_st["sd"] / _bb["sd"] if _bb["sd"] else 1)
+                _e2 = _bb["mu"] * (_st["cvar"] / _bb["cvar"] if _bb["cvar"] else 1)
+                _e3 = _bb["mu"] * (_st["worst"] / _bb["worst"]
+                                   if _bb["worst"] else 1)
+                _w = "".join(c for c, ok in (("σ", _st["mu"] > _e1),
+                                             ("C", _st["mu"] > _e2),
+                                             ("W", _st["mu"] > _e3)) if ok) or "—"
+                print(f"    {f'{_kp * 100:.0f}%':<7}{_st['n']:>8,}"
+                      f"{_st['mu']:>+11,.0f}{_st['r']:>6.2f}{_st['cvar']:>+10,.0f}"
+                      f"{_st['worst']:>+11,.0f}{_st['used'] / 1e4:>8,.0f}万"
+                      f"{_e1:>+10,.0f}{_e2:>+10,.0f}{_e3:>+10,.0f}  {_w}")
+                # ★ 同数をランダムに落とした帯。**片側**で判定(§18.64 の教訓)
+                _bd = []
+                for _ in range(max(2, a.sector_cap_seeds)):
+                    _ix = _RNGB.choice(len(_allp), size=len(_drop), replace=False)
+                    _dr = {_allp[i] for i in _ix}
+                    _wr = _wf[[(_d, _s) not in _dr
+                               for _d, _s in zip(_wf["date"], _wf["symbol"])]]
+                    _rt = _tailb(_make_ops_sim(_wr, _pool_of(_wr), _ndb)[0](
+                        50, a.budget_man or 400.0, 0, False))
+                    if _rt:
+                        _bd.append(_rt)
+                if len(_bd) >= 2:
+                    _rr = np.array([x["r"] for x in _bd], float)
+                    _rc = np.array([x["cvar"] for x in _bd], float)
+                    _zr = ((_st["r"] - _rr.mean()) / _rr.std(ddof=1)
+                           if _rr.std(ddof=1) else 0.0)
+                    _zc = ((_st["cvar"] - _rc.mean()) / _rc.std(ddof=1)
+                           if _rc.std(ddof=1) else 0.0)
+                    print(f"        ランダムに同数({len(_drop):,}件)落とす帯"
+                          f"({len(_bd)}本): ÷σ 中央 {np.median(_rr):.2f} / "
+                          f"CVaR 中央 {np.median(_rc):>+10,.0f}")
+                    print(f"          → β順で落とした場合 ÷σ z={_zr:+.2f} / "
+                          f"CVaR z={_zc:+.2f}  "
+                          + ("✅ 両方ランダムより良い"
+                             if _zr >= 2.0 and _zc >= 2.0 else
+                             "⛔ ランダムより悪い"
+                             if _zr <= -2.0 or _zc <= -2.0 else
+                             "帯の中(ランダムと区別できない)"))
+        print(f"\n  {'=' * 68}")
+        print(f"  ★ 合格条件(回す前に宣言):")
+        print(f"    ① 等価σ・等価CVaR・等価最悪日 の **3つとも上回る**(σCW)")
+        print(f"    ② ランダム帯に対し ÷σ と CVaR の **両方が z≥+2**")
+        print(f"    ③ 同じ『残す割合』で TRAIN と TEST が同符号")
+        print(f"  ⛔ ①②を TRAIN で満たさなければ **そこで終了**。"
+              f"TEST は開けません")
+        print(f"  ⚠ 相関(TRAIN 0.27)で実効βは表の 0.27倍。"
+              f"天井は +2% 程度しかありません")
+        print(f"  {'=' * 68}")
+        sys.exit(0)
 
     print(f"\n  {'=' * 68}")
     print(f"  ★ 判定(回す前に宣言):")
