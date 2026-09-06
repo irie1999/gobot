@@ -3608,9 +3608,17 @@ if a.sector_scan:
                 _nd2 = max(1, _p2["date"].nunique())
                 _sim2, _, _ = _make_ops_sim(_wf2, _p2, _nd2)
                 _base2 = _sim2(50, a.budget_man or 400.0, 0, False)
-                _p3 = _p2[_p2["symbol"].map(_sec33).fillna("(不明)") != _wst[0]]
-                _sim3, _, _ = _make_ops_sim(_wf2, _p3, _nd2)
+                # ⛔⛔ **_pool_df を差し替えても効かない**(2026-09-06 に踏んだ)。
+                #   _ops_sim は `_src = _src_all if a.pool=="all" else _pool_df`
+                #   なので、既定(--pool all)では第1引数しか見ない。
+                #   → **元フレーム側を絞る**。プールはそこから作り直す。
+                _wf2x = _wf2[_wf2["symbol"].map(_sec33).fillna("(不明)") != _wst[0]]
+                _p3 = _pool_of(_wf2x)
+                _sim3, _, _ = _make_ops_sim(_wf2x, _p3, _nd2)
                 _ex2 = _sim3(50, a.budget_man or 400.0, 0, False)
+                if _ex2["pnl"] == _base2["pnl"]:
+                    print(f"      ⛔ {_wn2}: 除外しても1円も動きません。"
+                          f"フィルタが効いていない可能性があります")
                 _mo2 = _nd2 / 20.0
                 print(f"      {_wn2:<6} 除外なし {_base2['pnl']:>+12,.0f} → "
                       f"除外後 {_ex2['pnl']:>+12,.0f}  "
@@ -3637,11 +3645,17 @@ if a.sector_scan:
                                                     0, False)
             _out4 = [f"      {_wn3:<6} 上限なし {_b4['pnl']:>+12,.0f}"]
             for _cap4 in (2, 3, 4):
-                # 同じ日・同じ業種は |ギャップ| 上位 _cap4 件まで
-                _k4 = (_p4.sort_values("gap_bp", ascending=False)
-                       .groupby(["date", "_sec"]).head(_cap4))
-                _r4 = _make_ops_sim(_wf3, _k4, _nd3)[0](50, a.budget_man or 400.0,
-                                                        0, False)
+                # 同じ日・同じ業種は |ギャップ| 上位 _cap4 件まで。
+                # ⛔ 上と同じ理由で **元フレーム側から落とす**。合格候補
+                #   (_p4)の中で上限を超えた (日付,銘柄) を特定して除く。
+                _keep = set(map(tuple, _p4.sort_values("gap_bp", ascending=False)
+                                .groupby(["date", "_sec"]).head(_cap4)
+                                [["date", "symbol"]].to_numpy()))
+                _drop = set(map(tuple, _p4[["date", "symbol"]].to_numpy())) - _keep
+                _wf3x = _wf3[[(_d, _s) not in _drop
+                              for _d, _s in zip(_wf3["date"], _wf3["symbol"])]]
+                _r4 = _make_ops_sim(_wf3x, _pool_of(_wf3x),
+                                    _nd3)[0](50, a.budget_man or 400.0, 0, False)
                 _out4.append(f"        同業種 {_cap4}件まで {_r4['pnl']:>+12,.0f} "
                              f"(差 {_r4['pnl'] - _b4['pnl']:>+11,.0f} / "
                              f"月 {(_r4['pnl'] - _b4['pnl']) / _mo3:>+8,.0f}円)")
