@@ -1280,8 +1280,13 @@ def _newgap_build(days: int, min_price: float, max_price: float,
         _gt["負"] = _gt["件数"] - _gt["勝"]
         _gt["勝平均"] = _gt["勝計"] / _gt["勝"].clip(lower=1)
         _gt["負平均"] = _gt["負計"] / _gt["負"].clip(lower=1)
-        _gt["最大益"] = _g2["pnl"].max()
-        _gt["最大損"] = _g2["pnl"].min()
+        # ⛔ 勝ち/負けが0件の帯では max/min が **反対側の値**を拾う
+        #   (実際 〜100bp の帯は勝ち2件・負け0件なのに『最大損 +1,300』と出た)。
+        #   その側が空なら NaN にして "—" と表示する。
+        _gt["最大益"] = _g2["pnl"].apply(
+            lambda x: float(x[x > 0].max()) if (x > 0).any() else float("nan"))
+        _gt["最大損"] = _g2["pnl"].apply(
+            lambda x: float(x[x <= 0].min()) if (x <= 0).any() else float("nan"))
         # PF = 利益合計 / 損失合計(絶対値)。損失0なら無限大なので "—"
         _gt["PF"] = _gt["勝計"] / _gt["負計"].abs().where(_gt["負計"] != 0)
         _h.append(
@@ -1324,6 +1329,10 @@ def _newgap_build(days: int, min_price: float, max_price: float,
             'border-left:1px solid #334155">PF</th>'
             '<th style="text-align:right;padding:3px 10px">合計</th>'
             '<th style="text-align:right;padding:3px 10px">bp/件</th></tr>')
+        def _fmt_na(_v):
+            # NaN(その側が0件)は '—'。f-string の入れ子でクォートが
+            # 衝突するので関数にする
+            return "—" if _v != _v else f"{_v:+,.0f}"
         for _bn, _r in _gt.iterrows():
             if not int(_r["件数"]):
                 continue
@@ -1341,14 +1350,14 @@ def _newgap_build(days: int, min_price: float, max_price: float,
                 f'<td style="text-align:right;padding:3px 10px;color:#4ade80">'
                 f'{_r["勝平均"]:+,.0f}</td>'
                 f'<td style="text-align:right;padding:3px 10px;color:#4ade80">'
-                f'{_r["最大益"]:+,.0f}</td>'
+                f'{_fmt_na(_r["最大益"])}</td>'
                 # ── 負け ──
                 f'<td style="text-align:right;padding:3px 10px;color:#f87171;'
                 f'border-left:1px solid #334155">{int(_r["負"]):,}</td>'
                 f'<td style="text-align:right;padding:3px 10px;color:#f87171">'
                 f'{_r["負平均"]:+,.0f}</td>'
                 f'<td style="text-align:right;padding:3px 10px;color:#f87171">'
-                f'{_r["最大損"]:+,.0f}</td>'
+                f'{_fmt_na(_r["最大損"])}</td>'
                 # ── 合計 ──
                 f'<td style="text-align:right;padding:3px 10px;'
                 f'border-left:1px solid #334155;font-weight:700;'
