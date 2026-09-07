@@ -1302,6 +1302,99 @@ def _newgap_build(days: int, min_price: float, max_price: float,
     #     +0.651 / 19営業日すべてプラス / t=+14.37)ので、ライブは
     #     **小さいギャップから埋まって大きいのが予算落ちする** = レポートの
     #     ギャップ降順と systematic に逆。ここが効くかどうかが本題。
+    # ★★ 上限スイープ (2026-09-07 ユーザーの問い「1つ目のギャップと2つ目の
+    #   ギャップで、高すぎるのを検知して注文しないほうがいい、みたいなのは?」)
+    #   ⛔ **前例は棄却**。ギャップ上限150bp は §18.55⑧ で 月+49,587 → +21,075
+    #     (43%)。§18.63 の持ち越し91件も +135〜+630bp に散らばるので上限では
+    #     防げない。ただし **前日リターンの上限は一度も掃いていない**
+    #     (--sweep-grid が掃いたのは下限だけ)。
+    #   ⚠ **閾値を後から選ぶのは多重検定**(§18.53)。だから 前半/後半 を必ず
+    #     併記し、符号が揃わないものは採らない(§18.36 判定ルール2)。
+    #   ⚠ 出す条件は発注順の帯と同じ(基準タブのみ / 長い窓は明示したときだけ)
+    _cap_on = (_NG_ORD_TAB not in ("0", "false", "no")
+               and not variant and side == "short"
+               and (_NG_ORD_TAB in ("1", "true", "yes", "on")
+                    or (_NG_DAYS or days) <= 1500))
+    if _cap_on and len(_rows):
+        # ⛔ date は **文字列**。Series.quantile は文字列で TypeError になる
+        #   ("unsupported operand type(s) for -: 'str' and 'str'")。
+        #   営業日の一覧を作って真ん中を取る。
+        _uds = sorted(_rows["date"].astype(str).unique().tolist())
+        _half = _uds[len(_uds) // 2] if _uds else None
+        def _cap_row(_lb4, _mask):
+            _sub = _rows[_mask] if _mask is not None else _rows
+            if not len(_sub):
+                return None
+            _s4 = _newgap_sim(_sub, _ng_budget, _ng_watch, _NG_GAP_BP,
+                              _NG_RET1, order=_ng_order)
+            _d4 = _s4.get("days")
+            if _d4 is None or _d4.empty:
+                return None
+            _n4 = int(_d4["built"].sum())
+            _p4 = float(_d4["pnl"].sum())
+            _h1 = float(_d4[_d4["date"] <= _half]["pnl"].sum()) if _half else 0.0
+            _h2 = _p4 - _h1
+            return (_lb4, _n4, _p4, _p4 / max(1, _n4), _h1, _h2)
+        _base4 = _cap_row("上限なし（現行）", None)
+        _caps: list = [_base4] if _base4 else []
+        for _cg in (300.0, 500.0, 1000.0):
+            _caps.append(_cap_row(f"ギャップ ≤ {_cg:,.0f}bp",
+                                  _rows["gap_bp"].astype(float) <= _cg))
+        for _cr in (5.0, 8.0, 12.0):
+            _caps.append(_cap_row(f"前日リターン ≤ +{_cr:.0f}%",
+                                  _rows["ret1"].astype(float) <= _cr))
+        _caps = [c for c in _caps if c]
+        if len(_caps) >= 2 and _base4:
+            _crows = ""
+            for _lb4, _n4, _p4, _e4, _h1, _h2 in _caps:
+                _is_b = _lb4.startswith("上限なし")
+                _d_t = _p4 - _base4[2]
+                _d_1 = _h1 - _base4[4]
+                _d_2 = _h2 - _base4[5]
+                _ok = (not _is_b) and _d_1 > 0 and _d_2 > 0
+                _c4 = "#4ade80" if _ok else ("#e2e8f0" if _is_b else "#f87171")
+                _crows += (
+                    f'<tr style="{"background:#0f172a;font-weight:700" if _is_b else ""}">'
+                    f'<td style="padding:3px 10px">{_lb4}</td>'
+                    f'<td style="text-align:right;padding:3px 10px">{_n4:,}</td>'
+                    f'<td style="text-align:right;padding:3px 10px">{_p4:+,.0f}</td>'
+                    f'<td style="text-align:right;padding:3px 10px">{_e4:+,.0f}</td>'
+                    f'<td style="text-align:right;padding:3px 10px;color:{_c4}">'
+                    f'{"—" if _is_b else f"{_d_t:+,.0f}"}</td>'
+                    f'<td style="text-align:right;padding:3px 10px;color:{_c4}">'
+                    f'{"—" if _is_b else f"{_d_1:+,.0f}"}</td>'
+                    f'<td style="text-align:right;padding:3px 10px;color:{_c4}">'
+                    f'{"—" if _is_b else f"{_d_2:+,.0f}"}</td>'
+                    f'<td style="padding:3px 10px;color:{_c4}">'
+                    f'{"—" if _is_b else ("✓ 前半後半とも改善" if _ok else "❌")}'
+                    f'</td></tr>')
+            _h.append(
+                '<details style="margin:0 0 12px"><summary style="cursor:pointer;'
+                'color:#fbbf24;font-weight:700">▶ 上限を付けたらどうなるか'
+                '（高すぎるギャップ / 高すぎる前日リターンを建てない）</summary>'
+                '<div style="color:#94a3b8;font-size:0.78rem;margin:8px 0">'
+                '⛔ <b>前例は棄却です。</b>ギャップ上限150bp は §18.55⑧ で'
+                '月 +49,587 → <b>+21,075（43%）</b>。件数も円/件も落ちました。'
+                '§18.63 の「決済できず持ち越し」91件も建値ギャップが'
+                '<b>+135〜+630bp に散らばる</b>ので、上限では防げません。<br>'
+                '★ ただし <b>前日リターンの上限は一度も掃いていません</b>'
+                '（<code>--sweep-grid</code> が掃いたのは下限だけ）。<br>'
+                '⚠ <b>閾値を後から選ぶのは多重検定です</b>（§18.53）。'
+                '<b>前半・後半の両方で改善していなければ採らないこと</b>'
+                '（§18.36 判定ルール2）。片方だけプラスは期間への合わせ込みです。'
+                '</div>'
+                '<table style="border-collapse:collapse;font-size:0.8rem">'
+                '<tr style="color:#94a3b8"><th style="text-align:left;'
+                'padding:3px 10px">上限</th>'
+                '<th style="text-align:right;padding:3px 10px">建てた</th>'
+                '<th style="text-align:right;padding:3px 10px">合計</th>'
+                '<th style="text-align:right;padding:3px 10px">円/件</th>'
+                '<th style="text-align:right;padding:3px 10px">差</th>'
+                '<th style="text-align:right;padding:3px 10px">前半</th>'
+                '<th style="text-align:right;padding:3px 10px">後半</th>'
+                '<th style="padding:3px 10px">判定</th></tr>'
+                + _crows + '</table></details>')
+
     _ord_on = (_NG_ORD_TAB not in ("0", "false", "no")
                and not variant and side == "short"
                and (_NG_ORD_TAB in ("1", "true", "yes", "on")
