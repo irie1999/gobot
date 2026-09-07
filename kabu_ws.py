@@ -480,6 +480,10 @@ if __name__ == "__main__":
                 except Exception:
                     pass
                 continue
+            # ⛔ **REST 確認より前に**待ち時間を確定させる(2026-09-07)。
+            #   後で測ると診断の HTTP 往復が混ざり、--batch-wait 20 なのに
+            #   「待ちs 35.3」と出て意味が分からなくなる。
+            _waited = _time.time() - _t0
             _got = len(_arr)
             # ★★ 届かなかった銘柄を **REST で確かめる**。
             #   「PUSH が落とした」のか「そもそも今日まだ約定していない」のかで
@@ -493,9 +497,6 @@ if __name__ == "__main__":
                     _bb = {}
                 (_miss_traded if float((_bb or {}).get("OpeningPrice") or 0) > 0
                  else _miss_nottraded).append(_s)
-            # ★ そのバッチで **何秒 待ったか**。上限(--batch-wait)に張り付いて
-            #   いれば「早く抜けられずアイドルで落ちた」と分かる。
-            _waited = _time.time() - _t0
             _res.append((_bi, len(_want), _nok, _got, _waited, _first, _full,
                          _pct(0.5), len(_miss), len(_miss_traded),
                          len(_miss_nottraded), st.n_reconnect - _rc0))
@@ -586,6 +587,21 @@ if __name__ == "__main__":
                 return 36.6
             _c = _bp(_avg)
             print(f"\n  2バッチ目以降の『**90%が届くまで**』 平均 **{_avg:.1f}秒**")
+            # ★★ **実運用は PUSH + REST のハイブリッド**(2026-09-07)。
+            #   PUSH は10秒で90%届くが、残りは数十秒かかる(実測: 90秒待つと
+            #   未達2件 / 20秒で切ると13件)。live は待たずに、届いていない
+            #   銘柄だけ REST で読めばよい(k_open_confirm --ws が既にその形)。
+            #   → 現実的なコストは 90%点 + 未達ぶんの REST 往復。
+            _nmiss = [r[8] for r in _res[1:] if r[3] is not None]
+            if _nmiss:
+                _mavg = sum(_nmiss) / len(_nmiss)
+                _hyb = _avg + _mavg * 0.73        # 0.73秒/銘柄(§18.44 実測)
+                _ch = _bp(_hyb)
+                print(f"  ハイブリッド(PUSH で待たず、未達 平均{_mavg:.1f}件だけ"
+                      f" REST) → **{_hyb:.1f}秒 / 約 -{_ch:.1f}bp**"
+                      f"(残り +{15.7 - _ch:.1f}bp)")
+                print(f"    ⚠ 未達を待つより REST で取るほうが速い。"
+                      f"**PUSH の裾を待たないこと**")
             print(f"  → §18.44 の減衰カーブで **約 -{_c:.1f}bp**"
                   f"(N のグロスは +15.7bp/件)")
             if _c < 8.0:
