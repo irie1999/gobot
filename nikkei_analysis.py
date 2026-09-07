@@ -866,8 +866,14 @@ def _newgap_rows_to_trades(det, side: str = "short") -> list:
         _d = str(r.date)
         _md = f"{_d[5:7]}/{_d[8:10]}" if len(_d) >= 10 else _d
         # 同日決済。ショート pnl=(建値−決済値)×qty / ロング pnl=(決済値−建値)×qty
-        _ex = (float(r.entry_p) - float(r.pnl) / _NG_QTY if _short
-               else float(r.entry_p) + float(r.pnl) / _NG_QTY)
+        # ⛔⛔ 2026-09-08: ここが **_NG_QTY(100) 決め打ち**だった。増株タブでは
+        #   qty が 200 になるので、決済値も株数も必要資金も **全部ずれる**。
+        #   実際 09/01 は損益だけ2倍(+3,400→+6,800)になり、株数の列は100株、
+        #   必要資金は ¥508,600(100株ぶん)のままで、
+        #   「増株が効いていない」ようにしか見えなかった。det の qty を使う。
+        _q = int(getattr(r, "qty", _NG_QTY) or _NG_QTY)
+        _ex = (float(r.entry_p) - float(r.pnl) / _q if _short
+               else float(r.entry_p) + float(r.pnl) / _q)
         out.append({
             "symbol": str(r.symbol), "name": _nm.get(str(r.symbol), ""),
             "strategy": "N" if _short else "鏡像",
@@ -875,7 +881,7 @@ def _newgap_rows_to_trades(det, side: str = "short") -> list:
             "entry_dt": _md, "exit_dt": _md,
             "entry_time": "09:00", "exit_time": "15:30",
             "entry_p": float(r.entry_p), "exit_p": _ex,
-            "qty": _NG_QTY, "pnl": float(r.pnl),
+            "qty": _q, "pnl": float(r.pnl),
             "hold_days": 0, "days_to_fill": 0,
             "reason": "引け", "eh": "N" if _short else "鏡像",
             "is_short": _short,
