@@ -22531,21 +22531,43 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 #   スキャンは _NG_ROWS_CACHE で共有するので1本目だけ重いが、
                 #   nocap は中で予算シミュを20回まわす(4通り比較 + watch×予算
                 #   4×4)ので、そこが効いている可能性がある。名前で分ける。
-                with _ptimer(f"Nタブ {_ng_lbl.replace('★ ', '')}"):
-                    _ng = _newgap_build(days, _ng_pmin, _ng_pmax, _ng_syms,
-                                        side=_ng_side, variant=_ng_var)
-                if not (_ng and _ng.get("head")):
-                    continue
-                if _ng.get("_raw"):
-                    _ng_txt_items.append(
-                        (_ng_lbl.replace("★ ", ""), _ng["_raw"]))
-                _ng_build_one(_ng, _ng_key, _ng_lbl, _ng_c1, _ng_c2)
+                # ⛔⛔ 2026-09-07: **1本が落ちると残り全部を失っていた**。
+                #   19年窓で HTML が MemoryError になったとき、後続の変種も
+                #   テキストレポートも丸ごと消えた(n_days.csv だけが残り、
+                #   `n_report_*.txt` がフォルダに無い、という状態になった)。
+                #   → 変種ごとに囲う。落ちた1本だけ諦めて次へ進む。
+                try:
+                    with _ptimer(f"Nタブ {_ng_lbl.replace('★ ', '')}"):
+                        _ng = _newgap_build(days, _ng_pmin, _ng_pmax, _ng_syms,
+                                            side=_ng_side, variant=_ng_var)
+                    if not (_ng and _ng.get("head")):
+                        continue
+                    # ★ テキスト用は **HTML を組む前**に積む。HTML で落ちても
+                    #   数字は残る(テキストのほうが軽い = 落ちにくい)。
+                    if _ng.get("_raw"):
+                        _ng_txt_items.append(
+                            (_ng_lbl.replace("★ ", ""), _ng["_raw"]))
+                    _ng_build_one(_ng, _ng_key, _ng_lbl, _ng_c1, _ng_c2)
+                except KeyboardInterrupt:
+                    raise
+                except BaseException as _nv:
+                    import traceback as _tbv
+                    print(f"[新方式N] ⛔ 『{_ng_lbl}』を飛ばします: "
+                          f"**{type(_nv).__name__}**: {_nv}", flush=True)
+                    if isinstance(_nv, MemoryError):
+                        print("   ★ メモリ不足です。窓を短くしてください:"
+                              "  .\\nlong 4200  (11.5年 / 母集団87%)", flush=True)
+                    _tbv.print_exc()
             # ★ 全変種を1つのテキストに(HTML を目で写さないため)
+            #   ⚠ 途中で落ちた変種があっても、**通ったぶんだけ必ず書く**
             if _ng_txt_items and _NG_TXT.lower() not in ("0", "off", "no", ""):
                 _newgap_txt_report(
                     _ng_txt_items,
                     (f"n_report_{_dtt.date.today():%Y%m%d}.txt"
                      if _NG_TXT.lower() == "auto" else _NG_TXT))
+            elif not _ng_txt_items:
+                print("  ⚠ [N] テキストレポートは書けません"
+                      "（出せた変種が1つもありませんでした）", flush=True)
             print(f"[新方式N] {len(_ng_syms):,}銘柄 / "
                   f"{_time.time() - _t_ng:.1f}s", flush=True)
         except BaseException as _nge:
