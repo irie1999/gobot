@@ -329,13 +329,21 @@ def main() -> int:
         print(f"    営業日 {len(days)} / 前日の1位をそのまま使って当日も1位: "
               f"{hit}/{len(cont)}日 ({hit / max(len(cont), 1) * 100:.1f}%)")
         if miss:
-            yrs = len({d // 10000 for d in days})
             print(f"    交代した日 {len(miss)}回 ← ここは前日の値では外す（1日ぶんだけ）:")
             for x, tx, y, ty in miss:
                 print(f"      {x} ({tx}) → {y} ({ty})")
-            exp = 4 * yrs
-            note = "正常" if abs(len(miss) - exp) <= 1 else "⛔ 多すぎ = 選び方が不安定"
-            print(f"    年4回(四半期SQ) × {yrs}年 ≒ {exp}回 に対して {len(miss)}回 → {note}")
+            # ⛔ 期待回数は「年数×4」ではない。飛び飛びに買った月にも対応するため、
+            #   **データがある四半期月(3/6/9/12)の数**で数える。乗り換えは
+            #   その月のSQ(第2金曜)の前営業日に起きるので、1限月月につき1回。
+            qmonths = sorted({m for m in {d // 100 for d in days} if m % 100 in (3, 6, 9, 12)})
+            exp = len(qmonths)
+            if len(miss) > exp + 1:
+                note = "⛔ 多すぎ = 選び方が不安定"
+            elif len(miss) < exp - 1:
+                note = "⛔ 少なすぎ = 交代を取りこぼしている"
+            else:
+                note = "正常"
+            print(f"    データがある四半期月 {exp}個 に対して交代 {len(miss)}回 → {note}")
         else:
             print("    ⚠ 交代が1回も無い = この期間では限月交代を検査できていません")
         print()
