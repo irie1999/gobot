@@ -345,10 +345,55 @@ if __name__ == "__main__":
             #   (実際 登録0件なのに『取得49』と表示して混乱した)。
             if _nok <= 0:
                 _res.append((_bi, len(_b), 0, None, _t_reg, None, None))
-                print(f"  [batch{_bi}] 要求{len(_b)} **登録に失敗** → 測定外。"
-                      f"1件でも無効なコードがあると PUT 全体が 400 で落ちます"
-                      f"(部分受理なし)。--symbols で有効な銘柄を明示するか、"
-                      f"件数を減らしてください", flush=True)
+                print(f"  [batch{_bi}] 要求{len(_b)} **登録に失敗** → 測定外",
+                      flush=True)
+                # ★★ 原因を切り分ける。意味が正反対の2つがありうる:
+                #   (a) 無効なコードが混ざった → 実運用では起きない(回せる)
+                #   (b) 総数が50を超えた/解除が効かない → **回すこと自体が不可能**
+                #   半分ずつ試せば (a) なら犯人が特定でき、(b) なら
+                #   「半分(25件)でも落ちる」という形で出る。
+                print("  [診断] 半分ずつ試して原因を切り分けます", flush=True)
+
+                def _try(_sub: list) -> bool:
+                    try:
+                        cli.unregister_all()
+                    except Exception:
+                        pass
+                    _rr2 = cli.register_many(sorted(_sub))
+                    return len((_rr2 or {}).get("RegistList") or []) > 0
+
+                _cur = sorted(_want)
+                _guilty: list = []
+                for _depth in range(8):        # 50件なら6回で1件まで絞れる
+                    if len(_cur) <= 1:
+                        _guilty = _cur
+                        break
+                    _h = len(_cur) // 2
+                    _L, _R = _cur[:_h], _cur[_h:]
+                    _okL = _try(_L)
+                    _okR = _try(_R)
+                    print(f"    左{len(_L)}件={'OK' if _okL else 'NG'} / "
+                          f"右{len(_R)}件={'OK' if _okR else 'NG'}", flush=True)
+                    if _okL and _okR:
+                        # ⛔ 半分ずつなら両方通る = **件数の問題**(b)
+                        print(f"    ⛔ **半分ずつなら両方通ります**。"
+                              f"つまり無効コードではなく "
+                              f"**総登録数が50を超えている**のが原因です。"
+                              f"unregister_all が効いていない可能性 → "
+                              f"**回すのは不可能**", flush=True)
+                        _guilty = []
+                        break
+                    _cur = _L if not _okL else _R
+                else:
+                    _guilty = _cur
+                if _guilty:
+                    print(f"    ✅ **犯人は {', '.join(_guilty)}**(無効なコード)。"
+                          f"件数の問題ではないので、有効な銘柄だけなら"
+                          f"**回せます**", flush=True)
+                try:
+                    cli.unregister_all()
+                except Exception:
+                    pass
                 continue
             _got = len({s for s in _want
                         if float((st.snapshot().get(s) or {}).get(
