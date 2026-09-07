@@ -726,11 +726,13 @@ _mode_note = (
     "⛔ **発注しません**（記録のみ。出すなら --execute）")
 print(f"""
 {'=' * 74}
-■ J(09:00確認方式) — {_dt.date.today()}
+■ {'N(09:00確認方式)' if args.n_mode else 'J(09:00確認方式)'} — {_dt.date.today()}
 {'=' * 74}
   {_mode_note}
   候補 {len(_syms):,}銘柄 / {args.batch}件バッチ × {-(-len(_syms) // args.batch)}回
-  合格 = 始値が前日終値 {args.gap_bp:+.0f}bp 以上（{args.guard_bp:+.0f}bp 超は見送り）
+  合格 = 始値が前日終値 {args.gap_bp:+.0f}bp 以上{
+    '（上限なし）' if args.n_mode else f'（{args.guard_bp:+.0f}bp 超は見送り）'}{
+    f' / 始値も {args.min_price:,.0f}〜{args.max_price:,.0f}円' if args.n_mode else ''}
   予算 {args.budget:.0f}万 / 1銘柄上限 {args.max_yen:.0f}万 / 最大{args.max_lot}単元
   09:00に配る予算 {args.budget * args.g1:.0f}万 (--g1 {args.g1:g}){
     '' if args.g1 >= 1.0 else
