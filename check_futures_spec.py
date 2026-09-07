@@ -237,8 +237,9 @@ def main() -> int:
             for (td, cm), v in r["vol"].items():
                 if td not in top_d or v > r["vol"][(td, top_d[td])]:
                     top_d[td] = cm
-            pre_full = sum(1 for td, cm in top_d.items()
-                           if len(r["pre_min"].get((td, cm), ())) == want)
+            pre_ng = sorted(td for td, cm in top_d.items()
+                            if len(r["pre_min"].get((td, cm), ())) != want)
+            pre_full = len(top_d) - len(pre_ng)
             bad: list[str] = []
             soft: list[str] = []
             if r["missing"]:
@@ -252,8 +253,15 @@ def main() -> int:
                     bad.append("日中セッションなし")
                 if a.pre_from not in r["day_times"]:
                     bad.append(f"{a.pre_from:04d}なし(時刻が終了基準?)")
-                if pre_full != ndays:
-                    soft.append(f"寄前欠け {ndays - pre_full}日")
+                if pre_ng:
+                    # ⛔ 日付を必ず出す。いちばん荒れた日ほど欠けやすく、そこが
+                    #   欠けていると「危険日を当てる」研究が成り立たない
+                    det = ", ".join(
+                        f"{td}({len(r['pre_min'].get((td, top_d[td]), ()))}/{want}分)"
+                        for td in pre_ng[:5])
+                    if len(pre_ng) > 5:
+                        det += " …"
+                    soft.append(f"寄前欠け {len(pre_ng)}日 [{det}]")
                 if r["vol0"]:
                     soft.append(f"出来高0が{r['vol0']}行")
                 if r["bad"]:
@@ -299,17 +307,35 @@ def main() -> int:
         if len(days) < 2:
             print("\n  ⚠ 営業日が足りず限月交代を検査できません")
             continue
-        miss = [(days[i - 1], top[days[i - 1]], days[i], top[days[i]])
-                for i in range(1, len(days)) if top[days[i - 1]] != top[days[i]]]
-        hit = len(days) - 1 - len(miss)
+        # ⛔ 買っていない月をまたぐ「継ぎ目」を交代と数えない。
+        #   月が飛んでいたら、その隣り合わせは連続した営業日ではない。
+        def _gap(d0: int, d1: int) -> bool:
+            m0, m1 = d0 // 100, d1 // 100
+            if m0 == m1:
+                return False
+            y0, mm0 = divmod(m0, 100)
+            y1, mm1 = divmod(m1, 100)
+            return (y1 * 12 + mm1) - (y0 * 12 + mm0) > 1
+
+        pairs = [(days[i - 1], days[i]) for i in range(1, len(days))]
+        seam = [(x, y) for x, y in pairs if _gap(x, y)]
+        cont = [(x, y) for x, y in pairs if not _gap(x, y)]
+        miss = [(x, top[x], y, top[y]) for x, y in cont if top[x] != top[y]]
+        hit = len(cont) - len(miss)
         print(f"\n  ■ 中心限月（日中の出来高1位）")
+        if seam:
+            print(f"    ⚠ 買っていない月の継ぎ目 {len(seam)}箇所は判定から除外: "
+                  + ", ".join(f"{x}→{y}" for x, y in seam))
         print(f"    営業日 {len(days)} / 前日の1位をそのまま使って当日も1位: "
-              f"{hit}/{len(days) - 1}日 ({hit / max(len(days) - 1, 1) * 100:.1f}%)")
+              f"{hit}/{len(cont)}日 ({hit / max(len(cont), 1) * 100:.1f}%)")
         if miss:
+            yrs = len({d // 10000 for d in days})
             print(f"    交代した日 {len(miss)}回 ← ここは前日の値では外す（1日ぶんだけ）:")
             for x, tx, y, ty in miss:
                 print(f"      {x} ({tx}) → {y} ({ty})")
-            print("    ⚠ 交代は年4回(四半期SQ)が正常。もっと多いなら選び方が不安定です")
+            exp = 4 * yrs
+            note = "正常" if abs(len(miss) - exp) <= 1 else "⛔ 多すぎ = 選び方が不安定"
+            print(f"    年4回(四半期SQ) × {yrs}年 ≒ {exp}回 に対して {len(miss)}回 → {note}")
         else:
             print("    ⚠ 交代が1回も無い = この期間では限月交代を検査できていません")
         print()
