@@ -541,8 +541,10 @@ def fetch(symbol: str, backtest_days: int = BACKTEST_DAYS,
             # ⛔ 取得時刻の印は **トリミングの前** に読む
             #   (スライスで .attrs が落ちる版があるため)
             _fetched_at = None
+            _asked_from = None
             try:
                 _fetched_at = df.attrs.get("fetched_at")
+                _asked_from = df.attrs.get("asked_from")
             except Exception:
                 pass
             # 未確定バー (場中の今日のバー) を除去 → 前営業日確定終値までで判定
@@ -562,7 +564,24 @@ def fetch(symbol: str, backtest_days: int = BACKTEST_DAYS,
                     if min_start_date is not None:
                         oldest_bar  = df.index[0]
                         oldest_date = oldest_bar.date() if hasattr(oldest_bar, "date") else oldest_bar
-                        if oldest_date > min_start_date:
+                        # ⛔⛔ 2026-09-07: ここが **毎回 再ダウンロード**を起こしていた。
+                        #   2016年上場の銘柄に min_start_date=2006 を要求すると、
+                        #   何度取り直しても最古は2016のままなので `oldest_date >
+                        #   min_start_date` が永久に成立し、実行のたびに yfinance を
+                        #   叩く。`.\nlong 7000` で 1,529銘柄中 **349銘柄(23%)** が該当
+                        #   (check_daily_span の実測: 7,000日に届くのは 77.2%)。
+                        #   → 「どこまで遡って要求したか」を刻んでおき、既にその日より
+                        #     前を要求済みなら **それ以上は存在しない**とみなす。
+                        _asked = None
+                        try:
+                            if _asked_from:      # ⛔ トリミング前に読んだ値を使う
+                                _asked = datetime.strptime(
+                                    str(_asked_from)[:10], "%Y-%m-%d").date()
+                        except Exception:
+                            _asked = None
+                        _enough = (oldest_date <= min_start_date
+                                   or (_asked is not None and _asked <= min_start_date))
+                        if not _enough:
                             pass  # キャッシュが足りない → fall through で再取得
                         else:
                             _cleaned = _clean_prices(df)
@@ -635,6 +654,11 @@ def fetch(symbol: str, backtest_days: int = BACKTEST_DAYS,
             # ★ 取得時刻を刻む。これが無いと「引け直後に取った暫定終値」と
             #   「翌日以降に取った確定終値」を区別できない (2026-09-04 の事故)。
             df_out.attrs["fetched_at"] = datetime.now(JST).isoformat()
+            # ★ **どこまで遡って要求したか**。これが無いと、上場が新しい銘柄に
+            #   長い min_start_date を要求したとき「取れなかった=キャッシュ不足」と
+            #   読んで **毎回 再ダウンロード**する(2026-09-07)。要求済みの日より
+            #   前を欲しがられたときだけ取り直せばよい。
+            df_out.attrs["asked_from"] = dl_start
         except Exception:
             pass
         try:
