@@ -721,6 +721,14 @@ _NG_BUD2 = float(os.environ.get("LSS_NEWGAP_BUDGET2", "0") or 0)
 #   ⛔ 何度もメモリ不足で落ちたので、`.\nlong` では既定でこちら。
 _NG_NO_DETAIL = os.environ.get("LSS_NEWGAP_NO_DETAIL", "0").strip().lower() \
     not in ("0", "false", "no", "")
+# ★★ **明細は基準タブ(★新方式N)だけ** (2026-09-08 ユーザー指示
+#   「明細は作成してほしい それはよく見ています 明細以外で軽くして」)。
+#   明細そのものは残すが、鏡像 / 🔓制限なし / 予算800万 は集計だけにする。
+#   同じ形の明細が4本並ぶのが重さの主因で、実際に読むのは基準タブ。
+#   ⚠ 2026-09-08 ユーザー指示「すべてのtabに明細はのこして」→ **既定OFF**。
+#     明細は全タブに出す。軽くするのは明細以外でやる。
+_NG_DETAIL_BASE = os.environ.get("LSS_NEWGAP_DETAIL_BASE", "0").strip().lower() \
+    not in ("0", "false", "no", "")
 # ★★ 発注順の比較 (2026-09-07 ユーザーの問い「合格33件で予算は9件。
 #   この9件の選び方はランダムしかない?」)。
 #   ⛔ **2条件を1回ずつ比べて差を語らない**(§18.24)。ランダムを何本か回して
@@ -22950,21 +22958,24 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                     # ⛔ 日別カードの日数を切る。19年窓(4,706営業日)の HTML は
                     #   文字列連結で MemoryError になる(2026-09-07 実測)。
                     #   月別サマリー・合計は全期間のまま(別計算)。
-                    if _NG_NO_DETAIL:
+                    # ⚠ 変種タブは明細を作らない(既定)。読むのは基準タブ。
+                    _skip_det = (_NG_NO_DETAIL
+                                 or (_NG_DETAIL_BASE and key != "newgap"))
+                    if _skip_det:
                         # ⛔ 明細を作らない。HTML の大半はここ。
                         _ng_common = (
                             '<div style="background:#1e293b;'
                             'border:1px solid #334155;border-radius:6px;'
                             'padding:10px 14px;font-size:0.82rem;color:#94a3b8">'
-                            f'📄 <b>明細は出していません</b>（{len(_ng_tr):,}件）。'
-                            '月別サマリー・日別カード・取引テーブルが HTML の'
-                            '大半を占め、<b>何度もメモリ不足で落ちた</b>ためです。'
-                            '<b style="color:#e2e8f0">同じ数字は '
-                            '<code>n_report_日付.txt</code> にあります。</b><br>'
+                            f'📄 <b>この変種は明細を出していません</b>'
+                            f'（{len(_ng_tr):,}件）。同じ形の明細が何本も並ぶのが'
+                            '重さの主因なので、<b style="color:#e2e8f0">明細は'
+                            '「★ 新方式N」タブだけ</b>に出しています。<br>'
                             '上の集計（KPI / 予算スイープ / 年別 / ギャップ帯別 / '
-                            '50件の壁 / 執行コスト）は全期間ぶんで正しい値です。<br>'
-                            '出すなら <code>set LSS_NEWGAP_NO_DETAIL=0</code>'
-                            '（落ちるかもしれません）。</div>')
+                            '50件の壁 / 執行コスト）は全期間ぶんで正しい値です。'
+                            '同じ数字は <code>n_report_日付.txt</code> にもあります。<br>'
+                            '全部の明細を出すなら '
+                            '<code>set LSS_NEWGAP_DETAIL_BASE=0</code>。</div>')
                     else:
                         _ng_common = (_dup_toggle_html(_ng_tr, _ng_bd, _ng_dates,
                                                        _dseq, key,
@@ -23471,6 +23482,33 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     #     MemoryError になった。join は1回しか確保しない。
     _eh_btn = "".join(_eh_btn_L)
     _eh_pane = "".join(_eh_pane_L)
+
+    # ★★ **どの部品が何MBか**を出す (2026-09-08)。
+    #   何度もメモリ不足で落ちて、そのたびに当てずっぽうで削ってきた。
+    #   §18.38「速度も推測で潰さない」と同じで、大きさも推測で潰さない。
+    try:
+        _parts = [
+            ("Nタブ+E/H/J/K/L(_eh_pane)", _eh_pane),
+            ("全取引の行(trade_rows_all)", trade_rows_all),
+            ("BT70の行", trade_rows_bt70),
+            ("BT40の行", trade_rows_bt40),
+            ("BT60の行", trade_rows_bt60),
+            ("決済日別ペイン", _exit_pane_or_narrow),
+            ("400万円ペイン", _bt40liq_pane),
+            ("スクリプト別サマリー", strat_summary_html),
+            ("設定別サマリー(sum_rows)", sum_rows),
+            ("細目(fine_rows)", fine_rows),
+        ]
+        _tot_b = sum(len(str(_v)) for _, _v in _parts)
+        if _tot_b > 2_000_000:      # 2MB 未満なら黙っている
+            print(f"  [HTML内訳] 主要部品 合計 {_tot_b / 1e6:.1f}MB", flush=True)
+            for _nm, _v in sorted(_parts, key=lambda kv: -len(str(kv[1])))[:6]:
+                _b2 = len(str(_v))
+                if _b2 > 100_000:
+                    print(f"     {_b2 / 1e6:6.1f}MB  ({_b2 / _tot_b * 100:4.1f}%)  {_nm}",
+                          flush=True)
+    except Exception as _sz:
+        print(f"  ⚠ HTML内訳を出せません: {_sz}", flush=True)
 
     return f"""
 <h2>直近{days}日 取引損益 <span style="font-size:0.8rem;color:#64748b;font-weight:400">（{since} 〜 {until}）</span></h2>

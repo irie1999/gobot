@@ -139,8 +139,14 @@ REM   running the machine out of memory. Everything you actually judge
 REM   on is in the head of the tab (KPI, budget sweep, per-year,
 REM   per-gap-band, the 50-name wall, execution cost) and the same
 REM   numbers are written to n_report_YYYYMMDD.txt.
-REM   Turn them back on with:  set LSS_NEWGAP_NO_DETAIL=0
-if not defined LSS_NEWGAP_NO_DETAIL set "LSS_NEWGAP_NO_DETAIL=1"
+REM   2026-09-08: THE DETAIL STAYS, ON EVERY TAB. The user reads it.
+REM   Everything else got cut instead - see LSS_NEWGAP_ONLY above, plus the
+REM   bt70/bt40 row builders and the exit-day pane, which were being built
+REM   every run without any flag stopping them.
+REM   The run now prints [HTML内訳] naming the biggest pieces in MB, so the
+REM   next thing to cut gets picked from a number, not from a guess.
+REM   Base tab only: set LSS_NEWGAP_DETAIL_BASE=1
+REM   No detail:     set LSS_NEWGAP_NO_DETAIL=1
 REM a second N tab at a different budget. 800 because the budget sweep
 REM showed the marginal money turning NEGATIVE past it (200-400 +107,
 REM 400-600 +58, 600-800 +12, 800-1200 -23 yen per 10k of extra peak).
