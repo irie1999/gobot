@@ -695,6 +695,13 @@ _NG_DAYS = int(os.environ.get("LSS_NEWGAP_DAYS", "0"))
 #     メモリ不足**になり VS Code が oom で落ちた。カードは直近1年あれば
 #     足りる(それ以前を日ごとに見ることはない)。全部見るなら =0。
 _NG_MAX_DAYS = int(os.environ.get("LSS_NEWGAP_MAX_DAYS", "250"))
+# ★★ **N のタブだけにする** (2026-09-08 ユーザー指示「こんなにtabいらない
+#   Nだけでいい」)。400万円×流動性順 / H / J / L / K の明細タブを作らない。
+#   ⛔ ここは MemoryError が出ていた場所そのもの(`_eh_pane += (...123行...)`)
+#     なので、要らないものを作らないのが最も効く。
+#   ⚠ 集計・検定の数字には影響しない(タブを描かないだけ)。
+_NG_ONLY = os.environ.get("LSS_NEWGAP_ONLY", "0").strip().lower() \
+    not in ("0", "false", "no", "")
 # ★★ 発注順の比較 (2026-09-07 ユーザーの問い「合格33件で予算は9件。
 #   この9件の選び方はランダムしかない?」)。
 #   ⛔ **2条件を1回ずつ比べて差を語らない**(§18.24)。ランダムを何本か回して
@@ -18258,7 +18265,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                  f'\'bt60\')" style="border-color:#16a34a">🎯 BT60以上 '
                  f'<span style="font-size:0.72rem;color:#86efac">'
                  f'({len(bt60_trades)})</span></button>')
-    if _LSS_ORDER_MODE:
+    # ⚠ LSS_NEWGAP_ONLY=1 のときは 400万円タブも作らない(N だけにする)
+    if _LSS_ORDER_MODE and not _NG_ONLY:
         _bt40liq_btn = (
             f'<button class="detail-tab-btn{_act("budget")}" onclick="switchDetailTab({_dseq},\'budget\')" '
             f'style="border-color:#38bdf8">💰 {_budget_man}万円×{_ORD_LBL}×日別'
@@ -22187,7 +22195,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                      "⛔ 候補は中央154件・最大614件なので、kabu 単体では"
                      "<b>実装できません</b>(登録上限50件 / 平均4バッチ必要)。"
                      "楽天RSS 等の多銘柄ソースか、50件ずつの回し読みが要ります")}
-    for _ehk in ("E", "H", "J", "L", "K"):
+    if _NG_ONLY:
+        print("  [新方式N] LSS_NEWGAP_ONLY=1: N 以外の明細タブ"
+              "(400万円×流動性順 / E / H / J / L / K)は作りません", flush=True)
+    for _ehk in (() if _NG_ONLY else ("E", "H", "J", "L", "K")):
         if _ehk == "E" and not _SHOW_E_TABS:
             continue          # ⚖比較の E 列は残る。明細タブだけ出さない
         _g = _eh_grid.get(_ehk)

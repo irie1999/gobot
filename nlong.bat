@@ -2,7 +2,7 @@
 REM ============================================================
 REM nlong.bat - run the report with a LONG window FOR N ONLY
 REM
-REM   .\nlong 700        N over 700 days, 3 tabs   (DEFAULT - fits in RAM)
+REM   .\nlong 700        N over 700 days, 3 tabs, H pane only  (DEFAULT)
 REM   .\nlong 700 all    N over 700 days, all 7 tabs
 REM   .\nlong 4200       11.5 years, 3 tabs
 REM
@@ -102,7 +102,8 @@ echo  N over %NDAYS% days  (daily bars only - no 5-min, no lss)
 echo    the 5-min tabs stay at --days 180
 echo    heavy analysis blocks are OFF
 echo.
-echo    N TABS: N / mirror / no-50-cap    (add "all" for 7)
+echo    N TABS ONLY: N / mirror / no-50-cap    (add "all" for 7)
+echo    the 4M-yen / H / J / L / K tabs are NOT built
 echo    plus n_report_YYYYMMDD.txt and n_days.csv
 echo    N opens first.
 echo.
@@ -126,6 +127,11 @@ set "LSS_HEAVY_BLOCKS=0"
 set "LSS_PREOPEN_TAB=0"
 
 REM every N variant on
+REM *** N TABS ONLY. *** The 4M-yen / H / J / L / K detail tabs are not
+REM   built at all. That block is exactly where the MemoryError kept
+REM   happening, and this .bat exists to look at N. Set it to 0 if you
+REM   want the usual tabs back.
+if not defined LSS_NEWGAP_ONLY set "LSS_NEWGAP_ONLY=1"
 set "LSS_NEWGAP_MIRROR=1"
 set "LSS_NEWGAP_NOCAP=1"
 set "LSS_NEWGAP_CAP=1"
@@ -155,4 +161,14 @@ REM *** %2 may be the word "all", which is OURS - it must NOT reach python.
 REM   Without this, run_signals_holdout_all.py sees a stray positional arg.
 set "PASS=%3 %4 %5 %6 %7 %8 %9"
 if /i not "%~2"=="all" set "PASS=%2 %3 %4 %5 %6 %7 %8 %9"
-call "%~dp0dailyfast.bat" --days 180 --no-serve %PASS%
+REM *** --no-lss: BUILD ONLY THE H PANE. ***
+REM   The lss pane is what kept dying. Its traceback was
+REM     nikkei_analysis.py  _eh_pane += (...123 lines...)  MemoryError
+REM   and it died BEFORE the N tabs even started - so trimming N tabs
+REM   never helped it. Meanwhile the H pane finished in 45s at 47MB with
+REM   all 7 N variants. The N tabs are IDENTICAL in both panes, so the
+REM   lss pane adds nothing here and costs a whole second report.
+REM   Roughly half the time and half the memory.
+REM   If you ever need the lss pane, run .\dailyfast directly instead -
+REM   this .bat is for looking at N, and N is the same in both panes.
+call "%~dp0dailyfast.bat" --days 180 --no-serve --no-lss %PASS%
