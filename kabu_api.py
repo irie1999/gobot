@@ -306,19 +306,53 @@ class KabuClient:
                 self._registered.add((str(s), exchange))
         return _data
 
-    def unregister(self, symbol: int | str, exchange: int = EXCHANGE_TOSHO) -> None:
-        """銘柄登録を解除 (PUT /unregister)。登録上限(50銘柄)対策で使う。"""
-        key = (str(symbol), exchange)
+    def unregister(self, symbol: int | str, exchange: int = EXCHANGE_TOSHO) -> bool:
+        """銘柄登録を解除 (PUT /unregister)。登録上限(50銘柄)対策で使う。
+
+        ⛔⛔ **成否を返す**(2026-09-07 修正)。以前は例外を握り潰したうえ
+          `finally` で成否に関係なく `_registered` から消していた。つまり
+          サーバに残っているのにクライアントは「消えた」と思い込む
+          fail-open。§18.48 ⑦ で register に同じ穴を直したのに、
+          unregister に残っていた。
+          実害: 45件を個別解除 → 429 で大半が失敗 → それでも消えたことに
+          して45件を追加登録 → 総数が50を超えて 400(2026-09-07 実測)。
+        """
+        return self.unregister_many([symbol], exchange)
+
+    def unregister_many(self, symbols, exchange: int = EXCHANGE_TOSHO) -> bool:
+        """複数銘柄を **1回の PUT で** 解除する。
+
+        ⛔ 1件ずつ往復すると銘柄数ぶん HTTP が出て 429 を招く
+          (2026-09-07: 45件を個別解除して実際にそうなった)。
+          /unregister は register と同じく Symbols 配列を受けるので1回で済む。
+
+        返り値: True=解除できた / False=失敗(この場合 _registered は消さない)。
+        """
+        _tgt = [s for s in symbols if (str(s), exchange) in self._registered]
+        if not _tgt:
+            return True
         url = f"{self.base_url}/kabusapi/unregister"
-        body = {"Symbols": [{"Symbol": str(symbol), "Exchange": exchange}]}
-        try:
-            r = requests.put(url, headers=self._headers(with_content=True),
-                             json=body, timeout=self.timeout)
-            r.raise_for_status()
-        except Exception:
-            pass
-        finally:
-            self._registered.discard(key)
+        body = {"Symbols": [{"Symbol": str(s), "Exchange": exchange}
+                            for s in _tgt]}
+        for _try in range(5):
+            try:
+                r = requests.put(url, headers=self._headers(with_content=True),
+                                 json=body, timeout=self.timeout)
+                if r.status_code == 429:
+                    _w = 1.0 * (_try + 1)
+                    print(f"  ⚠ unregister レート制限(429): {_w:.1f}秒待って"
+                          f"再試行 ({_try + 1}/5)")
+                    time.sleep(_w)
+                    continue
+                r.raise_for_status()
+                for s in _tgt:
+                    self._registered.discard((str(s), exchange))
+                return True
+            except Exception as e:
+                print(f"  ⚠ 銘柄解除(unregister)失敗 ({len(_tgt)}件): {e}")
+                return False
+        print(f"  ⚠ 銘柄解除(unregister)が429で5回失敗しました ({len(_tgt)}件)")
+        return False
 
     def unregister_all(self) -> bool:
         """登録銘柄を **全解除** (PUT /unregister/all)。

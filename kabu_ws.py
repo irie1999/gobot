@@ -356,13 +356,20 @@ if __name__ == "__main__":
             _ka = max(0, a.keep_alive)
             if _ka > 0 and _prev:
                 _drop = sorted(_prev)[:max(0, len(_prev) - _ka)]
-                for _s in _drop:
+                # ⛔ **1件ずつ解除しない**(2026-09-07 の失敗)。45回の HTTP で
+                #   429 に当たり、失敗を握り潰したまま追加登録して 400 になった。
+                #   一括で解除し、**成否を必ず見る**。
+                if not cli.unregister_many(_drop):
+                    print(f"  ⛔ batch{_bi}: {len(_drop)}件の解除に失敗しました。"
+                          f"枠が空かないので全解除に切り替えます", flush=True)
                     try:
-                        cli.unregister(_s)
+                        cli.unregister_all()
                     except Exception:
                         pass
-                # 残した _ka 件ぶん枠が埋まっているので、そのぶん減らす
-                _want = set(sorted(_want)[:max(1, len(_want) - _ka)])
+                    _prev = set()
+                else:
+                    # 残した _ka 件ぶん枠が埋まっているので、そのぶん減らす
+                    _want = set(sorted(_want)[:max(1, len(_want) - _ka)])
             else:
                 try:
                     cli.unregister_all()
