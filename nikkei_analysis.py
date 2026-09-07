@@ -698,7 +698,18 @@ _NG_MAX_DAYS = int(os.environ.get("LSS_NEWGAP_MAX_DAYS", "500"))
 #     散らばり(帯)を作り、その外に出て初めて『効いている』と言える。
 #   ⚠ 1本ごとに窓ぶんの予算シミュを回すので、19年窓では重い。既定の本数は
 #     控えめにし、長い窓では既定OFF(明示すれば出る)。
+#
+# ⛔⛔ 2026-09-07: **既定OFF に戻した。** 質問のたびにブロックを足した結果、
+#   基準タブだけで予算シミュを **18回**(発注順の帯11 + 上限スイープ7)
+#   余計に回すようになり、ユーザーの環境で落ちた。
+#   日々のレポートに要るものではないので、見たいときだけ出す:
+#
+#       $env:LSS_NEWGAP_RESEARCH = "1"   ← 発注順の帯 と 上限スイープ を出す
+#
+#   ⚠ 年別の内訳 と ギャップ帯別 は **後処理だけ**(シミュ0回)なので常に出す。
 _NG_ORD_SEEDS = int(os.environ.get("LSS_NEWGAP_ORDER_SEEDS", "8"))
+_NG_RESEARCH = os.environ.get("LSS_NEWGAP_RESEARCH", "0").strip().lower() \
+    not in ("0", "false", "no", "")
 _NG_ORD_TAB = os.environ.get("LSS_NEWGAP_ORDER_TAB", "").strip().lower()
 # ★ 09:00 に始値も帯の中か再確認する(ライブの挙動)。既定OFF。
 #   ⚠ ONにしても **watch50 の顔ぶれは前夜(前日終値)のまま**なので先読みにならない。
@@ -1311,10 +1322,22 @@ def _newgap_build(days: int, min_price: float, max_price: float,
     #   ⚠ **閾値を後から選ぶのは多重検定**(§18.53)。だから 前半/後半 を必ず
     #     併記し、符号が揃わないものは採らない(§18.36 判定ルール2)。
     #   ⚠ 出す条件は発注順の帯と同じ(基準タブのみ / 長い窓は明示したときだけ)
-    _cap_on = (_NG_ORD_TAB not in ("0", "false", "no")
-               and not variant and side == "short"
-               and (_NG_ORD_TAB in ("1", "true", "yes", "on")
-                    or (_NG_DAYS or days) <= 1500))
+    _cap_on = (_NG_RESEARCH and not variant and side == "short")
+    if not _NG_RESEARCH and not variant and side == "short":
+        # ★ **あることは分かるようにしておく**(黙って消すと「どこ?」になる)
+        _h.append(
+            '<div style="background:#1e293b;border:1px solid #334155;'
+            'border-radius:6px;padding:8px 12px;margin-bottom:12px;'
+            'font-size:0.8rem;color:#94a3b8">'
+            '🔬 <b>検証ブロックは既定OFF</b>です — '
+            '「予算で切るとき、どの順に建てるか（ランダム帯）」と'
+            '「上限を付けたらどうなるか」。'
+            '1本ごとに窓ぶんの予算シミュを回すので合計18回になり、重いためです。'
+            '見るときだけ:<br>'
+            '<code style="color:#e2e8f0">$env:LSS_NEWGAP_RESEARCH = "1"; '
+            '.\\nlong 700</code>'
+            '<br>⚠ 窓が長いほど重くなります。落ちるなら窓を短くしてください。'
+            '</div>')
     if _cap_on and len(_rows):
         # ⛔ date は **文字列**。Series.quantile は文字列で TypeError になる
         #   ("unsupported operand type(s) for -: 'str' and 'str'")。
@@ -1395,10 +1418,9 @@ def _newgap_build(days: int, min_price: float, max_price: float,
                 '<th style="padding:3px 10px">判定</th></tr>'
                 + _crows + '</table></details>')
 
-    _ord_on = (_NG_ORD_TAB not in ("0", "false", "no")
-               and not variant and side == "short"
-               and (_NG_ORD_TAB in ("1", "true", "yes", "on")
-                    or (_NG_DAYS or days) <= 1500))
+    #   ⚠ 既定OFF。シミュを11回まわすので日々のレポートには入れない
+    _ord_on = ((_NG_RESEARCH or _NG_ORD_TAB in ("1", "true", "yes", "on"))
+               and not variant and side == "short")
     if _ord_on and _NG_ORD_SEEDS > 0:
         def _ord_sum(_o):
             _s = _newgap_sim(_rows, _ng_budget, _ng_watch, _NG_GAP_BP,
