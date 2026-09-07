@@ -1038,9 +1038,14 @@ def _newgap_build(days: int, min_price: float, max_price: float,
         #     直近13ヶ月は予算が律速)ので、**必ず2次元で見る**。
         _nmo = max(1.0, len(_dd) / 20.0)         # 月数の近似(20営業日/月)
         _bl = [_NG_BUDGET, _NG_BUDGET * 1.5, _NG_BUDGET * 2, _NG_BUDGET * 3]
-        _wl = [(_NG_WATCH, f"{_NG_WATCH}件"), (_NG_WATCH * 2,
-                                               f"{_NG_WATCH * 2}件"),
-               (0, "制限なし")]
+        # ⛔ 「制限なし」は文字通りには実装できない(候補は最大900件超。
+        #   PUSH でも20バッチで09:00に読み切れない)。**実装できるのは
+        #   2〜3バッチ = 100〜150件**なので、その行を必ず並べる。
+        #   制限なしは『上限がどこにあるか』の参考でしかない。
+        _wl = [(_NG_WATCH, f"{_NG_WATCH}件（現行・1バッチ）"),
+               (_NG_WATCH * 2, f"{_NG_WATCH * 2}件（2バッチ）"),
+               (_NG_WATCH * 3, f"{_NG_WATCH * 3}件（3バッチ）"),
+               (0, "制限なし（実装不可・参考）")]
         _mx, _peak = [], {}
         for _wv, _wlbl in _wl:
             _r2 = []
