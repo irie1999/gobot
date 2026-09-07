@@ -102,7 +102,8 @@ echo  N over %NDAYS% days  (daily bars only - no 5-min, no lss)
 echo    the 5-min tabs stay at --days 180
 echo    heavy analysis blocks are OFF
 echo.
-echo    N TABS ONLY: N / mirror / no-50-cap    (add "all" for 7)
+echo    N TABS ONLY: N(400man) / mirror / no-50-cap / N(800man)
+echo                 (add "all" for the other 4)
 echo    the 4M-yen / H / J / L / K tabs are NOT built
 echo    plus n_report_YYYYMMDD.txt and n_days.csv
 echo    N opens first.
@@ -132,6 +133,10 @@ REM   built at all. That block is exactly where the MemoryError kept
 REM   happening, and this .bat exists to look at N. Set it to 0 if you
 REM   want the usual tabs back.
 if not defined LSS_NEWGAP_ONLY set "LSS_NEWGAP_ONLY=1"
+REM a second N tab at a different budget. 800 because the budget sweep
+REM showed the marginal money turning NEGATIVE past it (200-400 +107,
+REM 400-600 +58, 600-800 +12, 800-1200 -23 yen per 10k of extra peak).
+if not defined LSS_NEWGAP_BUDGET2 set "LSS_NEWGAP_BUDGET2=800"
 set "LSS_NEWGAP_MIRROR=1"
 set "LSS_NEWGAP_NOCAP=1"
 set "LSS_NEWGAP_CAP=1"

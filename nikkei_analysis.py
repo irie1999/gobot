@@ -710,6 +710,10 @@ _NG_ONLY = os.environ.get("LSS_NEWGAP_ONLY", "0").strip().lower() \
 #     (月平均÷実投入額)と **増分効率**(増えた損益÷増えたピーク)。
 #   予算の本数だけ予算シミュを回すので、既定は5本。0 で切る。
 _NG_BUD_LIST = os.environ.get("LSS_NEWGAP_BUDGETS", "200,400,600,800,1200")
+# ★ **もう1つの予算でタブを作る** (2026-09-08 ユーザー依頼「800万円での
+#   テストのタブが欲しい」)。0 で作らない。スキャンは共有なので追加の
+#   コストは予算シミュ1回ぶんだけ。
+_NG_BUD2 = float(os.environ.get("LSS_NEWGAP_BUDGET2", "0") or 0)
 # ★★ 発注順の比較 (2026-09-07 ユーザーの問い「合格33件で予算は9件。
 #   この9件の選び方はランダムしかない?」)。
 #   ⛔ **2条件を1回ずつ比べて差を語らない**(§18.24)。ランダムを何本か回して
@@ -1037,7 +1041,10 @@ def _newgap_build(days: int, min_price: float, max_price: float,
     _ng_all = (variant == "all")
     _ng_watch = 0 if variant in ("nocap", "all") else _NG_WATCH
     # 予算なしは 10兆円。日次の最大投入(下で出す必要資金)が数億なので絶対に効かない
-    _ng_budget = 1e9 if _ng_all else _NG_BUDGET
+    # ★ bud2 = 予算だけ差し替えた変種(それ以外は基準とまったく同じ)
+    _ng_budget = (1e9 if _ng_all else
+                  (_NG_BUD2 if (variant == "bud2" and _NG_BUD2 > 0)
+                   else _NG_BUDGET))
     # 全部建てるなら順序は結果に影響しない。表示の一貫性のため liq にする
     _ng_order = "liq" if variant in ("nocap", "all") else "gap"
     _sim = _newgap_sim(_rows, _ng_budget, _ng_watch, _NG_GAP_BP, _NG_RET1,
@@ -1134,7 +1141,8 @@ def _newgap_build(days: int, min_price: float, max_price: float,
         + (f'予算 <b style="color:#ef4444">なし（合格を全部建てる）</b> / '
            f'{_NG_QTY}株固定 / '
            if _ng_all else
-           f'予算 <b style="color:#e2e8f0">{_NG_BUDGET:,.0f}万円</b> / '
+           # ⛔ _NG_BUDGET 決め打ちだと bud2 タブが「400万」と嘘を書く
+           f'予算 <b style="color:#e2e8f0">{_ng_budget:,.0f}万円</b> / '
            f'{_NG_QTY}株固定 / '
            + ('<b>流動性</b>降順' if _ng_order == "liq" else '|ギャップ|降順')
            + 'に充当 / ')
@@ -1265,7 +1273,12 @@ def _newgap_build(days: int, min_price: float, max_price: float,
                 'color:#fbbf24;font-weight:700">▶ 予算スイープ — '
                 'どのくらいの予算が最大の効率か</summary>'
                 '<div style="color:#94a3b8;font-size:0.78rem;margin:8px 0">'
-                '⛔ <b>総額で選ばないこと。</b>予算を上げれば損益もσも'
+                + (f'★ <b style="color:#e2e8f0">月平均の期間</b>: '
+                   f'<b style="color:#e2e8f0">{_dd["date"].min()} 〜 '
+                   f'{_dd["date"].max()}</b>'
+                   f'（{len(_dd):,}営業日 ÷ 20.8 = <b>{_nmo2:.1f}ヶ月</b>で割った値）。'
+                   f'月次σ も同じ期間の月ごとの合計から。<br>')
+                + '⛔ <b>総額で選ばないこと。</b>予算を上げれば損益もσも'
                 '<b>同率で伸びます</b>＝ただのレバレッジで、'
                 '<b>月平均÷σ は動きません</b>（§18.38 #3b）。<br>'
                 '★ 見るのは <b style="color:#fbbf24">資本効率</b>'
@@ -22987,6 +23000,11 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 #   ⛔ **発注ルールではなく信号の地力の診断**。§18.10。
                 _ng_sides.append(("short", "newgapall", "⛔ N 予算なし(全建て)",
                                   "#ef4444", "#fca5a5", _ng_lo, _ng_hi, "all"))
+            if _NG_BUD2 > 0:
+                # ★ 予算だけ変えた対照(watch・順序・価格帯は基準と同じ)
+                _ng_sides.append(("short", "newgapb2",
+                                  f"💰 N 予算{_NG_BUD2:,.0f}万",
+                                  "#38bdf8", "#7dd3fc", _ng_lo, _ng_hi, "bud2"))
             if _NG_NOPX_TAB:
                 # ★ 株価制限なし(2026-09-05)。スキャンは共有、価格帯だけ外す
                 _ng_sides.append(("short", "newgapx", "★ N 株価制限なし",
