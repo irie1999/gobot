@@ -255,6 +255,32 @@ if __name__ == "__main__":
     if not _syms:
         sys.exit("[error] 銘柄が0件です")
     if a.rotate:
+        # ★★ 足りなければ **流動性の高い主力**で水増しする。
+        #   これは kabu の購読レイテンシを測るだけなので、銘柄が今日の候補で
+        #   ある必要はない。むしろ **今日 登録していない銘柄**のほうが
+        #   コールドで、2バッチ目以降の実態に近い。
+        #   ⛔ リストを写経しない。check_board_limits.py から読む
+        #     (2箇所に置くと片方だけ直して片方が残る)。
+        if len(_syms) < a.rotate:
+            import re as _re
+            try:
+                _txt = open("check_board_limits.py", encoding="utf-8").read()
+                _m = _re.search(r"_DEFAULT\s*=\s*\[(.*?)\]", _txt, _re.S)
+                _pad = list(dict.fromkeys(
+                    _re.findall(r"\b(\d{4})\b", _m.group(1)))) if _m else []
+            except Exception:
+                _pad = []
+            _have = set(_syms)
+            _add = [s for s in _pad if s not in _have]
+            if _add:
+                print(f"[info] {len(_syms)}件では {a.rotate}件に足りないので、"
+                      f"check_board_limits の主力リストから {len(_add)}件 足します"
+                      f"(**今日 登録していない = コールド**なので2バッチ目の"
+                      f"実態に近い)")
+                _syms = _syms + _add
+            if len(_syms) < a.rotate:
+                print(f"[warn] それでも {len(_syms)}件 しかありません。"
+                      f"--symbols で明示してください")
         _syms = _syms[:max(1, a.rotate)]
     elif len(_syms) > 50:
         print(f"[warn] {len(_syms)}件 → kabu の登録上限で先頭50件にします")
