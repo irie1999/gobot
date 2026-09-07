@@ -203,6 +203,8 @@ if __name__ == "__main__":
                     help="カンマ区切り。省略時は --from-signals")
     ap.add_argument("--from-signals", action="store_true",
                     help="n_signals_<今日>.csv の銘柄を使う")
+    ap.add_argument("--signals-csv", type=str, default="",
+                    help="--from-signals の読み先(既定 n_signals_<今日>.csv)")
     ap.add_argument("--seconds", type=int, default=60, help="受信する秒数")
     ap.add_argument("--compare-rest", action="store_true",
                     help="同じ銘柄を REST でも1周読み、所要秒数を並べる")
@@ -226,11 +228,12 @@ if __name__ == "__main__":
     if a.symbols:
         _syms = [s.strip() for s in a.symbols.split(",") if s.strip()]
     else:
-        _p = f"n_signals_{_dt.datetime.now(JST):%Y%m%d}.csv"
+        _p = a.signals_csv or f"n_signals_{_dt.datetime.now(JST):%Y%m%d}.csv"
         if not os.path.exists(_p):
             sys.exit(f"[error] {_p} がありません。--symbols で明示してください")
         import csv as _csv
         _all: list[str] = []
+        _shadow: list[str] = []       # ★ 51〜150位(shadow_n=1)。順位順に並ぶ
         with open(_p, encoding="utf-8-sig") as _f:
             for _r in _csv.DictReader(_f):
                 _c = str(_r.get("symbol") or _r.get("code") or "").strip()
@@ -240,13 +243,26 @@ if __name__ == "__main__":
                 _all.append(_c)
                 # ★ 朝に実際に watch した50件を優先する(候補は126件ありうる)。
                 #   watched_n が無い古い CSV なら _all のほうを使う。
+                _tru = ("", "0", "False", "false")
                 if str(_r.get("watched_n") or _r.get("watched") or "").strip() \
-                        not in ("", "0", "False", "false"):
+                        not in _tru:
                     _syms.append(_c)
+                elif str(_r.get("shadow_n") or "").strip() not in _tru:
+                    _shadow.append(_c)
         if a.rotate:
-            # ★ 回すときは **候補全部**を使う(watched_n の50件では意味がない)
-            _syms = _all
-            print(f"[info] {_p} の候補 {len(_syms)}件 を回します")
+            # ★★ 回すときは **watched(発注対象) + shadow(51〜150位)** を
+            #   この順に並べる。batch1 が実際の発注対象、batch2以降が
+            #   シャドーの裾になり、**朝の本番と同じ顔ぶれ・同じ順**で測れる。
+            #   shadow_n が無い古い CSV なら候補全部にフォールバックする。
+            if _shadow:
+                _syms = _syms + _shadow
+                print(f"[info] {_p}: 発注対象(watched) {len(_syms) - len(_shadow)}件"
+                      f" + **シャドー(51位以降) {len(_shadow)}件** = {len(_syms)}件"
+                      f" を、この順で回します")
+            else:
+                _syms = _all
+                print(f"[info] {_p} に shadow_n がないので候補 {len(_syms)}件"
+                      f" 全部を回します(順位順とは限りません)")
         elif not _syms:
             print("[info] watched_n が無いので先頭50件を使います")
             _syms = _all

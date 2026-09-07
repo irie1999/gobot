@@ -118,6 +118,10 @@ ap.add_argument("--watch", type=int, default=WATCH, help="朝読める上限(0=�
 ap.add_argument("--shadow-watch", type=int, default=0,
                 help="シャドー記録する順位の上限(0=しない / 例 150 なら "
                      "51〜150位を shadow_n=1 で CSV に残す)")
+ap.add_argument("--signals-csv", type=str, default="",
+                help="候補リストの読み書き先(既定 n_signals_<日付>.csv)。"
+                     "⛔ 場中に --collect を試すときは必ず別名に逃がすこと"
+                     "(本番の候補リストを上書きすると夕方の --close が壊れる)")
 ap.add_argument("--mirror", action="store_true", default=False,
                 help="鏡像(前日下げ × ギャップダウンを買う)も記録する。"
                      "既定OFF。Nの秒単位順序を1バッチで測るときは使わない")
@@ -149,7 +153,10 @@ a = ap.parse_args()
 
 _TODAY = a.date or datetime.now(JST).strftime("%Y-%m-%d")
 _YMD = _TODAY.replace("-", "")
-_SIG_CSV = Path(f"n_signals_{_YMD}.csv")
+# ⛔ 既定は今までどおり n_signals_<日付>.csv。**--signals-csv で逃がせる**
+#   ようにした(2026-09-07)。--collect を場中に試すと、朝に書いた本番の
+#   候補リストを黙って上書きし、夕方の --close が別物を読むことになる。
+_SIG_CSV = Path(a.signals_csv) if a.signals_csv else Path(f"n_signals_{_YMD}.csv")
 _PAPER_CSV = Path(f"n_paper_{_YMD}.csv")
 
 
