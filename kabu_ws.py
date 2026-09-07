@@ -229,6 +229,16 @@ if __name__ == "__main__":
     ap.add_argument("--batch", type=int, default=50, help="--rotate の1バッチ")
     ap.add_argument("--batch-wait", type=int, default=90,
                     help="--rotate で1バッチを待つ上限秒")
+    # ★★ 仮説の検証つまみ (2026-09-07)。
+    #   実測で **再接続が起きたバッチだけ裾が壊れた**(90%点 5.5s → 60.2s /
+    #   24.3s、未達4件は全部『約定済みなのに届かなかった』)。
+    #   unregister_all で登録リストを空にしているのが原因では、という仮説。
+    #   配信する銘柄がゼロになった時点で kabu がストリームを閉じている。
+    #   → 入れ替えのあいだ **N件だけ登録を残す**と再接続が消えるかを見る。
+    #   ⛔ 0 にすると従来どおり全解除(仮説の対照群)。
+    ap.add_argument("--keep-alive", type=int, default=0,
+                    help="バッチ入替のあいだ登録を残す件数(既定0=全解除)。"
+                         "1以上にすると登録リストが空にならない")
     a = ap.parse_args()
 
     # ⛔ 発注系は一切 import しない。KabuClient は登録と(比較時のみ)/board だけ。
@@ -338,18 +348,36 @@ if __name__ == "__main__":
         if not st.start():
             sys.exit("[error] PUSH配信に繋がりませんでした")
         _res = []
+        _prev: set = set()          # 直前のバッチで登録済みの銘柄
         for _bi, _b in enumerate(_batches, 1):
             _want = {s.replace(".T", "") for s in _b}
-            try:
-                cli.unregister_all()
-            except Exception:
-                pass
+            # ★ 入れ替え。--keep-alive N なら **登録を空にしない**。
+            #   kabu は登録ゼロでストリームを閉じている疑いがあるため。
+            _ka = max(0, a.keep_alive)
+            if _ka > 0 and _prev:
+                _drop = sorted(_prev)[:max(0, len(_prev) - _ka)]
+                for _s in _drop:
+                    try:
+                        cli.unregister(_s)
+                    except Exception:
+                        pass
+                # 残した _ka 件ぶん枠が埋まっているので、そのぶん減らす
+                _want = set(sorted(_want)[:max(1, len(_want) - _ka)])
+            else:
+                try:
+                    cli.unregister_all()
+                except Exception:
+                    pass
             # ⚠ 前バッチの残りを数えないよう、受信済みの銘柄集合を控える
             _before = set(st.snapshot())
             _t0 = _time.time()
             _rr = cli.register_many(sorted(_want))
             _nok = len((_rr or {}).get("RegistList") or [])
             _t_reg = _time.time() - _t0
+            if _nok > 0:
+                # 残した銘柄 + 今回登録した銘柄 = いま登録されているもの
+                _prev = (set(sorted(_prev)[len(_prev) - _ka:]) if _ka > 0
+                         else set()) | set(_want)
             # ★★ 「全件揃うか」で判定しない (2026-09-07 修正)。
             #   実測で 47/50・45/50 が1秒以内に届いたのに、残り3〜5件が
             #   来ないだけで『⛔ 回すのは不可能』と出していた。
