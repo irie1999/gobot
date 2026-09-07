@@ -180,6 +180,17 @@ if a.symbols:
     print(f"[info] 銘柄を {len(_only)}件 に絞ります（{a.symbols}）")
 
 
+def _is_morning(v: str) -> bool:
+    """session distinction が前場か。
+
+    ⛔⛔ **'1' と '01' の両方が来る**(2026-09-07)。無料サンプル(2021-08)は
+      '1'、実データ(2026-08)は **'01'**。`!= "1"` で弾いていたので
+      9,820万行が全部落ちて『窓内0行』になった。
+      同じ癖が exchange code('1' vs '01')にもある。**ゼロ埋めを想定すること。**
+    """
+    return v.strip().lstrip("0") == "1"
+
+
 def _hhmmss(t: str) -> int:
     """time 列 → HHMMSS の int。新形式11桁(μs) / 旧形式9桁(ms) 両対応。"""
     s = t.strip()
@@ -271,7 +282,7 @@ for _fp in _files:
                     _tt = _r[_i_time].strip()
                     _diag["tlen"][len(_tt)] += 1
                     _diag["hh"][_tt[:2] if len(_tt) >= 10 else _tt[:1]] += 1
-                if _sess != "1":
+                if not _is_morning(_sess):
                     _diag["drop_sess"] += 1
                     continue                    # 後場は見ない
                 _code4 = _r[_i_code].strip()
