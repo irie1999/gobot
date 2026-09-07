@@ -714,6 +714,17 @@ _NG_BUD_LIST = os.environ.get("LSS_NEWGAP_BUDGETS", "200,400,600,800,1200")
 #   テストのタブが欲しい」)。0 で作らない。スキャンは共有なので追加の
 #   コストは予算シミュ1回ぶんだけ。
 _NG_BUD2 = float(os.environ.get("LSS_NEWGAP_BUDGET2", "0") or 0)
+# ★★ **資金が余っている日は株数を増やす** (2026-09-08 ユーザー依頼)。
+#   予算 ÷ その日の合格件数 で株数を決め、100株単位に切り捨て、最低1単元。
+#   ⛔ そのままだと合格1件の日に予算の全部が1銘柄に入る(§18.65② の実測で
+#     1,700株まで膨らんだ)ので、**株数の頭を切る**。既定 200株。
+#   ⚠ 合格件数は 09:00 に確定するので **先読みではない**(§18.38 の confirm)。
+#   ⚠ これは純レバレッジではない: 件数が多い日は100株のまま、少ない日だけ
+#     増える。だから「予算を上げる(悪い限界トレードが増える)」とも
+#     「一律200株(全部2倍)」とも別物。
+_NG_EQ_MAXQTY = int(os.environ.get("LSS_NEWGAP_EQ_MAXQTY", "200"))
+_NG_EQ_TAB = os.environ.get("LSS_NEWGAP_EQ_TAB", "1").strip().lower() \
+    not in ("0", "false", "no", "")
 # ★★ **明細を出さない** (2026-09-08)。月別サマリー・日別カード・取引テーブルは
 #   HTML の大半を占める。N の判断に要るのは head の集計(KPI / 予算スイープ /
 #   年別 / ギャップ帯別 / 50件の壁 / 執行コスト)で、1件ずつの行ではない。
@@ -1062,8 +1073,12 @@ def _newgap_build(days: int, min_price: float, max_price: float,
                    else _NG_BUDGET))
     # 全部建てるなら順序は結果に影響しない。表示の一貫性のため liq にする
     _ng_order = "liq" if variant in ("nocap", "all") else "gap"
+    # ★ eq = 資金が余っている日だけ株数を増やす(上限あり)
+    _ng_eq = (variant == "eq")
     _sim = _newgap_sim(_rows, _ng_budget, _ng_watch, _NG_GAP_BP, _NG_RET1,
-                       order=_ng_order)
+                       order=_ng_order,
+                       qty_mode=("equal" if _ng_eq else "fixed"),
+                       max_qty=(_NG_EQ_MAXQTY if _ng_eq else 0))
     # ★ 日次の損益をCSVに出す(2026-09-01)。レジーム別の検定など、外の
     #   スクリプトから使うため。既定OFF。
     #     $env:LSS_NEWGAP_DAYS_CSV = "n_days.csv"
@@ -1158,7 +1173,9 @@ def _newgap_build(days: int, min_price: float, max_price: float,
            if _ng_all else
            # ⛔ _NG_BUDGET 決め打ちだと bud2 タブが「400万」と嘘を書く
            f'予算 <b style="color:#e2e8f0">{_ng_budget:,.0f}万円</b> / '
-           f'{_NG_QTY}株固定 / '
+           + (f'<b style="color:#e2e8f0">資金が余った日は増株'
+              f'（予算÷合格件数 / 100株単位 / <b>最大{_NG_EQ_MAXQTY}株</b>）</b> / '
+              if _ng_eq else f'{_NG_QTY}株固定 / ')
            + ('<b>流動性</b>降順' if _ng_order == "liq" else '|ギャップ|降順')
            + 'に充当 / ')
         + (f'建値 <b style="color:#e2e8f0">{min_price:,.0f}〜{max_price:,.0f}円</b>'
@@ -23041,6 +23058,11 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 #   ⛔ **発注ルールではなく信号の地力の診断**。§18.10。
                 _ng_sides.append(("short", "newgapall", "⛔ N 予算なし(全建て)",
                                   "#ef4444", "#fca5a5", _ng_lo, _ng_hi, "all"))
+            if _NG_EQ_TAB:
+                # ★ 資金が余った日だけ増株(上限 _NG_EQ_MAXQTY)
+                _ng_sides.append(("short", "newgapeq",
+                                  f"📈 N 増株(最大{_NG_EQ_MAXQTY}株)",
+                                  "#a78bfa", "#ddd6fe", _ng_lo, _ng_hi, "eq"))
             if _NG_BUD2 > 0:
                 # ★ 予算だけ変えた対照(watch・順序・価格帯は基準と同じ)
                 _ng_sides.append(("short", "newgapb2",

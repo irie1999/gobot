@@ -126,7 +126,8 @@ def _newgap_scan_one(sym: str, days: int, min_price: float, max_price: float) ->
 def _newgap_sim(rows: list, budget_man: float, watch: int,
                 gap_bp: float, ret1_min: float,
                 qty_mode: str = "fixed", qty: int = 0,
-                max_pct: float = 0.0, order: str = "gap") -> dict:
+                max_pct: float = 0.0, order: str = "gap",
+                max_qty: int = 0) -> dict:
     """日ごとに 候補 → watch上限 → ギャップ判定 → 予算 の順で建てる。
 
     ★ この順番が実運用そのもの。**watch上限を先に掛ける**のが肝で、
@@ -138,6 +139,10 @@ def _newgap_sim(rows: list, budget_man: float, watch: int,
                 ⛔ 合格1件の日に予算の全部が1銘柄に入る。max_pct で頭を切る
                    (§18.38 #3b で J が実際にこれを踏んだ)。
     max_pct: 1銘柄の上限(予算に対する%)。0=無制限。
+    max_qty: **1銘柄の株数上限**(株)。0=無制限。2026-09-08 ユーザー依頼
+             「資金が余っている日は200株のようにして」。
+             ⛔ これが無いと "equal" は合格1件の日に予算の全部を1銘柄に入れる
+               (§18.65② の実測で1,700株まで膨らんだ)。株数で頭を切る。
     ⚠ 合格件数は 09:00 に確定するので、それで割るのは **先読みではない**。
     """
     _q0 = int(qty or _NG_QTY)
@@ -210,6 +215,9 @@ def _newgap_sim(rows: list, budget_man: float, watch: int,
                 # 1銘柄の上限(予算比)。⛔ 無いと合格1件の日に全額が1銘柄へ
                 _q = int(min(_slot, _lot_cap) // _unit) * 100
                 _q = max(100, _q)             # 最低1単元は建てる
+                # ★ 株数の頭を切る。「余ったぶんだけ増やすが 200株まで」
+                if max_qty > 0:
+                    _q = min(_q, int(max_qty))
             else:
                 _q = _q0
             _cost = float(_r.entry_p) * _q
