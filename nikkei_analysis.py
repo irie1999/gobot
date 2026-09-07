@@ -1225,12 +1225,20 @@ def _newgap_build(days: int, min_price: float, max_price: float,
                 _ds2 = (_r5["月平均"] / _r5["σ"]) if _r5["σ"] else float("nan")
                 # 増分効率: 1段上げて増えた損益 ÷ 増えたピーク(1万円あたり)
                 if _i5 == 0:
-                    _inc = float("nan"); _incs = "—"
+                    _inc = float("nan"); _incs = "—"; _mgs = "—"
                 else:
                     _dp = _r5["月平均"] - _bres[_i5 - 1]["月平均"]
                     _dk = _r5["ピーク"] - _bres[_i5 - 1]["ピーク"]
                     _inc = (_dp / (_dk / 1e4)) if _dk > 0 else float("nan")
                     _incs = "—" if _inc != _inc else f"{_inc:+,.0f}"
+                    # ★★ 限界トレード: 1段上げて **新たに建った分だけ**の
+                    #   1件あたり。合計の円/件(+25.2bp相当)と直接比べられる。
+                    #   ⛔ ここがマイナスなら、その追加資金は **損をしている**。
+                    _dn = _r5["件数"] - _bres[_i5 - 1]["件数"]
+                    _dtot = _r5["合計"] - _bres[_i5 - 1]["合計"]
+                    _mgs = (f'{_dn:,}件 <b style="color:'
+                            f'{"#4ade80" if _dtot >= 0 else "#f87171"}">'
+                            f'{_dtot / _dn:+,.0f}円/件</b>' if _dn > 0 else "0件")
                 _mk = " ★" if _i5 == _best_i else ""
                 _brows += (
                     f'<tr style="{"background:#0f172a;font-weight:700" if _i5 == _best_i else ""}">'
@@ -1249,7 +1257,9 @@ def _newgap_build(days: int, min_price: float, max_price: float,
                     f'<td style="text-align:right;padding:3px 10px;font-weight:700;'
                     f'color:{"#fbbf24" if _i5 == _best_i else "#e2e8f0"}">'
                     f'{"—" if _eff != _eff else f"{_eff:.2f}%"}</td>'
-                    f'<td style="text-align:right;padding:3px 10px">{_incs}</td></tr>')
+                    f'<td style="text-align:right;padding:3px 10px">{_incs}</td>'
+                    f'<td style="text-align:right;padding:3px 10px;'
+                    f'border-left:1px solid #334155">{_mgs}</td></tr>')
             _h.append(
                 '<details style="margin:0 0 12px" open><summary style="cursor:pointer;'
                 'color:#fbbf24;font-weight:700">▶ 予算スイープ — '
@@ -1266,6 +1276,9 @@ def _newgap_build(days: int, min_price: float, max_price: float,
                 '（1銘柄の株数は変わりません）。件数が増えなくなったら、そこが頭打ち。<br>'
                 '⚠ <b>ピーク</b>は同時保有の最大投入額。信用の委託保証金は'
                 '<b>発注時</b>に要るので、実際にはこの額を用意する必要があります。<br>'
+                '★ <b style="color:#fbbf24">限界トレード</b>は「1段上げて'
+                '<b>新たに建った分だけ</b>」の1件あたり。上の +bp/件 と直接比べられます。'
+                '<b>ここがマイナスなら、その追加資金は損をしています</b>。<br>'
                 '⛔ これは<b>リスク許容度の宣言</b>であって最適化ではありません（§18.31⑤）。'
                 '</div>'
                 '<table style="border-collapse:collapse;font-size:0.8rem">'
@@ -1278,7 +1291,9 @@ def _newgap_build(days: int, min_price: float, max_price: float,
                 '<th style="text-align:right;padding:3px 10px">投入/日</th>'
                 '<th style="text-align:right;padding:3px 10px">ピーク</th>'
                 '<th style="text-align:right;padding:3px 10px">資本効率</th>'
-                '<th style="text-align:right;padding:3px 10px">増分効率</th></tr>'
+                '<th style="text-align:right;padding:3px 10px">増分効率</th>'
+                '<th style="text-align:right;padding:3px 10px;'
+                'border-left:1px solid #334155">限界トレード</th></tr>'
                 + _brows + '</table></details>')
 
     # ★★ 年別の内訳 (2026-09-07 ユーザーの問い「直近は額が大きい。なぜ？」)
