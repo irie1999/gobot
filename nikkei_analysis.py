@@ -1216,6 +1216,75 @@ def _newgap_build(days: int, min_price: float, max_price: float,
                 f'{int(_r["勝日"])}/{int(_r["日数"])}</td></tr>')
         _h.append('</table></details>')
 
+    # ★★ ギャップ帯別 (2026-09-07 ユーザーの問い「09:05以降のほうが成績が
+    #   いいのかな?」)。**日足には寄り時刻が無い**ので直接は測れないが、
+    #   §18.70⑤ の実測で **ギャップの大きさは寄りの遅さの代理になる**
+    #   (スピアマン +0.651 / t=+14.37)。板寄せの需給不均衡が大きいほど
+    #   特別気配で更新を重ねるので、遅く寄り かつ 大きくギャップする。
+    #   ⛔ 前例は「大きいほど**わずかに悪い**」。§18.53 の11.6年で
+    #     100-150bp が +7.5/+8.0/+12.0 に対し 150bp超 が +7.2/+6.1/+6.9。
+    #     極端なギャップは本物のニュース(決算・上方修正・TOB)で続伸する。
+    #   ⚠ **帯を選んで使わないこと**。閾値を後から選ぶのは多重検定(§18.53 で
+    #     「帯を選ぶのは多重検定なのでやらない」と明記済み)。ここは
+    #     『予算が落としている側が良いのか悪いのか』を見るためだけの表。
+    if not _det.empty and len(_dd) > 120 and "gap_bp" in _det.columns:
+        _gb = _det.copy()
+        _ed = [100, 150, 200, 300, 500, 1e9]
+        _lbls = ["100〜150bp", "150〜200", "200〜300", "300〜500", "500〜"]
+        _gb["帯"] = pd.cut(_gb["gap_bp"].astype(float), bins=[-1e9] + _ed,
+                           labels=["〜100(閾値未満)"] + _lbls)
+        _qc = _gb["qty"] if "qty" in _gb.columns else _NG_QTY
+        _nt = (_gb["entry_p"] * _qc).groupby(_gb["帯"], observed=True).sum()
+        _g2 = _gb.groupby("帯", observed=True)
+        _gt = pd.DataFrame({"件数": _g2.size(), "合計": _g2["pnl"].sum(),
+                            "勝": _g2["pnl"].apply(lambda x: int((x > 0).sum()))})
+        _gt["円件"] = _gt["合計"] / _gt["件数"].clip(lower=1)
+        _gt["bp件"] = _gt["合計"] / _nt.where(_nt != 0) * 1e4
+        _h.append(
+            '<details style="margin:0 0 12px"><summary style="cursor:pointer;'
+            'color:#fbbf24;font-weight:700">▶ ギャップ帯別 — '
+            '「大きいギャップ（＝遅く寄る）ほど良いのか」</summary>'
+            '<div style="color:#94a3b8;font-size:0.78rem;margin:8px 0">'
+            '日足には寄り時刻がありません。ただし §18.70⑤ の実測で'
+            '<b>ギャップの大きさは寄りの遅さの代理</b>になります'
+            '（スピアマン +0.651 / 19営業日すべてプラス / t=+14.37）。'
+            '板寄せの需給不均衡が大きいほど特別気配で更新を重ねるので、'
+            '<b>遅く寄り、かつ大きくギャップする</b>。<br>'
+            '⛔ 前例は<b>「大きいほど わずかに悪い」</b>。§18.53 の11.6年で'
+            '100〜150bp が +7.5 / +8.0 / +12.0 に対し 150bp超 は '
+            '+7.2 / +6.1 / +6.9。極端なギャップは本物のニュース'
+            '（決算・上方修正・TOB）で続伸します。<br>'
+            '★ これは<b>予算が落としている側が良いのか悪いのか</b>を見る表です。'
+            'ライブは寄った順に埋まるので、<b>予算落ちするのは大きいギャップ側</b>。'
+            'ここが低いなら、その取りこぼしは<b>害ではありません</b>。<br>'
+            '⛔ <b>帯を選んで閾値にしないこと</b>（後から選ぶのは多重検定 / §18.53）。'
+            '</div>'
+            '<table style="border-collapse:collapse;font-size:0.8rem">'
+            '<tr style="color:#94a3b8"><th style="padding:3px 10px">帯</th>'
+            '<th style="text-align:right;padding:3px 10px">建てた</th>'
+            '<th style="text-align:right;padding:3px 10px">合計</th>'
+            '<th style="text-align:right;padding:3px 10px">円/件</th>'
+            '<th style="text-align:right;padding:3px 10px">bp/件</th>'
+            '<th style="text-align:right;padding:3px 10px">勝率</th></tr>')
+        for _bn, _r in _gt.iterrows():
+            if not int(_r["件数"]):
+                continue
+            _c = "#4ade80" if _r["合計"] >= 0 else "#f87171"
+            _wr = _r["勝"] / max(1, _r["件数"]) * 100.0
+            _h.append(
+                f'<tr><td style="padding:3px 10px">{_bn}</td>'
+                f'<td style="text-align:right;padding:3px 10px">'
+                f'{int(_r["件数"]):,}</td>'
+                f'<td style="text-align:right;padding:3px 10px;color:{_c}">'
+                f'{_r["合計"]:+,.0f}</td>'
+                f'<td style="text-align:right;padding:3px 10px;color:{_c}">'
+                f'{_r["円件"]:+,.0f}</td>'
+                f'<td style="text-align:right;padding:3px 10px;color:{_c};'
+                f'font-weight:700">{_r["bp件"]:+.1f}</td>'
+                f'<td style="text-align:right;padding:3px 10px">'
+                f'{_wr:.0f}%</td></tr>')
+        _h.append('</table></details>')
+
     # ★★ 発注順の帯 (2026-09-07)。**基準タブだけ**で出す。
     #   問い: 合格33件で予算は9件。その9件をどう選ぶか。
     #   ⛔ ランダムを何本か回して散らばりを作らないと判定できない(§18.24)。
