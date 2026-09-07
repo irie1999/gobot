@@ -341,8 +341,26 @@ if __name__ == "__main__":
     #   問われるのは「何秒遅れるか」= 何bp 失うか、だけ。
     if a.rotate:
         _bs = max(1, a.batch)
-        _batches = [_syms[i:i + _bs] for i in range(0, len(_syms), _bs)]
-        print(f"\n[rotate] {len(_syms)}銘柄 を {_bs}件 × {len(_batches)}バッチ")
+        _ka0 = max(0, a.keep_alive)
+        # ⛔⛔ **keep-alive のぶんを引いてからバッチを切る**(2026-09-07 修正)。
+        #   以前は 50件ずつ切ってから _want を45件にスライスしていたので、
+        #   **残り5件が黙って捨てられ**、150件のつもりで140件しか
+        #   測っていなかった。銘柄が消えるのに何も表示されない最悪の形。
+        _q = list(_syms)
+        _batches = []
+        while _q:
+            _cap = max(1, _bs - (_ka0 if _batches else 0))
+            _batches.append(_q[:_cap])
+            _q = _q[_cap:]
+        _cov = sum(len(b) for b in _batches)
+        print(f"\n[rotate] {len(_syms)}銘柄 を {len(_batches)}バッチ"
+              f"({' + '.join(str(len(b)) for b in _batches)})"
+              + (f" / keep-alive {_ka0}件ぶん2バッチ目以降は{_bs - _ka0}件"
+                 if _ka0 else ""))
+        # ★ 保存則(条件10)の入口。ここで欠けていたら測定にならない。
+        if _cov != len(_syms):
+            sys.exit(f"[error] バッチの合計 {_cov} != 対象 {len(_syms)}。"
+                     f"銘柄が落ちています")
         print("[rotate] ⛔ 照会のみ。発注しません。建玉にも注文にも触れません")
         st = BoardStream(cli.base_url, verbose=True)
         if not st.start():
@@ -367,9 +385,8 @@ if __name__ == "__main__":
                     except Exception:
                         pass
                     _prev = set()
-                else:
-                    # 残した _ka 件ぶん枠が埋まっているので、そのぶん減らす
-                    _want = set(sorted(_want)[:max(1, len(_want) - _ka)])
+                # ⛔ ここで _want を削らないこと。バッチを切る時点で
+                #   keep-alive のぶんは引いてある(削ると銘柄が消える)。
             else:
                 try:
                     cli.unregister_all()
@@ -385,7 +402,11 @@ if __name__ == "__main__":
             #   ハングし、その間に WebSocket がアイドルで落ちて
             #   「ローテーションすると再接続する」と誤診した。
             #   → 登録の成否だけ RegistList で見て、**待つ数は _want の数**。
-            _reg_n = len((_rr or {}).get("RegistList") or [])
+            _rl = (_rr or {}).get("RegistList") or []
+            _reg_n = len(_rl)
+            # ★ **どの銘柄が登録されたか**を集合で持つ(件数だけだと
+            #   「無効コードで登録できなかった」を分類できない)。
+            _reg_ok = {str((_x or {}).get("Symbol") or "") for _x in _rl}
             _nok = min(_reg_n, len(_want)) if _reg_n else 0
             _t_reg = _time.time() - _t0
             if _nok > 0:
@@ -413,7 +434,10 @@ if __name__ == "__main__":
                 if _arr and _first is None:
                     _first = min(_arr.values())
                     print(f"  [batch{_bi}] 初回受信 {_first:.1f}s", flush=True)
-                if len(_arr) >= _nok and _nok:
+                # ⛔ **件数ではなく集合**で判定する(2026-09-07)。
+                #   件数だと keep-alive 銘柄など『対象外の受信』を数え違える
+                #   余地が残る。RegistList は登録の成否確認にだけ使う。
+                if _want <= set(_arr):
                     break
             _sec = sorted(_arr.values())
 
@@ -488,15 +512,49 @@ if __name__ == "__main__":
             # ★★ 届かなかった銘柄を **REST で確かめる**。
             #   「PUSH が落とした」のか「そもそも今日まだ約定していない」のかで
             #   意味が正反対。前者は実装の問題、後者は現実(始値が存在しない)。
+            #   ★★ **5分類**にする(2026-09-07)。2分類だと『遅寄り』を
+            #     『接続不良』と誤診する。朝は特にここが混ざる。
+            #       A PUSH自体が未受信       … 板が1度も飛んでこない
+            #       B PUSH受信済みだが当日始値なし … 遅寄り(まだ寄っていない)
+            #       C RESTでは当日始値あり   … **PUSH の取りこぼし**
+            #       D 登録できていない       … 無効コード/登録失敗
+            #       E 時間切れ               … 上限に達して打ち切った
             _miss = [s for s in _want if s not in _arr and s not in _before]
-            _miss_traded, _miss_nottraded = [], []
+            _snapf = st.snapshot()
+            _cls = {"A_push無受信": [], "B_遅寄り": [], "C_push取りこぼし": [],
+                    "D_未登録": [], "E_時間切れ": []}
+            _timeout = _waited >= a.batch_wait * 0.95
             for _s in _miss[:12]:            # ⚠ 429 を避けるため上限12件
+                if _s not in _reg_ok:
+                    _cls["D_未登録"].append(_s); continue
+                _bw = _snapf.get(_s)
                 try:
                     _bb = cli.get_board(_s)
                 except Exception:
                     _bb = {}
-                (_miss_traded if float((_bb or {}).get("OpeningPrice") or 0) > 0
-                 else _miss_nottraded).append(_s)
+                _rest_open = float((_bb or {}).get("OpeningPrice") or 0) > 0
+                if _rest_open:
+                    # REST には当日の始値がある = PUSH が落とした
+                    _cls["C_push取りこぼし"].append(_s)
+                elif _bw:
+                    _cls["B_遅寄り"].append(_s)   # 板は来たが始値がまだ
+                elif _timeout:
+                    _cls["E_時間切れ"].append(_s)
+                else:
+                    _cls["A_push無受信"].append(_s)
+            for _s in _miss[12:]:
+                _cls["E_時間切れ"].append(_s)     # 未検査ぶんはここに寄せる
+            _miss_traded = _cls["C_push取りこぼし"]
+            _miss_nottraded = _cls["B_遅寄り"] + _cls["A_push無受信"]
+            # ★ 保存則(条件10): 対象 = 取得 + 各分類。説明不能があれば止める
+            _acct = len(_arr) + sum(len(v) for v in _cls.values())
+            if _acct != len(_want):
+                print(f"  ⛔⛔ batch{_bi}: **説明不能 {len(_want) - _acct}件**"
+                      f"(対象{len(_want)} = 取得{len(_arr)} + 分類"
+                      f"{sum(len(v) for v in _cls.values())})。"
+                      f"分類が漏れています", flush=True)
+            _cls_s = " / ".join(f"{k}{len(v)}" for k, v in _cls.items()
+                                if v)
             _res.append((_bi, len(_want), _nok, _got, _waited, _first, _full,
                          _pct(0.5), len(_miss), len(_miss_traded),
                          len(_miss_nottraded), st.n_reconnect - _rc0))
@@ -505,9 +563,7 @@ if __name__ == "__main__":
                   f"登録{_t_reg:.1f}s / 初回"
                   f"{'—' if _first is None else f'{_first:.1f}s'}"
                   f" / 中央{_pct(0.5):.1f}s / 90%点{_full:.1f}s"
-                  + (f" / ⛔ 未達{len(_miss)}件"
-                     f"(RESTで確認: 約定済み{len(_miss_traded)} "
-                     f"未約定{len(_miss_nottraded)})" if _miss else "")
+                  + (f" / ⛔ 未達{len(_miss)}件[{_cls_s}]" if _miss else "")
                   + (f" / ⚠ 再接続{st.n_reconnect - _rc0}回"
                      if st.n_reconnect > _rc0 else ""), flush=True)
         st.stop()
