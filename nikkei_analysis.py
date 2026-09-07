@@ -1080,11 +1080,20 @@ def _newgap_build(days: int, min_price: float, max_price: float,
         + (f'前夜: 前日リターン <b style="color:#e2e8f0">≥ +{_NG_RET1:.3f}%</b>'
            if _shortside else
            f'前夜: 前日リターン <b style="color:#e2e8f0">≤ −{_NG_RET1:.3f}%</b>')
+        # ★★ **2つのギャップを取り違えないための明示** (2026-09-07 ユーザーの問い
+        #   「前日の始値→終値 と 終値→始値、どっちのこと?」)。答えは:
+        #     ・前日リターン = **終値 → 終値**(D日の終値 ÷ D-1日の終値)。
+        #       日中(始値→終値)ではない。newgap_core:85 `_c.pct_change(1)`
+        #     ・ギャップ    = **終値 → 始値**(D+1の始値 ÷ D日の終値) = オーバーナイト。
+        #       newgap_core:119 `(o1 - pc) / pc`
+        + f'<span style="color:#94a3b8">（<b>終値→終値</b>。日中ではありません）</span>'
         + f' の銘柄を'
         f'流動性降順に並べ <b style="color:#e2e8f0">上位{_NG_WATCH}件</b>'
         f'（kabu の登録上限 / §18.44）<br>'
         + (f'09:00: その始値を見て <b style="color:#e2e8f0">'
-           f'ギャップ ≥ +{_NG_GAP_BP:.0f}bp</b> なら<b>空売り</b>。'
+           f'ギャップ ≥ +{_NG_GAP_BP:.0f}bp</b>'
+           f'<span style="color:#94a3b8">（<b>前日終値→当日始値</b>の'
+           f'オーバーナイト）</span> なら<b>空売り</b>。'
            if _shortside else
            f'09:00: その始値を見て <b style="color:#e2e8f0">'
            f'ギャップ ≤ −{_NG_GAP_BP:.0f}bp</b> なら<b>買い</b>。')
