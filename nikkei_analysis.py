@@ -644,6 +644,13 @@ _NG_MIRROR_TAB = os.environ.get("LSS_NEWGAP_MIRROR", "1").strip().lower() \
 #     ギャップを同時に知れないので、ギャップ降順には建てられない(§18.67)。
 _NG_NOCAP_TAB = os.environ.get("LSS_NEWGAP_NOCAP", "1").strip().lower() \
     not in ("0", "false", "no", "")
+# ★★ 予算なし = **合格した銘柄を全部建てる** (2026-09-07 ユーザー依頼)。
+#   ⛔ 発注ルールの候補ではなく、**信号の地力を見る診断**。§18.10 の
+#     「『全部買えるなら得』と『予算内でどれを買うか』は別問題」がそのまま
+#     当てはまる。実運用の400万では1日十数件しか建たない。
+#   watch も同時に外す(予算を外して板の上限だけ残すのは中途半端)。
+_NG_ALL_TAB = os.environ.get("LSS_NEWGAP_ALL", "1").strip().lower() \
+    not in ("0", "false", "no", "")
 _NG_NOPX_TAB = os.environ.get("LSS_NEWGAP_NOPX", "0").strip().lower() \
     not in ("0", "false", "no", "")
 # ★ N だけ **別の窓**で見る (2026-09-05 ユーザー依頼「11年分」)。0=レポートの --days に従う。
@@ -849,9 +856,18 @@ def _newgap_build(days: int, min_price: float, max_price: float,
     #     流動性のバンド順(= バッチ順 = 寄った順)しか実現できない。
     #     watch を広げるときに "gap" のままにすると『強い順に選び放題』に
     #     なり、実現できない上振れが出る。
-    _ng_watch = 0 if variant == "nocap" else _NG_WATCH
-    _ng_order = "liq" if variant == "nocap" else "gap"
-    _sim = _newgap_sim(_rows, _NG_BUDGET, _ng_watch, _NG_GAP_BP, _NG_RET1,
+    # ★★ 予算なし(2026-09-07 ユーザー依頼)。**合格した銘柄を全部建てる**。
+    #   ⛔ これは発注ルールの候補ではなく **信号の地力を見る診断**。
+    #     §18.10 の教訓「『全部買えるなら得』と『予算内でどれを買うか』は
+    #     別問題」がそのまま当てはまる。実運用は400万で1日十数件しか建たない。
+    #   watch も外す(予算を外すのに板の上限だけ残すのは中途半端)。
+    _ng_all = (variant == "all")
+    _ng_watch = 0 if variant in ("nocap", "all") else _NG_WATCH
+    # 予算なしは 10兆円。日次の最大投入(下で出す必要資金)が数億なので絶対に効かない
+    _ng_budget = 1e9 if _ng_all else _NG_BUDGET
+    # 全部建てるなら順序は結果に影響しない。表示の一貫性のため liq にする
+    _ng_order = "liq" if variant in ("nocap", "all") else "gap"
+    _sim = _newgap_sim(_rows, _ng_budget, _ng_watch, _NG_GAP_BP, _NG_RET1,
                        order=_ng_order)
     # ★ 日次の損益をCSVに出す(2026-09-01)。レジーム別の検定など、外の
     #   スクリプトから使うため。既定OFF。
@@ -932,8 +948,13 @@ def _newgap_build(days: int, min_price: float, max_price: float,
            f'{_sp["nd"]:,}営業日）</b>'
            f'　⚠ レポートの表示窓ではなく <code>LSS_NEWGAP_DAYS</code> です<br>'
            if _NG_DAYS > 0 and _sp else '')
-        + f'予算 <b style="color:#e2e8f0">{_NG_BUDGET:,.0f}万円</b> / '
-        f'{_NG_QTY}株固定 / |ギャップ|降順に充当 / '
+        + (f'予算 <b style="color:#ef4444">なし（合格を全部建てる）</b> / '
+           f'{_NG_QTY}株固定 / '
+           if _ng_all else
+           f'予算 <b style="color:#e2e8f0">{_NG_BUDGET:,.0f}万円</b> / '
+           f'{_NG_QTY}株固定 / '
+           + ('<b>流動性</b>降順' if _ng_order == "liq" else '|ギャップ|降順')
+           + 'に充当 / ')
         + (f'建値 <b style="color:#e2e8f0">{min_price:,.0f}〜{max_price:,.0f}円</b>'
            if (min_price > 0 or max_price < 1e9) else
            f'建値 <b style="color:#f59e0b">制限なし</b>'
@@ -980,7 +1001,51 @@ def _newgap_build(days: int, min_price: float, max_price: float,
     _h.append('</div>')
 
     # ── 50件の壁 ──
-    if _ng_watch <= 0:
+    if _ng_all:
+        # ★★ 予算なし = 合格を全部建てる。**発注ルールの候補ではない**。
+        #   ここで出すのは「信号の地力」と「そのために要る資金」の2つだけ。
+        _pk = float(_dd["used"].max()) if len(_dd) else 0.0
+        _md = float(_dd["used"].median()) if len(_dd) else 0.0
+        _b400 = _newgap_sim(_rows, _NG_BUDGET, 0, _NG_GAP_BP, _NG_RET1,
+                            order="liq")
+        _d4 = _b400.get("days")
+        _n4 = int(_d4["built"].sum()) if _d4 is not None and len(_d4) else 0
+        _p4 = float(_d4["pnl"].sum()) if _d4 is not None and len(_d4) else 0.0
+        _nall = int(_dd["built"].sum()); _pall = float(_dd["pnl"].sum())
+        _h.append(
+            f'<div style="background:#3f1d1d;border:1px solid #7f1d1d;'
+            f'border-radius:8px;padding:10px 14px;margin:10px 0;'
+            f'font-size:0.82rem;line-height:1.7">'
+            f'<b style="color:#fca5a5">⛔ これは発注ルールではありません。'
+            f'信号の地力を見る診断です</b><br>'
+            f'§18.10 の教訓がそのまま当てはまります —'
+            f'<b>「全部買えるなら得」と「予算内でどれを買うか」は別問題</b>。'
+            f'実運用の400万では1日十数件しか建ちません。<br><br>'
+            f'<table style="border-collapse:collapse;font-size:0.8rem">'
+            f'<tr style="color:#94a3b8">'
+            f'<th style="text-align:left;padding:3px 10px">条件</th>'
+            f'<th style="text-align:right;padding:3px 10px">建てた</th>'
+            f'<th style="text-align:right;padding:3px 10px">損益</th>'
+            f'<th style="text-align:right;padding:3px 10px">1件あたり</th></tr>'
+            f'<tr><td style="padding:3px 10px">予算400万・制限なし・流動性順</td>'
+            f'<td style="text-align:right;padding:3px 10px">{_n4:,}</td>'
+            f'<td style="text-align:right;padding:3px 10px">{_p4:+,.0f}</td>'
+            f'<td style="text-align:right;padding:3px 10px">'
+            f'{_p4 / max(_n4, 1):+,.0f}円</td></tr>'
+            f'<tr style="background:#450a0a"><td style="padding:3px 10px">'
+            f'<b>予算なし（このタブ）</b></td>'
+            f'<td style="text-align:right;padding:3px 10px"><b>{_nall:,}</b></td>'
+            f'<td style="text-align:right;padding:3px 10px"><b>{_pall:+,.0f}</b></td>'
+            f'<td style="text-align:right;padding:3px 10px"><b>'
+            f'{_pall / max(_nall, 1):+,.0f}円</b></td></tr></table><br>'
+            f'<b style="color:#fca5a5">要る資金: 1日の投入額 中央 '
+            f'{_md / 1e4:,.0f}万円 / <u>最大 {_pk / 1e4:,.0f}万円</u></b>'
+            f'（同時保有のピーク。信用の委託保証金は発注時に要ります）<br>'
+            f'⚠ <b>1件あたりが予算400万版より低ければ、予算制約は選別として'
+            f'働いています</b>。高ければ、予算が良いトレードを切っています。<br>'
+            f'⚠ slip=0 の理論値です。件数が増えるほど執行コストは比例して'
+            f'増えるので、この額はそのぶん過大です。</div>')
+    elif _ng_watch <= 0:
         # ★★ 50件制限なしの変種。ここでは「壁」ではなく **4通りの比較**を出す。
         #   watch を広げた効果と、発注順を現実的にした損を分けて見せる。
         #   ⛔ 混ぜると『watch を広げたら増えた』が『ギャップ降順で選び放題』
@@ -1296,7 +1361,13 @@ def _newgap_txt_report(items: list, path: str) -> None:
     _w(f"  09:00 : その始値を見て ギャップ ≥ +{_NG_GAP_BP:.0f}bp なら空売り"
        f"(鏡像は符号反転)")
     _w(f"  引け  : MOC。**損切り・利確・delay を1つも持たない**")
+    # ⛔ ここは **共通の条件**。変種ごとに上書きされる項目は下に明記する。
+    #   (2026-09-07: _ng_all をここで参照して NameError を出した。
+    #    この関数は _newgap_build の外なので、変種の状態は見えない)
     _w(f"  予算  : {_NG_BUDGET:,.0f}万円 / {_NG_QTY}株固定 / |ギャップ|降順に充当")
+    _w(f"  ⚠ 変種で上書きされるもの: 『50件制限なし』は watch=無制限・"
+       f"**流動性降順** / 『予算なし(全建て)』は **予算なし**・watch=無制限・"
+       f"流動性降順 / 『株価制限なし』は建値の上下限なし")
     _w(f"  執行  : slip=0(板寄せ前提)。実測の遅延は別途 -{_NG_DELAY_BP:.1f}bp 程度")
     _w("")
     _w("⛔ 読み方: 総額だけで比べないこと。100株固定なので値がさ株ほど1件の")
@@ -22134,6 +22205,11 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 #     建てられない(§18.67)。スキャンは共有なので計算は増えない。
                 _ng_sides.append(("short", "newgapnc", "🔓 N 50件制限なし",
                                   "#f59e0b", "#fcd34d", _ng_lo, _ng_hi, "nocap"))
+            if _NG_ALL_TAB:
+                # ★★ 予算なし = 合格を全部建てる(2026-09-07 ユーザー依頼)。
+                #   ⛔ **発注ルールではなく信号の地力の診断**。§18.10。
+                _ng_sides.append(("short", "newgapall", "⛔ N 予算なし(全建て)",
+                                  "#ef4444", "#fca5a5", _ng_lo, _ng_hi, "all"))
             if _NG_NOPX_TAB:
                 # ★ 株価制限なし(2026-09-05)。スキャンは共有、価格帯だけ外す
                 _ng_sides.append(("short", "newgapx", "★ N 株価制限なし",
