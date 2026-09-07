@@ -141,9 +141,15 @@ def _newgap_sim(rows: list, budget_man: float, watch: int,
     ⚠ 合格件数は 09:00 に確定するので、それで割るのは **先読みではない**。
     """
     _q0 = int(qty or _NG_QTY)
-    if not rows:
+    # ★★ DataFrame をそのまま受ける (2026-09-07)。
+    #   ⛔ 以前は list[dict] 前提で **呼ばれるたびに** pd.DataFrame(rows) を
+    #     作り直していた。変種7本 + 資金スイープ + watch スイープ で数十回
+    #     呼ばれるので、19年窓(626万行)では毎回 数百MB を確保して捨てる。
+    #     実測: `.\nlong 7000` が MemoryError(str が空)で N の変種を落とした。
+    #   ⚠ `if not rows` は DataFrame では例外になるので長さで見る。
+    if rows is None or len(rows) == 0:
         return {}
-    _df = pd.DataFrame(rows)
+    _df = rows if isinstance(rows, pd.DataFrame) else pd.DataFrame(rows)
     _cap = budget_man * 10_000.0
     _days, _det = [], []
     for _d, _g in _df.groupby("date"):

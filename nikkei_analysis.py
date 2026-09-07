@@ -749,18 +749,25 @@ def _newgap_names() -> dict:
     return _m
 
 
-def _newgap_mirror_rows(rows: list) -> list:
+def _newgap_mirror_rows(rows):
     """★ 鏡像 = 前日下げ × ギャップダウンを **買う**(§18.56)。
 
     符号を反転するだけで、下流の「ret1 >= 1.753」「gap_bp >= 100」「pnl」が
     そのままロング側の条件になる。⚠ 同じ(銘柄,日)が両側に入ることは無い
     (前日リターンが +1.753% 以上かつ -1.753% 以下は有り得ない)。
+
+    ⛔⛔ 2026-09-07: ここが **`.\\nlong 7000` を落としていた**。
+      `{**r, ...}` は元の行と同じ数だけ **新しい dict を作る**。19年窓では
+      626万行なので、それだけで数GB。DataFrame なら3列を符号反転した
+      コピーで済む(元の列はコピーされるが、行ごとのオブジェクトは作らない)。
     """
-    _o = []
-    for r in rows:
-        _o.append({**r, "ret1": -r["ret1"], "gap_bp": -r["gap_bp"],
-                   "pnl": -r["pnl"]})
-    return _o
+    if isinstance(rows, pd.DataFrame):
+        _o = rows.copy()
+        for _c in ("ret1", "gap_bp", "pnl"):
+            _o[_c] = -_o[_c]
+        return _o
+    return [{**r, "ret1": -r["ret1"], "gap_bp": -r["gap_bp"],
+             "pnl": -r["pnl"]} for r in rows]
 
 
 def _newgap_rows_to_trades(det, side: str = "short") -> list:
@@ -861,7 +868,9 @@ def _newgap_build(days: int, min_price: float, max_price: float,
         if _ngc_f.exists():
             try:
                 _t_c = _time.time()
-                _rows = pd.read_pickle(_ngc_f).to_dict("records")
+                # ⛔ to_dict("records") は 626万行で **数GBの dict** を作る。
+                #   DataFrame のまま渡す(下流は isinstance で両方受ける)。
+                _rows = pd.read_pickle(_ngc_f)
                 _NG_ROWS_CACHE[_ck] = _rows
                 print(f"  [新方式N] キャッシュ {len(_rows):,}行 / "
                       f"{_time.time() - _t_c:.1f}s ({_ngc_f.name})", flush=True)
@@ -887,12 +896,16 @@ def _newgap_build(days: int, min_price: float, max_price: float,
         except Exception as _e:
             return {"head": f'<div style="color:#fbbf24">⛔ 新方式Nの計算に失敗: {_e}</div>',
                     "trades": []}
+        # ★ スキャン直後に DataFrame へ畳む。以降 list[dict] は持たない
+        # ここの _rows は必ず list(スキャン結果を extend したもの)。
+        # ⚠ 以降は DataFrame。真偽評価ではなく len() で見ること
+        _rows = pd.DataFrame(_rows) if len(_rows) else pd.DataFrame()
         _NG_ROWS_CACHE[_ck] = _rows
         # ★ ディスクにも保存。DataFrame の pickle にすると list[dict] より
-        #   ずっと小さく読みも速い(戻すのは to_dict("records") で同じ形)。
-        if _ngc_f is not None and _rows:
+        #   ずっと小さく読みも速い。
+        if _ngc_f is not None and len(_rows):
             try:
-                pd.DataFrame(_rows).to_pickle(_ngc_f)
+                _rows.to_pickle(_ngc_f)
                 print(f"  [新方式N] キャッシュ保存 {_ngc_f.name} "
                       f"({_ngc_f.stat().st_size / 1e6:.1f}MB)", flush=True)
                 # 古い版・古いバー日付を掃除(放置すると溜まる)
@@ -907,8 +920,8 @@ def _newgap_build(days: int, min_price: float, max_price: float,
                 print(f"  ⚠ Nキャッシュを保存できません({_se})", flush=True)
         # ★★ **実際に取れた期間**を出す(§18.53: 要求した窓が取れたと思い込まない)。
         #   キャッシュが短いと黙って短い窓で走り、「不合格」が出るだけになる。
-        if _rows:
-            _ds = sorted({r["date"] for r in _rows})
+        if len(_rows):
+            _ds = sorted(_rows["date"].unique().tolist())
             _NG_SPAN[_ck] = {"lo": _ds[0], "hi": _ds[-1], "nd": len(_ds),
                              "rows": len(_rows), "req": days}
             _yrs = (pd.Timestamp(_ds[-1]) - pd.Timestamp(_ds[0])).days / 365.25
@@ -927,11 +940,16 @@ def _newgap_build(days: int, min_price: float, max_price: float,
     #     LSS_NEWGAP_PX_RECHECK=1(既定OFF)。ONだと当日の始値が帯の外の
     #     銘柄を **判定時に** 落とす(watch50 の顔ぶれは前夜のまま = 先読みなし)。
     _lo, _hi = float(min_price or 0.0), float(max_price or 1e12)
-    if _lo > 0 or _hi < 1e11:
-        _rows = [r for r in _rows
-                 if _lo <= float(r.get("prev_close") or r["entry_p"]) <= _hi
-                 and (not _NG_PX_RECHECK
-                      or _lo <= float(r["entry_p"]) <= _hi)]
+    if (_lo > 0 or _hi < 1e11) and len(_rows):
+        # ⛔ 行ごとのループにしない(626万回の Python ループ + 新リスト)。
+        #   prev_close が無い/0 の行は entry_p で代用する(旧実装と同じ)。
+        _pc = _rows["prev_close"].where(_rows["prev_close"] > 0,
+                                        _rows["entry_p"]).astype(float)
+        _m = (_pc >= _lo) & (_pc <= _hi)
+        if _NG_PX_RECHECK:
+            _ep = _rows["entry_p"].astype(float)
+            _m &= (_ep >= _lo) & (_ep <= _hi)
+        _rows = _rows[_m]
     if side == "long":
         _rows = _newgap_mirror_rows(_rows)
     # ★★ 50件制限なしの変種 (2026-09-07)。PUSH配信でローテーションできる
@@ -1540,7 +1558,10 @@ def _newgap_txt_report(items: list, path: str) -> None:
     # ── ★ 資金が増えたら (ショートの本線だけ) ──
     _cap_src = next((_r for _l, _r in items
                      if _r.get("side") == "short" and not _r.get("variant")), None)
-    if _cap_src and _cap_src.get("rows") and _NG_CAP:
+    # ⛔ rows は DataFrame になった(2026-09-07)。`and df` も `df or []` も
+    #   ValueError: truth value of a DataFrame is ambiguous になる。長さで見る
+    _cap_rows = _cap_src.get("rows") if _cap_src else None
+    if _cap_rows is not None and len(_cap_rows) and _NG_CAP:
         _w("=" * 78)
         _w("■ ★ 資金が増えたらどうなるか")
         _w("=" * 78)
@@ -22370,8 +22391,21 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                      if _NG_TXT.lower() == "auto" else _NG_TXT))
             print(f"[新方式N] {len(_ng_syms):,}銘柄 / "
                   f"{_time.time() - _t_ng:.1f}s", flush=True)
-        except Exception as _nge:
-            print(f"[新方式N] 失敗(タブを出しません): {_nge}", flush=True)
+        except BaseException as _nge:
+            # ⛔⛔ 2026-09-07: ここが `[新方式N] 失敗(タブを出しません): ` と
+            #   **空のメッセージ**を出して終わっていた。MemoryError は str() が
+            #   空なので、型名を出さないと原因が1文字も分からない。
+            #   ⚠ MemoryError は Exception のサブクラスだが、KeyboardInterrupt を
+            #     握り潰さないよう再送出する。
+            import traceback as _tbm
+            print(f"[新方式N] ⛔ 失敗(残りの変種を出しません): "
+                  f"**{type(_nge).__name__}**: {_nge}", flush=True)
+            if isinstance(_nge, MemoryError):
+                print("   ★ メモリ不足です。窓を短くしてください:"
+                      "  .\\nlong 4200  (11.5年 / 母集団87%)", flush=True)
+            _tbm.print_exc()
+            if isinstance(_nge, KeyboardInterrupt):
+                raise
 
     # 転換トレード専用タブ(lssのみ)。ショートの400万円タブとは別に転換だけをまとめる。
     try:
