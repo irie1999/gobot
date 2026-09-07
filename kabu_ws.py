@@ -516,12 +516,23 @@ if __name__ == "__main__":
             #     『接続不良』と誤診する。朝は特にここが混ざる。
             #       A PUSH自体が未受信       … 板が1度も飛んでこない
             #       B PUSH受信済みだが当日始値なし … 遅寄り(まだ寄っていない)
-            #       C RESTでは当日始値あり   … **PUSH の取りこぼし**
+            #       C RESTには当日始値がある … **PUSH がまだ配信していない**
             #       D 登録できていない       … 無効コード/登録失敗
             #       E 時間切れ               … 上限に達して打ち切った
+            #
+            # ⛔⛔ C を『取りこぼし(バグ)』と読まないこと(2026-09-07)。
+            #   **PUSH は値が動いたときしか飛んでこない。** 流動性の低い
+            #   銘柄は購読しても数分ティックしないので何も来ない。
+            #   実測でバッチが下(=流動性が低い)ほど C が増えた:
+            #     batch1(1〜50位)  取得50/50 未達0
+            #     batch2(51〜95位) 取得35/45 未達10 全部C
+            #     batch3(96〜140位)取得28/45 未達17
+            #   ★ そして **09:00 は正反対**。板寄せで全銘柄が必ず約定するので
+            #     PUSH は即座に飛ぶ。**場中のこの数字は悲観側の下限**であり、
+            #     朝の実測に置き換えるまで採否の根拠にしないこと。
             _miss = [s for s in _want if s not in _arr and s not in _before]
             _snapf = st.snapshot()
-            _cls = {"A_push無受信": [], "B_遅寄り": [], "C_push取りこぼし": [],
+            _cls = {"A_push無受信": [], "B_遅寄り": [], "C_push未配信": [],
                     "D_未登録": [], "E_時間切れ": []}
             _timeout = _waited >= a.batch_wait * 0.95
             for _s in _miss[:12]:            # ⚠ 429 を避けるため上限12件
@@ -535,7 +546,7 @@ if __name__ == "__main__":
                 _rest_open = float((_bb or {}).get("OpeningPrice") or 0) > 0
                 if _rest_open:
                     # REST には当日の始値がある = PUSH が落とした
-                    _cls["C_push取りこぼし"].append(_s)
+                    _cls["C_push未配信"].append(_s)
                 elif _bw:
                     _cls["B_遅寄り"].append(_s)   # 板は来たが始値がまだ
                 elif _timeout:
@@ -544,7 +555,7 @@ if __name__ == "__main__":
                     _cls["A_push無受信"].append(_s)
             for _s in _miss[12:]:
                 _cls["E_時間切れ"].append(_s)     # 未検査ぶんはここに寄せる
-            _miss_traded = _cls["C_push取りこぼし"]
+            _miss_traded = _cls["C_push未配信"]
             _miss_nottraded = _cls["B_遅寄り"] + _cls["A_push無受信"]
             # ★ 保存則(条件10): 対象 = 取得 + 各分類。説明不能があれば止める
             _acct = len(_arr) + sum(len(v) for v in _cls.values())
@@ -602,15 +613,29 @@ if __name__ == "__main__":
         _mt_all = sum(r[9] for r in _res if r[3] is not None)
         _mn_all = sum(r[10] for r in _res if r[3] is not None)
         if _mt_all or _mn_all:
-            print(f"\n  未達の内訳(REST で確認・各バッチ先頭12件まで): "
-                  f"**約定済みなのに届かなかった {_mt_all}件** / "
-                  f"そもそも未約定 {_mn_all}件")
-            if _mt_all:
-                print(f"    ⛔ {_mt_all}件は **PUSH の取りこぼし**です。"
-                      f"再接続と同時に起きているなら接続の問題")
-            if _mn_all and not _mt_all:
-                print(f"    ✅ 未達はすべて『今日まだ約定していない銘柄』。"
-                      f"PUSH は取りこぼしていません")
+            print(f"\n  未達 {_mt_all + _mn_all}件のうち "
+                  f"**C_push未配信(RESTには当日始値がある) {_mt_all}件**")
+            # ★★ C は **バグではない**。PUSH は値が動いたときしか飛ばない。
+            #   バッチが下(=流動性が低い)ほど増えるのがその証拠。
+            _rate = [(r[0], r[1], r[3], r[1] - r[3]) for r in _res
+                     if r[3] is not None]
+            if len(_rate) >= 2:
+                print("    バッチ別の取得率(流動性の高い順にバッチが並ぶ):")
+                for _bi2, _nb2, _g2, _m2 in _rate:
+                    print(f"      batch{_bi2}: {_g2}/{_nb2} "
+                          f"({_g2 / max(1, _nb2) * 100:.0f}%) 未達{_m2}")
+                _first_r = _rate[0][2] / max(1, _rate[0][1])
+                _last_r = _rate[-1][2] / max(1, _rate[-1][1])
+                if _first_r > _last_r + 0.1:
+                    print("    ★ **下のバッチほど取得率が低い = 流動性の効果**。"
+                          "PUSH は値が動いたときしか飛ばないので、"
+                          "ティックの少ない銘柄は購読しても来ません。"
+                          "**バグではありません。**")
+            print("    ⛔⛔ **場中のこの数字は悲観側の下限です。**"
+                  " 09:00 は板寄せで全銘柄が必ず約定するので PUSH は即座に"
+                  "飛びます。**採否は朝の実測に置き換えてから**判断すること")
+            print("    → live は PUSH の裾を待たず、"
+                  "届いていない銘柄だけ REST で読む(下のハイブリッド)")
         _rc_all = sum(r[11] for r in _res if r[3] is not None)
         if _rc_all:
             print(f"\n  ⚠ **WebSocket が {_rc_all}回 再接続しています**。"
