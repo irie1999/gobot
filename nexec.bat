@@ -19,15 +19,34 @@ REM                                      top 50 by 20-day turnover)
 REM   pass        open >= prev close + 100bp, NO UPPER GAP LIMIT,
 REM               and the 09:00 open must itself be 1,000-6,000 yen
 REM   size        100 SHARES, FIXED
-REM   entry       protective limit WELL BELOW the open:
-REM                 --n-limit-ticks 100 --n-limit-max-bp 300
-REM               The limit is a FLOOR, not a target. A sell limit fills at or
-REM               above its price, so in a normal book it executes at the best
-REM               buy quote (near the open) and only refuses when the book has
-REM               collapsed more than 3 pct. Do NOT use a limit AT the open:
-REM               it only fills when the price came back up, i.e. exactly on
-REM               the names N loses on (2026-09-01: 3110 fell and never
-REM               filled, 5301 rose and did).
+REM   entry       LIMIT AT THE OPEN PRICE, exactly. Nothing is passed here;
+REM               k_open_confirm defaults are --n-limit-ticks 0 and
+REM               --n-limit-max-bp 7.5, and with 0 ticks the limit is the open
+REM               (see the loop at k_open_confirm.py:1375, it runs 0 times).
+REM               A sell limit fills at or ABOVE its price, so this fills only
+REM               while the price is at or above the open, and waits otherwise
+REM               until 09:10 cancels it. About 80 pct fill.
+REM               *** THIS BLOCK USED TO SAY THE OPPOSITE. ***
+REM               It described "--n-limit-ticks 100 --n-limit-max-bp 300, a
+REM               protective floor 3 pct below the open" and warned "do NOT
+REM               use a limit AT the open". Those flags were never on the
+REM               command line - only in this comment - and the code default
+REM               was changed to 0 on 2026-08-31 with its own reasoning at
+REM               k_open_confirm.py:231. Two decisions in opposite directions,
+REM               one comment never updated. On 2026-09-07 it cost an hour:
+REM               the unfilled names were read as "protective limit rejected
+REM               a 3 pct collapse" when the truth is "one tick down and it
+REM               does not fill".
+REM               *** AND THE OLD WARNING WAS WRONG ON THE FACTS. ***
+REM               Measured on the purchased Aug-2026 tick data (469 candidates,
+REM               20 sessions, live order, 4M budget): sweeping the limit from
+REM               the open down to a market order takes the fill rate from
+REM               77 pct to 100 pct and does NOT raise P&L (+222,750 at the
+REM               open, +212,950 at market; the whole range 201k-230k sits
+REM               inside the random-order band sigma of 35,576). The names it
+REM               misses look like winners only because that assumes filling
+REM               AT the open. At the real +10s price they are 42 wins /
+REM               36 losses. Leave it at the open. See CLAUDE.md 18.70.
 REM   exit        CLOSING MOC ONLY. no stop, no target, NO WATCHER.
 REM
 REM HOW THE EXIT IS MADE SAFE (this is the part that took two rounds)
