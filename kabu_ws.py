@@ -379,7 +379,14 @@ if __name__ == "__main__":
             _before = set(st.snapshot())
             _t0 = _time.time()
             _rr = cli.register_many(sorted(_want))
-            _nok = len((_rr or {}).get("RegistList") or [])
+            # ⛔⛔ RegistList は **今回追加した数ではなく、現在の登録全部**を
+            #   返す(2026-09-07 実測: keep-alive で45件だけ追加したのに50)。
+            #   これを待機の終了条件にすると **来ない5件を待って90秒**
+            #   ハングし、その間に WebSocket がアイドルで落ちて
+            #   「ローテーションすると再接続する」と誤診した。
+            #   → 登録の成否だけ RegistList で見て、**待つ数は _want の数**。
+            _reg_n = len((_rr or {}).get("RegistList") or [])
+            _nok = min(_reg_n, len(_want)) if _reg_n else 0
             _t_reg = _time.time() - _t0
             if _nok > 0:
                 # 残した銘柄 + 今回登録した銘柄 = いま登録されているもの
@@ -486,10 +493,14 @@ if __name__ == "__main__":
                     _bb = {}
                 (_miss_traded if float((_bb or {}).get("OpeningPrice") or 0) > 0
                  else _miss_nottraded).append(_s)
-            _res.append((_bi, len(_b), _nok, _got, _t_reg, _first, _full,
+            # ★ そのバッチで **何秒 待ったか**。上限(--batch-wait)に張り付いて
+            #   いれば「早く抜けられずアイドルで落ちた」と分かる。
+            _waited = _time.time() - _t0
+            _res.append((_bi, len(_want), _nok, _got, _waited, _first, _full,
                          _pct(0.5), len(_miss), len(_miss_traded),
                          len(_miss_nottraded), st.n_reconnect - _rc0))
-            print(f"  [batch{_bi}] 要求{len(_b)} 登録{_nok} **取得{_got}** / "
+            print(f"  [batch{_bi}] 対象{len(_want)}(登録済み計{_reg_n}) "
+                  f"**取得{_got}** / "
                   f"登録{_t_reg:.1f}s / 初回"
                   f"{'—' if _first is None else f'{_first:.1f}s'}"
                   f" / 中央{_pct(0.5):.1f}s / 90%点{_full:.1f}s"
@@ -507,18 +518,28 @@ if __name__ == "__main__":
         print("\n" + "=" * 72)
         print("■ 判定: PUSH なら50件の壁を回して超えられるか")
         print("=" * 72)
-        print(f"  {'batch':>6} {'要求':>5} {'登録':>5} {'取得':>5} "
-              f"{'初回s':>7} {'中央s':>7} {'90%s':>7} {'未達':>5} {'再接続':>6}")
+        print(f"  {'batch':>6} {'対象':>5} {'取得':>5} "
+              f"{'初回s':>7} {'中央s':>7} {'90%s':>7} {'待ちs':>7} "
+              f"{'未達':>5} {'再接続':>6}")
         for (_bi, _nb, _nok, _got, _tr, _f1, _fa, _md, _nm, _mt, _mn,
              _rc) in _res:
             if _got is None:
-                print(f"  {_bi:>6} {_nb:>5} {0:>5} {'—':>5} "
-                      f"{'—':>7} {'—':>7} {'—':>7} {'—':>5} {'—':>6}"
+                print(f"  {_bi:>6} {_nb:>5} {'—':>5} "
+                      f"{'—':>7} {'—':>7} {'—':>7} {'—':>7} {'—':>5} {'—':>6}"
                       f"   ⛔ 登録失敗 = 測定外")
                 continue
-            print(f"  {_bi:>6} {_nb:>5} {_nok:>5} {_got:>5} "
+            _hang = _tr >= a.batch_wait * 0.95
+            print(f"  {_bi:>6} {_nb:>5} {_got:>5} "
                   f"{'—' if _f1 is None else f'{_f1:>7.1f}'} "
-                  f"{_md:>7.1f} {_fa:>7.1f} {_nm:>5} {_rc:>6}")
+                  f"{_md:>7.1f} {_fa:>7.1f} {_tr:>7.1f} {_nm:>5} {_rc:>6}"
+                  + ("   ⛔ 上限まで待った" if _hang else ""))
+        # ★ 「上限まで待った」バッチは、**待ち時間そのものが原因で**
+        #   アイドル切断・裾の悪化を起こしうる。ローテーションのコストと
+        #   混同しないこと(2026-09-07 に実際に誤診した)。
+        if any(r[4] >= a.batch_wait * 0.95 for r in _res if r[3] is not None):
+            print(f"\n  ⛔ 上限({a.batch_wait}秒)まで待ったバッチがあります。"
+                  f"その裾と再接続は **待たされたこと自体**が原因かもしれません。"
+                  f"--batch-wait を短くして測り直してください")
         # ★ 未達の内訳。REST でも始値が無い = そもそも今日まだ約定していない
         #   銘柄なので、PUSH の失敗ではない。
         _mt_all = sum(r[9] for r in _res if r[3] is not None)
