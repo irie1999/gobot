@@ -702,6 +702,14 @@ _NG_MAX_DAYS = int(os.environ.get("LSS_NEWGAP_MAX_DAYS", "250"))
 #   ⚠ 集計・検定の数字には影響しない(タブを描かないだけ)。
 _NG_ONLY = os.environ.get("LSS_NEWGAP_ONLY", "0").strip().lower() \
     not in ("0", "false", "no", "")
+# ★★ 予算スイープをタブに出す (2026-09-08 ユーザー依頼)。
+#   §18.55③ で N は「400→600万で 月+5,611、600万で頭打ち」と測ってあるが、
+#   **テキストレポートの中だけ**で画面に無かった。
+#   ⚠ 予算を上げるのは **レバレッジ**(§18.38 #3b)。損益もσも同率で伸びる
+#     ので「月平均が増えた」を改善と読まないこと。見るのは **資本効率**
+#     (月平均÷実投入額)と **増分効率**(増えた損益÷増えたピーク)。
+#   予算の本数だけ予算シミュを回すので、既定は5本。0 で切る。
+_NG_BUD_LIST = os.environ.get("LSS_NEWGAP_BUDGETS", "200,400,600,800,1200")
 # ★★ 発注順の比較 (2026-09-07 ユーザーの問い「合格33件で予算は9件。
 #   この9件の選び方はランダムしかない?」)。
 #   ⛔ **2条件を1回ずつ比べて差を語らない**(§18.24)。ランダムを何本か回して
@@ -1174,6 +1182,104 @@ def _newgap_build(days: int, min_price: float, max_price: float,
                   f'<div style="color:{_cc};font-size:1.1rem;font-weight:700">{_vv}</div>'
                   f'</div>')
     _h.append('</div>')
+
+    # ★★ 予算スイープ (2026-09-08 ユーザー依頼「どのくらいの予算が最大の効率か」)
+    #   ⛔ 総額で選ばない。予算を上げれば損益もσも同率で伸びる = レバレッジ。
+    #     見るのは **資本効率**(月平均 ÷ 実投入額)と **増分効率**
+    #     (1段上げて増えた損益 ÷ 増えたピーク)。§18.31⑤ と同じ作法。
+    _buds: list = []
+    try:
+        _buds = [float(x) for x in _NG_BUD_LIST.split(",") if x.strip()]
+    except Exception:
+        _buds = []
+    if _buds and not variant and side == "short" and len(_dd) > 60:
+        _nmo2 = max(1.0, len(_dd) / 20.8)          # 1ヶ月 ≒ 20.8営業日
+        _bres: list = []
+        for _bv2 in _buds:
+            try:
+                _s5 = _newgap_sim(_rows, _bv2, _ng_watch, _NG_GAP_BP, _NG_RET1,
+                                  order=_ng_order)
+                _d5 = _s5.get("days")
+                if _d5 is None or _d5.empty:
+                    continue
+                _d5 = _d5.copy(); _d5["m"] = _d5["date"].str[:7]
+                _mm = _d5.groupby("m")["pnl"].sum()
+                _use = _d5[_d5["used"] > 0]["used"]
+                _bres.append({
+                    "予算": _bv2, "件数": int(_d5["built"].sum()),
+                    "合計": float(_d5["pnl"].sum()),
+                    "月平均": float(_d5["pnl"].sum()) / _nmo2,
+                    "σ": float(_mm.std(ddof=1)) if len(_mm) > 1 else 0.0,
+                    "投入": float(_use.median()) if len(_use) else 0.0,
+                    "ピーク": float(_d5["used"].max()),
+                })
+            except Exception:
+                pass
+        if len(_bres) >= 2:
+            _brows = ""
+            _best_i = max(range(len(_bres)),
+                          key=lambda i: (_bres[i]["月平均"] / _bres[i]["投入"]
+                                         if _bres[i]["投入"] else -1e9))
+            for _i5, _r5 in enumerate(_bres):
+                _eff = (_r5["月平均"] / _r5["投入"] * 100.0) if _r5["投入"] else float("nan")
+                _ds2 = (_r5["月平均"] / _r5["σ"]) if _r5["σ"] else float("nan")
+                # 増分効率: 1段上げて増えた損益 ÷ 増えたピーク(1万円あたり)
+                if _i5 == 0:
+                    _inc = float("nan"); _incs = "—"
+                else:
+                    _dp = _r5["月平均"] - _bres[_i5 - 1]["月平均"]
+                    _dk = _r5["ピーク"] - _bres[_i5 - 1]["ピーク"]
+                    _inc = (_dp / (_dk / 1e4)) if _dk > 0 else float("nan")
+                    _incs = "—" if _inc != _inc else f"{_inc:+,.0f}"
+                _mk = " ★" if _i5 == _best_i else ""
+                _brows += (
+                    f'<tr style="{"background:#0f172a;font-weight:700" if _i5 == _best_i else ""}">'
+                    f'<td style="padding:3px 10px">{_r5["予算"]:,.0f}万{_mk}</td>'
+                    f'<td style="text-align:right;padding:3px 10px">{_r5["件数"]:,}</td>'
+                    f'<td style="text-align:right;padding:3px 10px">'
+                    f'{_r5["月平均"]:+,.0f}</td>'
+                    f'<td style="text-align:right;padding:3px 10px;color:#94a3b8">'
+                    f'{_r5["σ"]:,.0f}</td>'
+                    f'<td style="text-align:right;padding:3px 10px">'
+                    f'{"—" if _ds2 != _ds2 else f"{_ds2:.2f}"}</td>'
+                    f'<td style="text-align:right;padding:3px 10px;color:#94a3b8">'
+                    f'{_r5["投入"] / 1e4:,.0f}万</td>'
+                    f'<td style="text-align:right;padding:3px 10px;color:#94a3b8">'
+                    f'{_r5["ピーク"] / 1e4:,.0f}万</td>'
+                    f'<td style="text-align:right;padding:3px 10px;font-weight:700;'
+                    f'color:{"#fbbf24" if _i5 == _best_i else "#e2e8f0"}">'
+                    f'{"—" if _eff != _eff else f"{_eff:.2f}%"}</td>'
+                    f'<td style="text-align:right;padding:3px 10px">{_incs}</td></tr>')
+            _h.append(
+                '<details style="margin:0 0 12px" open><summary style="cursor:pointer;'
+                'color:#fbbf24;font-weight:700">▶ 予算スイープ — '
+                'どのくらいの予算が最大の効率か</summary>'
+                '<div style="color:#94a3b8;font-size:0.78rem;margin:8px 0">'
+                '⛔ <b>総額で選ばないこと。</b>予算を上げれば損益もσも'
+                '<b>同率で伸びます</b>＝ただのレバレッジで、'
+                '<b>月平均÷σ は動きません</b>（§18.38 #3b）。<br>'
+                '★ 見るのは <b style="color:#fbbf24">資本効率</b>'
+                '（月平均 ÷ 実投入額 ＝ 月利%）と '
+                '<b>増分効率</b>（1段上げて増えた月平均 ÷ 増えたピーク1万円）。'
+                '★印が資本効率の最大です。<br>'
+                '⚠ N は 100株固定なので、予算は<b>建てられる銘柄数</b>だけを動かします'
+                '（1銘柄の株数は変わりません）。件数が増えなくなったら、そこが頭打ち。<br>'
+                '⚠ <b>ピーク</b>は同時保有の最大投入額。信用の委託保証金は'
+                '<b>発注時</b>に要るので、実際にはこの額を用意する必要があります。<br>'
+                '⛔ これは<b>リスク許容度の宣言</b>であって最適化ではありません（§18.31⑤）。'
+                '</div>'
+                '<table style="border-collapse:collapse;font-size:0.8rem">'
+                '<tr style="color:#94a3b8"><th style="text-align:left;'
+                'padding:3px 10px">予算</th>'
+                '<th style="text-align:right;padding:3px 10px">建てた</th>'
+                '<th style="text-align:right;padding:3px 10px">月平均</th>'
+                '<th style="text-align:right;padding:3px 10px">月次σ</th>'
+                '<th style="text-align:right;padding:3px 10px">月平均÷σ</th>'
+                '<th style="text-align:right;padding:3px 10px">投入/日</th>'
+                '<th style="text-align:right;padding:3px 10px">ピーク</th>'
+                '<th style="text-align:right;padding:3px 10px">資本効率</th>'
+                '<th style="text-align:right;padding:3px 10px">増分効率</th></tr>'
+                + _brows + '</table></details>')
 
     # ★★ 年別の内訳 (2026-09-07 ユーザーの問い「直近は額が大きい。なぜ？」)
     #   ⛔ **円/件 だけを見て「直近は強い」と読んではいけない**。N の損益は
