@@ -26,28 +26,33 @@ REM                        of times and are not what you came here for.
 REM   LSS_PREOPEN_TAB=0    pre-open market variables (18.34b: nothing found)
 REM   --days stays at 180  the 5-min tabs stay small and fast
 REM
-REM FIRST RUN IS SLOW - THAT IS NORMAL
-REM   The N disk cache key contains the day count
-REM   (ng_v1_<days>_<names>_<latest bar>.pkl), so a NEW day count is a NEW
-REM   file: 1,540 names get re-fetched from yfinance. Expect tens of
-REM   minutes. The second run at the same day count is ~0.2s.
+REM FIRST RUN AT A NEW DAY COUNT IS SLOW - THAT IS NORMAL
+REM   The N disk cache key contains the day count, so a new count is a new
+REM   file and the whole scan re-runs. 7000 days took ~160s per pane.
+REM   The second run at the same count reads the pickle in ~8s.
+REM   It does NOT re-download: check_daily_span measured the daily cache at
+REM   a 25.7-year median on 2026-09-07, so the bars are already local.
 REM
 REM READ THE PERIOD LINE BEFORE TRUSTING ANY NUMBER
 REM   The N tab prints what it ACTUALLY got:
 REM       period 2015-03-02 - 2026-09-05 (11.5 years / 2,832 sessions)
-REM         <- --days 4,200 requested
+REM           ...requested: --days 4,200
 REM   If the two disagree the header turns red. Judging on a window that
 REM   is not there is how analyze_gap_edge printed "FAIL" on empty data
 REM   (CLAUDE.md 18.53).
 REM
-REM HOW FAR BACK EACH NUMBER REACHES (from 2026-09)
-REM     2000 -> 2021-03   about 5.5 years
-REM     4200 -> 2015-03   11.5 years   (the 18.54 TRAIN window)
-REM     7000 -> 2007-06   19 years     (18.58: includes Lehman and 2011)
-REM     9000 -> 2001-12   24.6 years
-REM   THERE IS NO CAP IN THE CODE. 7000 is simply the longest we have run.
-REM   Past it you are fighting three walls, none of which raise an error:
-REM     1 yfinance coverage for TSE names thins out before ~2000
+REM HOW FAR BACK EACH NUMBER REACHES, AND HOW MANY NAMES SURVIVE
+REM   Measured 2026-09-07 with check_daily_span.py (1,529 cached names):
+REM     days   reaches    years   names that reach it
+REM     2000   2021-03      5.5   96.5 pct
+REM     4200   2015-03     11.5   87.3 pct   (the 18.54 TRAIN window)
+REM     7000   2007-06     19.0   77.2 pct   (18.58: Lehman and 2011)
+REM     9000   2002-01     24.6   60.0 pct
+REM    11000   1996-07     30.0    0.0 pct   NOTHING EXISTS THERE
+REM   THE HARD WALL IS 2000-01-04 - that is where Yahoo Finance starts for
+REM   TSE names. About 9,750 days. THERE IS NO CAP IN THE CODE.
+REM   Past 7000 you are fighting three walls, none of which raise an error:
+REM     1 yfinance coverage for TSE names stops at 2000-01-04
 REM     2 survivorship - the universe is the 1,540 names listed TODAY, so a
 REM       25-year window measures "firms that survived 25 years"
 REM     3 tick sizes. 18.55 prices execution at 1 yen = 4.4bp on the CURRENT
@@ -63,6 +68,10 @@ REM   years vs +802 over the recent 13 months - the level moves a lot.
 REM   Long windows answer "does it break", not "what does it earn".
 REM
 REM   ASCII-only on purpose (Japanese comments break on Shift-JIS cmd, 18.10.1).
+REM   AND NO ANGLE BRACKETS, PIPE OR AMPERSAND, NOT EVEN INSIDE REM. cmd still
+REM   parses redirection on REM lines. A placeholder written with angle
+REM   brackets ate the parser on 2026-09-07: it printed
+REM   "'ntains' is not recognized" and RAN THE WHOLE BATCH TWICE.
 REM ============================================================
 cd /d "%~dp0"
 
