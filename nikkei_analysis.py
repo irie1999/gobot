@@ -723,6 +723,12 @@ _NG_BUD2 = float(os.environ.get("LSS_NEWGAP_BUDGET2", "0") or 0)
 #     増える。だから「予算を上げる(悪い限界トレードが増える)」とも
 #     「一律200株(全部2倍)」とも別物。
 _NG_EQ_MAXQTY = int(os.environ.get("LSS_NEWGAP_EQ_MAXQTY", "200"))
+# ★ 増株タブの予算。既定は **予算800万タブと同じ額**(_NG_BUD2)。
+#   「資金が余っているから増株」なので、余っている側の予算で見ないと
+#   意味がない。400万・11件の日は 1単元しか入らず 100株のままになる。
+#   ⚠ こうすると 💰予算800万(100株固定) との差が **サイジングだけ**に
+#     なるので、つまみ1つの比較になる(§18.24)。
+_NG_EQ_BUDGET = float(os.environ.get("LSS_NEWGAP_EQ_BUDGET", "0") or 0)
 _NG_EQ_TAB = os.environ.get("LSS_NEWGAP_EQ_TAB", "1").strip().lower() \
     not in ("0", "false", "no", "")
 # ★★ **明細を出さない** (2026-09-08)。月別サマリー・日別カード・取引テーブルは
@@ -1068,9 +1074,12 @@ def _newgap_build(days: int, min_price: float, max_price: float,
     _ng_watch = 0 if variant in ("nocap", "all") else _NG_WATCH
     # 予算なしは 10兆円。日次の最大投入(下で出す必要資金)が数億なので絶対に効かない
     # ★ bud2 = 予算だけ差し替えた変種(それ以外は基準とまったく同じ)
+    # ★ eq は「資金が余っている日に増株」なので、**余っている側の予算**で見る
+    _eq_bud = (_NG_EQ_BUDGET if _NG_EQ_BUDGET > 0
+               else (_NG_BUD2 if _NG_BUD2 > 0 else _NG_BUDGET))
     _ng_budget = (1e9 if _ng_all else
                   (_NG_BUD2 if (variant == "bud2" and _NG_BUD2 > 0)
-                   else _NG_BUDGET))
+                   else (_eq_bud if variant == "eq" else _NG_BUDGET)))
     # 全部建てるなら順序は結果に影響しない。表示の一貫性のため liq にする
     _ng_order = "liq" if variant in ("nocap", "all") else "gap"
     # ★ eq = 資金が余っている日だけ株数を増やす(上限あり)
@@ -23091,8 +23100,11 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                                   "#ef4444", "#fca5a5", _ng_lo, _ng_hi, "all"))
             if _NG_EQ_TAB:
                 # ★ 資金が余った日だけ増株(上限 _NG_EQ_MAXQTY)
+                _eqb = (_NG_EQ_BUDGET if _NG_EQ_BUDGET > 0
+                        else (_NG_BUD2 if _NG_BUD2 > 0 else _NG_BUDGET))
                 _ng_sides.append(("short", "newgapeq",
-                                  f"📈 N 増株(最大{_NG_EQ_MAXQTY}株)",
+                                  f"📈 N {_eqb:,.0f}万+増株"
+                                  f"(最大{_NG_EQ_MAXQTY}株)",
                                   "#a78bfa", "#ddd6fe", _ng_lo, _ng_hi, "eq"))
             if _NG_BUD2 > 0:
                 # ★ 予算だけ変えた対照(watch・順序・価格帯は基準と同じ)
