@@ -109,6 +109,15 @@ ap.add_argument("--board-workers", type=int, default=2,
 ap.add_argument("--ret1", type=float, default=RET1_MIN, help="前日リターン下限(%%)")
 ap.add_argument("--gap-bp", type=float, default=GAP_BP, help="ギャップ下限(bp)")
 ap.add_argument("--watch", type=int, default=WATCH, help="朝読める上限(0=無制限)")
+# ★★ シャドー観測用の裾 (2026-09-07)。**発注対象は1件も変わらない**。
+#   watched_n は今までどおり上位 --watch だけに立て、その外側 (rank_n が
+#   --watch より下、--shadow-watch まで) を **shadow_n=1** で CSV に残す。
+#   k_open_confirm --rotate-shadow が 09:00 にローテーションして
+#   「もし建てていたら」を記録する(発注はしない)。
+#   ⛔ 既存の列の意味を変えないこと。watched_n を広げると発注対象が変わる。
+ap.add_argument("--shadow-watch", type=int, default=0,
+                help="シャドー記録する順位の上限(0=しない / 例 150 なら "
+                     "51〜150位を shadow_n=1 で CSV に残す)")
 ap.add_argument("--mirror", action="store_true", default=False,
                 help="鏡像(前日下げ × ギャップダウンを買う)も記録する。"
                      "既定OFF。Nの秒単位順序を1バッチで測るときは使わない")
@@ -322,6 +331,9 @@ def do_collect() -> None:
         r["rank_liq"] = i
         r["watched"] = 1 if (a.watch <= 0 or i <= a.watch) else 0
         r["rank_n"], r["watched_n"] = i, r["watched"]
+        # ★ シャドーの裾。**watched_n の外側だけ**に立てる(重ならない)。
+        r["shadow_n"] = 1 if (a.shadow_watch > 0 and not r["watched_n"]
+                              and i <= a.shadow_watch) else 0
         r["rank_m"], r["watched_m"] = 0, 0
     # ── ★ 鏡像 (前日下げ × ギャップダウンを買う) ────────────────────
     #   §18.55: TRAIN で N と同水準(月+47,839 vs +49,587)。符号を反転するだけ。
@@ -408,6 +420,7 @@ def do_collect() -> None:
         r["in_m"] = 1 if (_ok and float(_r1) <= -a.ret1) else 0
         r["in_j"] = 1 if r["symbol"] in _jset else 0
         r.setdefault("rank_n", 0); r.setdefault("watched_n", 0)
+        r.setdefault("shadow_n", 0)
         r.setdefault("rank_m", 0); r.setdefault("watched_m", 0)
         r.setdefault("rank_liq", 0); r.setdefault("watched", 0)
         r["rank_j"], r["watched_j"] = 0, 0
@@ -427,11 +440,21 @@ def do_collect() -> None:
     #   件数を表示するときは _N_CAND / len(_mir) / _J_CAND を使うこと
     #   (2026-08-27: 絞ったあとの数を『候補』と表示して 107件を62件と誤報した)。
     _cand = [r for r in _cand
-             if r["watched_n"] or r["watched_m"] or r["watched_j"]]
+             if r["watched_n"] or r["watched_m"] or r["watched_j"]
+             or r.get("shadow_n")]
+    _n_ord = sum(1 for r in _cand
+                 if r["watched_n"] or r["watched_m"] or r["watched_j"])
+    _n_sh = sum(1 for r in _cand if r.get("shadow_n"))
     print(f"  [読む対象] 候補 {_n_all:,}件 → 3方式の上位{a.watch}の和集合 "
-          f"**{len(_cand):,}銘柄** "
-          f"({-(-len(_cand) // 50)}バッチ / 板の始値は寄れば動かないので"
+          f"**{_n_ord:,}銘柄** "
+          f"({-(-_n_ord // 50)}バッチ / 板の始値は寄れば動かないので"
           f"読むのが遅れても選定は正しい)", flush=True)
+    if _n_sh:
+        # ★ 発注対象は1件も増えていない。ここは記録専用の裾。
+        print(f"  [シャドー] N の {a.watch + 1}〜{a.shadow_watch}位 を "
+              f"**{_n_sh:,}銘柄** 追加で残しました"
+              f"(shadow_n=1 / ⛔ **発注しません**。"
+              f"--rotate-shadow が09:00に記録するだけ)", flush=True)
 
     # ⛔ 列は **k_signals_<日付>.csv 互換**にする。n_open_confirm.py(板読み)が
     #    `symbol` / `prev_close` / `liquidity` を読むので、名前を揃えないと
@@ -449,7 +472,7 @@ def do_collect() -> None:
         w = _csv.DictWriter(fh, fieldnames=[
             "symbol", "name", "strategy", "order_price", "prev_close", "atr",
             "liquidity", "prev_date", "ret1", "liq", "rank_liq", "watched",
-            "in_j", "in_n", "in_m", "rank_n", "watched_n",
+            "in_j", "in_n", "in_m", "rank_n", "watched_n", "shadow_n",
             "rank_m", "watched_m", "rank_j", "watched_j",
             "src_commit", "src_branch"])
         w.writeheader()
