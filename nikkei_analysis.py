@@ -1102,6 +1102,35 @@ def _newgap_build(days: int, min_price: float, max_price: float,
 
     _tot = float(_dd["pnl"].sum())
     _nb = int(_dd["built"].sum())
+    # ★★ 増株が **実際に効いた日** を数える (2026-09-08)。
+    #   ⛔ これが無いと「変わっていない」ようにしか見えない。実際 11件の日は
+    #     400万÷11 = 36万 で建値3,000円の1単元(30万)しか入らないので
+    #     **100株が正しい**。効くのは件数の少ない日だけ。
+    _eq_note = ""
+    if _ng_eq and not _det.empty and "qty" in _det.columns:
+        _dq = _det.groupby("date")["qty"].max()
+        _nup = int((_dq > _NG_QTY).sum())
+        _thr = ""
+        try:
+            # 2単元入る件数のめやす = 予算 ÷ (建値中央 × 2単元)
+            _pxm = float(_det["entry_p"].median())
+            _thr = (f"（建値の中央 {_pxm:,.0f}円なら "
+                    f"<b>{int(_ng_budget * 1e4 // (_pxm * 200))}件以下</b>の日）")
+        except Exception:
+            pass
+        _eq_note = (
+            f'<div style="background:#2e1065;border:1px solid #6d28d9;'
+            f'border-radius:6px;padding:8px 12px;margin:8px 0;'
+            f'font-size:0.82rem;color:#ddd6fe">'
+            f'📈 <b>増株が効いた日: {_nup:,} / {len(_dq):,}日'
+            f'（{_nup / max(1, len(_dq)) * 100:.0f}%）</b>{_thr}<br>'
+            f'株数 中央 <b>{int(_det["qty"].median()):,}株</b> / '
+            f'最大 <b>{int(_det["qty"].max()):,}株</b> / '
+            f'上限 {_NG_EQ_MAXQTY:,}株<br>'
+            f'⚠ <b>件数が多い日は100株のままが正しい動作です。</b>'
+            f'予算 ÷ 合格件数 が1単元に満たなければ増やせません。'
+            f'ここが 0% なら、この窓では一度も効いていないということです。'
+            f'</div>')
     _bpc = (float(_det["pnl"].sum() / (_det["entry_p"] * _NG_QTY).sum()) * 1e4
             if not _det.empty else 0.0)
     _dd = _dd.copy()
@@ -1222,6 +1251,8 @@ def _newgap_build(days: int, min_price: float, max_price: float,
                   f'<div style="color:{_cc};font-size:1.1rem;font-weight:700">{_vv}</div>'
                   f'</div>')
     _h.append('</div>')
+    if _eq_note:
+        _h.append(_eq_note)
 
     # ★★ 予算スイープ (2026-09-08 ユーザー依頼「どのくらいの予算が最大の効率か」)
     #   ⛔ 総額で選ばない。予算を上げれば損益もσも同率で伸びる = レバレッジ。
