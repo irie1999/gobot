@@ -518,6 +518,15 @@ def _phase_summary(top: int = 12) -> None:
           flush=True)
 
 
+# ⛔⛔ 2026-09-07: この総括が **一度も呼ばれていなかった**。計測はしていたのに
+#   出力が無く、「どこが重いか」を推測で語る状態になっていた(§18.38 の
+#   「速度も推測で潰さない」に反する)。atexit なら入口(nikkei_analysis の
+#   main / run_signals_holdout_all からの import)に関係なく必ず出る。
+#   _PHASE_SEC が空なら _phase_summary は何も出さないので、無害。
+import atexit as _atexit                                          # noqa: E402
+_atexit.register(_phase_summary)
+
+
 # E/H(エントリー方式の比較) のトレード。run_signals_holdout_all が算出して注入する。
 # {"E": [trade,...], "H": [...], "約定せず": {"E": [...], "H": [...]}}
 # **空なら E/H タブは一切生成されず、レポートは従来と完全に同一**(追加のみ・全ガード付き)。
@@ -650,6 +659,10 @@ _NG_NOCAP_TAB = os.environ.get("LSS_NEWGAP_NOCAP", "1").strip().lower() \
 #     当てはまる。実運用の400万では1日十数件しか建たない。
 #   watch も同時に外す(予算を外して板の上限だけ残すのは中途半端)。
 _NG_ALL_TAB = os.environ.get("LSS_NEWGAP_ALL", "1").strip().lower() \
+    not in ("0", "false", "no", "")
+# ★ watch × 予算 の16セル行列 (2026-09-07)。**予算シミュを16回まわす**ので、
+#   「50件制限なし」タブが重いならここを切る。0=出さない。
+_NG_WB_MATRIX = os.environ.get("LSS_NEWGAP_WBMATRIX", "1").strip().lower() \
     not in ("0", "false", "no", "")
 _NG_NOPX_TAB = os.environ.get("LSS_NEWGAP_NOPX", "0").strip().lower() \
     not in ("0", "false", "no", "")
@@ -1112,7 +1125,10 @@ def _newgap_build(days: int, min_price: float, max_price: float,
                (_NG_WATCH * 3, f"{_NG_WATCH * 3}件（3バッチ）"),
                (0, "制限なし（実装不可・参考）")]
         _mx, _peak = [], {}
-        for _wv, _wlbl in _wl:
+        # ⛔ 4 watch × 4 予算 = **16回の予算シミュ**。上の4通り比較と合わせて
+        #   このタブだけで20回まわる。重いなら LSS_NEWGAP_WBMATRIX=0 で切る
+        #   (2026-09-07: 計測できるようにした)。
+        for _wv, _wlbl in (_wl if _NG_WB_MATRIX else []):
             _r2 = []
             for _bv in _bl:
                 try:
@@ -1151,6 +1167,7 @@ def _newgap_build(days: int, min_price: float, max_price: float,
             f'<th style="text-align:right;padding:3px 8px">{_bv:,.0f}万</th>'
             for _bv in _bl)
         _pk = _peak.get((0, _bl[-1]), 0.0)
+        # ⛔ 行列を切ったら**空の表を出さない**(見出しだけ残ると壊れて見える)
         _h.append(
             f'<div style="background:#1e293b;border:1px solid #334155;'
             f'border-radius:6px;padding:10px;margin-bottom:12px;'
@@ -1172,7 +1189,14 @@ def _newgap_build(days: int, min_price: float, max_price: float,
             f' {_pk * 0.333:,.0f}円 が必要）。<br>'
             f'⚠ 発注直前の信用余力を毎回ゲートにすること'
             f'（評価損・諸経費で必要額は増え、維持率20%未満は追証対象）。'
-            f'</div></div>')
+            f'</div></div>'
+            if _mrows else
+            f'<div style="background:#1e293b;border:1px solid #334155;'
+            f'border-radius:6px;padding:10px;margin-bottom:12px;'
+            f'font-size:0.82rem;color:#94a3b8">'
+            f'💰 watch × 予算の行列は <code>LSS_NEWGAP_WBMATRIX=0</code> で'
+            f'切ってあります（予算シミュを16回まわすので重い）。'
+            f'見たいときは <code>=1</code> に。</div>')
     else:
         _wall_c = "#f87171" if _miss_tot > _nb * 0.2 else "#94a3b8"
         _h.append(
@@ -22224,8 +22248,14 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             _ng_txt_items = []
             for (_ng_side, _ng_key, _ng_lbl, _ng_c1, _ng_c2,
                  _ng_pmin, _ng_pmax, _ng_var) in _ng_sides:
-                _ng = _newgap_build(days, _ng_pmin, _ng_pmax, _ng_syms,
-                                    side=_ng_side, variant=_ng_var)
+                # ⛔ 2026-09-07: ここが **1つも計測されていなかった**。変種が
+                #   7本まで増えたのに、どれが重いか分からない状態だった。
+                #   スキャンは _NG_ROWS_CACHE で共有するので1本目だけ重いが、
+                #   nocap は中で予算シミュを20回まわす(4通り比較 + watch×予算
+                #   4×4)ので、そこが効いている可能性がある。名前で分ける。
+                with _ptimer(f"Nタブ {_ng_lbl.replace('★ ', '')}"):
+                    _ng = _newgap_build(days, _ng_pmin, _ng_pmax, _ng_syms,
+                                        side=_ng_side, variant=_ng_var)
                 if not (_ng and _ng.get("head")):
                     continue
                 if _ng.get("_raw"):
