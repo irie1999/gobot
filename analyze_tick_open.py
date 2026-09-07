@@ -74,10 +74,52 @@ _UNTIL = int(a.until) * 100
 _OFFS = [int(x) for x in a.offsets.split(",") if x.strip()]
 _BANDS = [int(x) for x in a.bands.split(",") if x.strip()]
 
-_files = sorted(glob.glob(a.csv))
+# ★ フォルダを渡されたら中を再帰的に探す。глоб に ** が無くても拾う。
+#   ⛔ 「見つかりません」で終わらせず、**そこに何があるか**を出すこと
+#     (2026-09-07: 展開先の名前が違って詰まった)。
+_pat = a.csv
+if os.path.isdir(_pat):
+    _pat = os.path.join(_pat, "**", "*.csv")
+_files = sorted(glob.glob(_pat, recursive=True))
+if not _files and "*" in _pat:
+    # 展開すると1つ深いフォルダに入ることが多いので下も探す。
+    # ⛔⛔ **黙って別のファイルを読まないこと**(2026-09-07)。
+    #   指定が空振りしたのに親を再帰検索して別ファイルを拾い、
+    #   「頼んだものと違うデータで結果が出る」形になっていた。
+    _alt = sorted(glob.glob(os.path.join(os.path.dirname(_pat) or ".",
+                                         "**", "*.csv"), recursive=True))
+    if _alt:
+        print(f"⚠⚠ 指定 `{a.csv}` は **0件**でした。"
+              f"親フォルダを再帰検索して {len(_alt)}件 見つけました:")
+        for _f2 in _alt[:10]:
+            print(f"     {_f2}")
+        if len(_alt) > 10:
+            print(f"     … 他 {len(_alt) - 10}件")
+        print("   ⛔ **これで良いか確認してください。**"
+              " 意図した月のデータですか?")
+        if input("   続行しますか [y/N]: ").strip().lower() not in ("y", "yes"):
+            sys.exit("中止しました。--csv を指定し直してください")
+        _files = _alt
 if not _files:
-    sys.exit(f"[error] ファイルが見つかりません: {a.csv}\n"
-             f"        ⛔ .7z は 7-Zip で展開してから CSV を渡してください")
+    _dir = os.path.dirname(_pat) or "."
+    _up = _dir
+    while _up and not os.path.isdir(_up):
+        _up = os.path.dirname(_up)
+    print(f"[error] CSV が見つかりません: {a.csv}")
+    if _up and os.path.isdir(_up):
+        print(f"\n  {_up} の中身:")
+        try:
+            for _e in sorted(os.listdir(_up))[:40]:
+                _p = os.path.join(_up, _e)
+                _sz = (f"{os.path.getsize(_p) / 1e6:,.1f}MB"
+                       if os.path.isfile(_p) else "<フォルダ>")
+                print(f"    {_e:<50} {_sz}")
+        except Exception as _e2:
+            print(f"    (読めません: {_e2})")
+    print("\n  ⛔ .7z のままなら 7-Zip で展開してください。")
+    print("     展開後は **フォルダごと渡せます**:")
+    print('       python analyze_tick_open.py --csv "C:/…/展開したフォルダ"')
+    sys.exit(1)
 print(f"[info] {len(_files)}ファイル: "
       + ", ".join(os.path.basename(f) for f in _files[:3])
       + (" …" if len(_files) > 3 else ""))
