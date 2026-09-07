@@ -793,6 +793,11 @@ def _newgap_rows_to_trades(det, side: str = "short") -> list:
 
 
 _NG_ROWS_CACHE: dict = {}
+# ★ 日別カードに出す「前夜の候補数 / 09:00の合格数」(2026-09-07 ユーザー依頼)。
+#   (タブのpfx, 'YYYY-MM-DD') -> {"cand": 前夜, "hit": 合格}
+#   ⛔ タブごとに別キーにする。変種で価格帯や watch が違うと cand も変わる。
+#   ⚠ **N のタブにしか入らない**。J/H/L の日別カードは今までどおり。
+_NG_DAYINFO: dict = {}
 
 
 def _newgap_build(days: int, min_price: float, max_price: float,
@@ -15101,13 +15106,25 @@ function switchTbd(id, tab) {{
         _cap_d = _peak_capital(trades_d)[0]
         cap_span = (f'<span style="color:#38bdf8;font-size:0.6rem">要¥{_cap_d:,.0f}</span>'
                     if _cap_d > 0 else "")
+        # ★ N タブだけ「前夜の候補数 / 09:00の合格数」を出す(2026-09-07)。
+        #   ⛔ 3つの数は **確定する時刻が違う**。ここは絞り込みの実態を1行で
+        #     見せるだけで、発注判断に使えるのは 候補(前夜) だけ(§18.70 の
+        #     測定: 09:00:36 時点では最悪の日が中央値付近に見える)。
+        _ngi = _NG_DAYINFO.get((pfx, dk))
+        cnt_span = ""
+        if _ngi:
+            cnt_span = (f'<span style="color:#a78bfa;font-size:0.58rem" '
+                        f'title="前夜の候補(ret1で絞ったあと) → 09:00の合格'
+                        f'(ギャップ判定) → 建てた(予算)">'
+                        f'候補{_ngi.get("cand", 0)}→合格{_ngi.get("hit", 0)}'
+                        f'</span>')
         dk_key = dk.replace("-", "")
         return (f'<button class="edate-btn" id="{pfx}date_btn_{dseq}_{dk_key}" '
                 f'onclick="showEntryDateGrid(this,\'{dk_key}\')">'
                 f'<span class="edate-mm">{mm_dd}</span>'
                 f'<span class="edate-stat">{len(trades_d)}件 {wr_d:.0f}%</span>'
                 f'<span class="edate-pnl" style="color:{pnl_col}">{pnl_d:+,.0f}</span>'
-                f'{cap_span}{pend_span}</button>')
+                f'{cnt_span}{cap_span}{pend_span}</button>')
 
     def _entry_date_detail(dk, dseq, show, by_date, pfx):
         trades_d = by_date[dk]
@@ -22165,6 +22182,17 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                             _t[_k] = str(_t[_k])
                     _ng_bd[_t["entry_d_raw"]].append(_t)
                 _ng_dates = sorted(_ng_bd.keys(), key=str, reverse=True)
+                # ★ 日別カードに「候補N → 合格N」を出す(2026-09-07 ユーザー依頼)。
+                #   ⛔ タブごとに別キー。変種で価格帯/watch が違えば cand も違う。
+                try:
+                    _ng_dd2 = (_ng.get("_raw") or {}).get("dd")
+                    if _ng_dd2 is not None and len(_ng_dd2):
+                        for _rr in _ng_dd2.itertuples():
+                            _NG_DAYINFO[(key, str(_rr.date))] = {
+                                "cand": int(_rr.cand), "hit": int(_rr.hit)}
+                except Exception as _nge0:
+                    # 出なくても本体は動く。黙って消さずに理由は出す
+                    print(f"  ⚠ 日別カードの候補数を作れません({_nge0})", flush=True)
                 # ⛔ **ペインを先に作ってから、ボタンとまとめて足す。**
                 #    以前はボタンを先に足しており、この後の
                 #    `_dup_toggle_html` が落ちると外側の except が拾って
