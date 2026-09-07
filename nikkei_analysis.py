@@ -1104,6 +1104,77 @@ def _newgap_build(days: int, min_price: float, max_price: float,
                   f'</div>')
     _h.append('</div>')
 
+    # ★★ 年別の内訳 (2026-09-07 ユーザーの問い「直近は額が大きい。なぜ？」)
+    #   ⛔ **円/件 だけを見て「直近は強い」と読んではいけない**。N の損益は
+    #     (始値 − 終値) × 100株 の **円建て**なので、株価水準が上がれば
+    #     同じ%でも円が大きくなる。19年前の日経は今の半分以下。
+    #   → 円/件 と **bp/件** と **平均建値** を必ず並べる。
+    #     ・bp も一緒に上がっている  → 値動きの質が変わった(本物の差)
+    #     ・bp は横ばいで円だけ上がる → **単価が上がっただけ**。エッジは同じ
+    #   ⚠ 窓が短い(1〜2年)ときは1〜2行しか出ないので意味がない。5年以上で見る。
+    if not _det.empty and len(_dd) > 300:
+        _dt2 = _det.copy()
+        _dt2["year"] = _dt2["date"].astype(str).str[:4]
+        _dy = _dd.copy()
+        _dy["year"] = _dy["date"].astype(str).str[:4]
+        _wd = _dy.groupby("year")["pnl"].agg(
+            日数="size", 勝日=lambda s: int((s > 0).sum()))
+        # ⛔ groupby().apply() は pandas の版で挙動が割れる(include_groups は
+        #   2.2 以降)。素の集約だけで組む。
+        _gy = _dt2.groupby("year")
+        # 投入額。qty が無い変種のために _NG_QTY で代替できるようにする
+        _qcol = _dt2["qty"] if "qty" in _dt2.columns else _NG_QTY
+        _notional = (_dt2["entry_p"] * _qcol).groupby(_dt2["year"]).sum()
+        _yr = pd.DataFrame({"件数": _gy.size(), "合計": _gy["pnl"].sum(),
+                            "建値": _gy["entry_p"].mean()})
+        _yr["円件"] = _yr["合計"] / _yr["件数"].clip(lower=1)
+        # ⛔ bp は **投入額で加重**する(件数平均だと安い株に引っ張られる)
+        _yr["bp件"] = _yr["合計"] / _notional.where(_notional != 0) * 1e4
+        _yr = _yr.join(_wd)
+        _bp0 = float(_yr["bp件"].iloc[0]) if len(_yr) else 0.0
+        _h.append(
+            '<details style="margin:0 0 12px"><summary style="cursor:pointer;'
+            'color:#fbbf24;font-weight:700">▶ 年別の内訳 — '
+            '「直近は額が大きい」が本物か、単価が上がっただけかを分ける</summary>'
+            '<div style="color:#94a3b8;font-size:0.78rem;margin:8px 0">'
+            '⛔ N の損益は <b>(始値−終値) × 100株</b> の<b>円建て</b>です。'
+            '株価が上がれば同じ%でも円は大きくなります。'
+            '<b style="color:#e2e8f0">bp/件</b>（投入額あたり）と'
+            '<b style="color:#e2e8f0">平均建値</b>を必ず並べて見てください。<br>'
+            '　・bp も上がっている　　→ 値動きの質が変わった（本物の差）<br>'
+            '　・bp は横ばいで円だけ上がる → <b>単価が上がっただけ</b>。エッジは同じ<br>'
+            '⚠ 古い年ほど<b>生存バイアス</b>が効きます（母集団は'
+            '<b>今日 上場している銘柄</b>）。呼値も 2014/2015 の細分化前は粗いので、'
+            '古い年のネットは実際より良く見えます（§18.55）。'
+            '</div>'
+            '<table style="border-collapse:collapse;font-size:0.8rem">'
+            '<tr style="color:#94a3b8"><th style="padding:3px 10px">年</th>'
+            '<th style="text-align:right;padding:3px 10px">建てた</th>'
+            '<th style="text-align:right;padding:3px 10px">合計</th>'
+            '<th style="text-align:right;padding:3px 10px">円/件</th>'
+            '<th style="text-align:right;padding:3px 10px">bp/件</th>'
+            '<th style="text-align:right;padding:3px 10px">初年比</th>'
+            '<th style="text-align:right;padding:3px 10px">平均建値</th>'
+            '<th style="text-align:right;padding:3px 10px">勝日</th></tr>')
+        for _y, _r in _yr.iterrows():
+            _c = "#4ade80" if _r["合計"] >= 0 else "#f87171"
+            _rat = (_r["bp件"] / _bp0) if abs(_bp0) > 1e-9 else float("nan")
+            _h.append(
+                f'<tr><td style="padding:3px 10px">{_y}</td>'
+                f'<td style="text-align:right;padding:3px 10px">{int(_r["件数"]):,}</td>'
+                f'<td style="text-align:right;padding:3px 10px;color:{_c}">'
+                f'{_r["合計"]:+,.0f}</td>'
+                f'<td style="text-align:right;padding:3px 10px;color:{_c}">'
+                f'{_r["円件"]:+,.0f}</td>'
+                f'<td style="text-align:right;padding:3px 10px;color:{_c};'
+                f'font-weight:700">{_r["bp件"]:+.1f}</td>'
+                f'<td style="text-align:right;padding:3px 10px;color:#94a3b8">'
+                f'{"—" if _rat != _rat else f"{_rat:.2f}x"}</td>'
+                f'<td style="text-align:right;padding:3px 10px">{_r["建値"]:,.0f}円</td>'
+                f'<td style="text-align:right;padding:3px 10px">'
+                f'{int(_r["勝日"])}/{int(_r["日数"])}</td></tr>')
+        _h.append('</table></details>')
+
     # ── 50件の壁 ──
     if _ng_all:
         # ★★ 予算なし = 合格を全部建てる。**発注ルールの候補ではない**。
