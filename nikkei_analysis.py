@@ -1270,6 +1270,20 @@ def _newgap_build(days: int, min_price: float, max_price: float,
                             "勝": _g2["pnl"].apply(lambda x: int((x > 0).sum()))})
         _gt["円件"] = _gt["合計"] / _gt["件数"].clip(lower=1)
         _gt["bp件"] = _gt["合計"] / _nt.where(_nt != 0) * 1e4
+        # ★★ 勝ち負けを分ける (2026-09-08 ユーザー指示「利益と損で分けて」)。
+        #   ⛔ 勝率と bp/件 だけでは読めない。実際 500bp超は **勝率52%(最低)
+        #     なのに +62.3bp(最高)** で、これは「勝ちが少ないが1回が大きい」形。
+        #     ショートなので、大きくギャップアップした銘柄がその日に崩れると
+        #     利幅が大きい = 右側の裾が厚い。平均だけ見ると取り違える。
+        _gt["勝計"] = _g2["pnl"].apply(lambda x: float(x[x > 0].sum()))
+        _gt["負計"] = _g2["pnl"].apply(lambda x: float(x[x <= 0].sum()))
+        _gt["負"] = _gt["件数"] - _gt["勝"]
+        _gt["勝平均"] = _gt["勝計"] / _gt["勝"].clip(lower=1)
+        _gt["負平均"] = _gt["負計"] / _gt["負"].clip(lower=1)
+        _gt["最大益"] = _g2["pnl"].max()
+        _gt["最大損"] = _g2["pnl"].min()
+        # PF = 利益合計 / 損失合計(絶対値)。損失0なら無限大なので "—"
+        _gt["PF"] = _gt["勝計"] / _gt["負計"].abs().where(_gt["負計"] != 0)
         _h.append(
             '<details style="margin:0 0 12px"><summary style="cursor:pointer;'
             'color:#fbbf24;font-weight:700">▶ ギャップ帯別 — '
@@ -1287,32 +1301,63 @@ def _newgap_build(days: int, min_price: float, max_price: float,
             '★ これは<b>予算が落としている側が良いのか悪いのか</b>を見る表です。'
             'ライブは寄った順に埋まるので、<b>予算落ちするのは大きいギャップ側</b>。'
             'ここが低いなら、その取りこぼしは<b>害ではありません</b>。<br>'
-            '⛔ <b>帯を選んで閾値にしないこと</b>（後から選ぶのは多重検定 / §18.53）。'
+            '⛔ <b>帯を選んで閾値にしないこと</b>（後から選ぶのは多重検定 / §18.53）。<br>'
+            '★ <b>勝ち負けを分けて見ること。</b>勝率と bp/件 だけでは'
+            '<b>「勝ちは少ないが1回が大きい」帯</b>を取り違えます。'
+            'ショートなので、大きくギャップアップした銘柄がその日に崩れると'
+            '利幅が大きく、<b>右側の裾が厚く</b>なります。'
+            '<b>PF</b>（利益合計÷損失合計）と<b>最大益・最大損</b>を併せて。'
             '</div>'
             '<table style="border-collapse:collapse;font-size:0.8rem">'
             '<tr style="color:#94a3b8"><th style="padding:3px 10px">帯</th>'
             '<th style="text-align:right;padding:3px 10px">建てた</th>'
+            '<th style="text-align:right;padding:3px 10px">勝率</th>'
+            '<th style="text-align:right;padding:3px 10px;'
+            'border-left:1px solid #334155">勝ち</th>'
+            '<th style="text-align:right;padding:3px 10px">平均利益</th>'
+            '<th style="text-align:right;padding:3px 10px">最大益</th>'
+            '<th style="text-align:right;padding:3px 10px;'
+            'border-left:1px solid #334155">負け</th>'
+            '<th style="text-align:right;padding:3px 10px">平均損失</th>'
+            '<th style="text-align:right;padding:3px 10px">最大損</th>'
+            '<th style="text-align:right;padding:3px 10px;'
+            'border-left:1px solid #334155">PF</th>'
             '<th style="text-align:right;padding:3px 10px">合計</th>'
-            '<th style="text-align:right;padding:3px 10px">円/件</th>'
-            '<th style="text-align:right;padding:3px 10px">bp/件</th>'
-            '<th style="text-align:right;padding:3px 10px">勝率</th></tr>')
+            '<th style="text-align:right;padding:3px 10px">bp/件</th></tr>')
         for _bn, _r in _gt.iterrows():
             if not int(_r["件数"]):
                 continue
             _c = "#4ade80" if _r["合計"] >= 0 else "#f87171"
             _wr = _r["勝"] / max(1, _r["件数"]) * 100.0
+            _pf = _r["PF"]
             _h.append(
                 f'<tr><td style="padding:3px 10px">{_bn}</td>'
                 f'<td style="text-align:right;padding:3px 10px">'
                 f'{int(_r["件数"]):,}</td>'
+                f'<td style="text-align:right;padding:3px 10px">{_wr:.0f}%</td>'
+                # ── 勝ち ──
+                f'<td style="text-align:right;padding:3px 10px;color:#4ade80;'
+                f'border-left:1px solid #334155">{int(_r["勝"]):,}</td>'
+                f'<td style="text-align:right;padding:3px 10px;color:#4ade80">'
+                f'{_r["勝平均"]:+,.0f}</td>'
+                f'<td style="text-align:right;padding:3px 10px;color:#4ade80">'
+                f'{_r["最大益"]:+,.0f}</td>'
+                # ── 負け ──
+                f'<td style="text-align:right;padding:3px 10px;color:#f87171;'
+                f'border-left:1px solid #334155">{int(_r["負"]):,}</td>'
+                f'<td style="text-align:right;padding:3px 10px;color:#f87171">'
+                f'{_r["負平均"]:+,.0f}</td>'
+                f'<td style="text-align:right;padding:3px 10px;color:#f87171">'
+                f'{_r["最大損"]:+,.0f}</td>'
+                # ── 合計 ──
+                f'<td style="text-align:right;padding:3px 10px;'
+                f'border-left:1px solid #334155;font-weight:700;'
+                f'color:{"#4ade80" if (_pf == _pf and _pf >= 1) else "#f87171"}">'
+                f'{"—" if _pf != _pf else f"{_pf:.2f}"}</td>'
                 f'<td style="text-align:right;padding:3px 10px;color:{_c}">'
                 f'{_r["合計"]:+,.0f}</td>'
-                f'<td style="text-align:right;padding:3px 10px;color:{_c}">'
-                f'{_r["円件"]:+,.0f}</td>'
                 f'<td style="text-align:right;padding:3px 10px;color:{_c};'
-                f'font-weight:700">{_r["bp件"]:+.1f}</td>'
-                f'<td style="text-align:right;padding:3px 10px">'
-                f'{_wr:.0f}%</td></tr>')
+                f'font-weight:700">{_r["bp件"]:+.1f}</td></tr>')
         _h.append('</table></details>')
 
     # ★★ 発注順の帯 (2026-09-07)。**基準タブだけ**で出す。
