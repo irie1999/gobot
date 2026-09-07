@@ -882,6 +882,32 @@ def _newgap_build(days: int, min_price: float, max_price: float,
                 except OSError:
                     pass
                 _rows = None
+        else:
+            # ★★ **なぜ作り直すのか**を出す (2026-09-07 ユーザーの問い
+            #   「git pull するたびに毎回 遅い?」)。答えは「いいえ」だが、
+            #   画面から確かめられないと毎回 同じことを聞くことになる。
+            #   キーは ver / 日数 / 銘柄数 / 期待バー日付 の4つ。既存ファイルと
+            #   **どれが違うか**を名指しする。
+            _olds = sorted(_ngc_dir.glob("ng_*.pkl"))
+            _fld = ("版", "日数", "銘柄数", "バー日")
+            _cur = (_NG_SCAN_VER, str(days), str(len(symbols)), _bar)
+            _why = "キャッシュが1つも無い(初回)"
+            if _olds:
+                _best, _bd = None, None
+                for _o in _olds:
+                    _p = _o.stem.split("_")           # ng ver days syms bar
+                    if len(_p) != 5:
+                        continue
+                    _d = [_fld[_i] for _i, _v in enumerate(_p[1:]) if _v != _cur[_i]]
+                    if _bd is None or len(_d) < len(_bd):
+                        _best, _bd = _o, _d
+                if _bd is not None:
+                    _why = (f"{'/'.join(_bd)} が違う（前回 {_best.name}）"
+                            if _bd else f"同名が無い（{_best.name}）")
+            print(f"  [新方式N] ⚠ スキャンし直します: {_why}", flush=True)
+            print(f"     鍵 = 版{_NG_SCAN_VER} / {days}日 / {len(symbols):,}銘柄 "
+                  f"/ バー{_bar}。**git pull だけでは変わりません**"
+                  f"（版を上げたときはコミットに書きます）", flush=True)
     if _rows is None:
         _rows = []
         try:
