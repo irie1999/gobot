@@ -126,7 +126,7 @@ def _newgap_scan_one(sym: str, days: int, min_price: float, max_price: float) ->
 def _newgap_sim(rows: list, budget_man: float, watch: int,
                 gap_bp: float, ret1_min: float,
                 qty_mode: str = "fixed", qty: int = 0,
-                max_pct: float = 0.0) -> dict:
+                max_pct: float = 0.0, order: str = "gap") -> dict:
     """日ごとに 候補 → watch上限 → ギャップ判定 → 予算 の順で建てる。
 
     ★ この順番が実運用そのもの。**watch上限を先に掛ける**のが肝で、
@@ -161,8 +161,19 @@ def _newgap_sim(rows: list, budget_man: float, watch: int,
         _hit = _watched[_watched["gap_bp"] >= gap_bp]
         # ④ watch で切り捨てたぶんのうち、本当は建てられた件数(機会損失)
         _missed = len(_cand[_cand["gap_bp"] >= gap_bp]) - len(_hit)
-        # ⑤ 予算。ギャップ降順(強い順)に埋める
-        _hit = _hit.sort_values("gap_bp", ascending=False)
+        # ⑤ 予算を埋める順。
+        #   "gap" … ギャップ降順(強い順)。**ライブでは実現できない**。
+        #           09:00 に全銘柄のギャップが同時に分かるわけではなく、
+        #           寄った順にしか処理できない(§18.67)。
+        #   "liq" … 流動性降順。ライブが実際に建てられる順そのもの
+        #           (watch50 の顔ぶれも、ローテーションのバッチ順もこれ)。
+        #   ⛔ watch を広げる話をするときは必ず "liq" で測ること。
+        #     "gap" のまま候補を増やすと『強い順に選び放題』になり、
+        #     実現できない上振れが出る。
+        if order == "liq":
+            _hit = _hit.sort_values("liq", ascending=False, na_position="last")
+        else:
+            _hit = _hit.sort_values("gap_bp", ascending=False)
         # ★ 資金均等: 予算 ÷ 合格件数(09:00 に確定するので先読みではない)
         _lot_cap = (_cap * max_pct / 100.0) if max_pct > 0 else _cap
         _slot = (_cap / max(1, len(_hit))) if qty_mode == "equal" else 0.0

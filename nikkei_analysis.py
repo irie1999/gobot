@@ -637,6 +637,13 @@ _NG_MIRROR_TAB = os.environ.get("LSS_NEWGAP_MIRROR", "1").strip().lower() \
 #   dailyfast.bat が 1 にする。スキャンは N と共有(価格帯は後処理)なので
 #   計算はほぼ増えない。⚠ 100株固定なので値がさ株ほど1件の建玉が大きく、
 #   予算400万に対する集中度が変わる。総額だけで比べないこと(§18.38 #6)。
+# ★★ 50件制限なしタブ (2026-09-07)。PUSH配信でローテーションできると実測
+#   できたので(§18.69)、watch を外した場合を並べる。既定ON(計算はほぼ増えない
+#   — スキャン結果 _NG_ROWS_CACHE を共有し、日足の後処理だけやり直す)。
+#   ⛔ このタブは発注順も **流動性順** にする。ライブは 09:00 に全銘柄の
+#     ギャップを同時に知れないので、ギャップ降順には建てられない(§18.67)。
+_NG_NOCAP_TAB = os.environ.get("LSS_NEWGAP_NOCAP", "1").strip().lower() \
+    not in ("0", "false", "no", "")
 _NG_NOPX_TAB = os.environ.get("LSS_NEWGAP_NOPX", "0").strip().lower() \
     not in ("0", "false", "no", "")
 # ★ N だけ **別の窓**で見る (2026-09-05 ユーザー依頼「11年分」)。0=レポートの --days に従う。
@@ -835,7 +842,17 @@ def _newgap_build(days: int, min_price: float, max_price: float,
                       or _lo <= float(r["entry_p"]) <= _hi)]
     if side == "long":
         _rows = _newgap_mirror_rows(_rows)
-    _sim = _newgap_sim(_rows, _NG_BUDGET, _NG_WATCH, _NG_GAP_BP, _NG_RET1)
+    # ★★ 50件制限なしの変種 (2026-09-07)。PUSH配信でローテーションできる
+    #   ことが実測できたので(§18.69)、watch を外した場合を並べる。
+    #   ⛔ **発注順も同時に変える**。ライブは 09:00 に全銘柄のギャップを
+    #     同時に知れないので、ギャップ降順には建てられない(§18.67)。
+    #     流動性のバンド順(= バッチ順 = 寄った順)しか実現できない。
+    #     watch を広げるときに "gap" のままにすると『強い順に選び放題』に
+    #     なり、実現できない上振れが出る。
+    _ng_watch = 0 if variant == "nocap" else _NG_WATCH
+    _ng_order = "liq" if variant == "nocap" else "gap"
+    _sim = _newgap_sim(_rows, _NG_BUDGET, _ng_watch, _NG_GAP_BP, _NG_RET1,
+                       order=_ng_order)
     # ★ 日次の損益をCSVに出す(2026-09-01)。レジーム別の検定など、外の
     #   スクリプトから使うため。既定OFF。
     #     $env:LSS_NEWGAP_DAYS_CSV = "n_days.csv"
@@ -870,7 +887,7 @@ def _newgap_build(days: int, min_price: float, max_price: float,
         勝日=("pnl", lambda s: int((s > 0).sum())))
 
     # ── 50件制約がどれだけ効いているか(ユーザーの主要な関心) ──
-    _cap_days = int((_dd["cand"] > _NG_WATCH).sum()) if _NG_WATCH > 0 else 0
+    _cap_days = int((_dd["cand"] > _ng_watch).sum()) if _ng_watch > 0 else 0
     _miss_tot = int(_dd["missed"].sum())
     _cand_med = float(_dd["cand"].median())
     _cand_max = int(_dd["cand"].max())
@@ -963,18 +980,69 @@ def _newgap_build(days: int, min_price: float, max_price: float,
     _h.append('</div>')
 
     # ── 50件の壁 ──
-    _wall_c = "#f87171" if _miss_tot > _nb * 0.2 else "#94a3b8"
-    _h.append(
-        f'<div style="background:#1e293b;border:1px solid #334155;border-radius:6px;'
-        f'padding:10px;margin-bottom:12px;font-size:0.82rem;color:#cbd5e1">'
-        f'<b style="color:#fbbf24">📵 {_NG_WATCH}件の壁</b>（kabu は総登録50件が上限 / §18.44）<br>'
-        f'前夜の候補: 中央値 <b>{_cand_med:.0f}件/日</b> / 最大 <b>{_cand_max}件</b><br>'
-        f'候補が{_NG_WATCH}件を超えた日: <b>{_cap_days}/{len(_dd)}日 '
-        f'({_cap_days / max(1, len(_dd)) * 100:.0f}%)</b><br>'
-        f'そのせいで取り逃した（ギャップ条件は満たしていたのに板を読めなかった）: '
-        f'<b style="color:{_wall_c}">{_miss_tot:,}件</b>'
-        f'（建てた {_nb:,}件 の {_miss_tot / max(1, _nb) * 100:.0f}%）'
-        f'</div>')
+    if _ng_watch <= 0:
+        # ★★ 50件制限なしの変種。ここでは「壁」ではなく **4通りの比較**を出す。
+        #   watch を広げた効果と、発注順を現実的にした損を分けて見せる。
+        #   ⛔ 混ぜると『watch を広げたら増えた』が『ギャップ降順で選び放題』
+        #     の産物かどうか区別できない(§18.67)。
+        _cmp = []
+        for _lbl2, _w2, _o2 in (("watch50 ・ ギャップ降順（現行タブの計算）",
+                                 _NG_WATCH, "gap"),
+                                ("watch50 ・ <b>流動性順</b>（ライブで実現できる順）",
+                                 _NG_WATCH, "liq"),
+                                ("<b>制限なし</b>・ ギャップ降順（実現できない）",
+                                 0, "gap"),
+                                ("<b>制限なし・流動性順</b>（このタブ）", 0, "liq")):
+            try:
+                _s2 = _newgap_sim(_rows, _NG_BUDGET, _w2, _NG_GAP_BP,
+                                  _NG_RET1, order=_o2)
+                _d2 = _s2.get("days")
+                _cmp.append((_lbl2, int(_d2["built"].sum()),
+                             float(_d2["pnl"].sum()),
+                             _w2 <= 0 and _o2 == "liq"))
+            except Exception:
+                pass
+        _rows_html = "".join(
+            f'<tr style="{"background:#0f172a;font-weight:700" if _me else ""}">'
+            f'<td style="padding:3px 8px">{_l2}</td>'
+            f'<td style="padding:3px 8px;text-align:right">{_n2:,}件</td>'
+            f'<td style="padding:3px 8px;text-align:right;'
+            f'color:{"#34d399" if _p2 >= 0 else "#f87171"}">{_p2:+,.0f}円</td>'
+            f'</tr>' for _l2, _n2, _p2, _me in _cmp)
+        _h.append(
+            f'<div style="background:#1e293b;border:1px solid #334155;'
+            f'border-radius:6px;padding:10px;margin-bottom:12px;'
+            f'font-size:0.82rem;color:#cbd5e1">'
+            f'<b style="color:#f59e0b">🔓 50件の制限なし</b>'
+            f'（PUSH配信でローテーションできると実測 / §18.69）<br>'
+            f'前夜の候補を<b>全部</b>読める前提。中央値 <b>{_cand_med:.0f}件/日</b>'
+            f' / 最大 <b>{_cand_max}件</b><br>'
+            f'<table style="border-collapse:collapse;margin-top:8px;width:100%">'
+            f'<tr style="color:#94a3b8"><th style="text-align:left;padding:3px 8px">'
+            f'条件</th><th style="text-align:right;padding:3px 8px">建てた</th>'
+            f'<th style="text-align:right;padding:3px 8px">損益</th></tr>'
+            f'{_rows_html}</table>'
+            f'<div style="margin-top:8px;color:#94a3b8">'
+            f'⛔ <b>発注順も同時に変えています。</b>ライブは 09:00 に全銘柄の'
+            f'ギャップを同時に知れないので、ギャップ降順には建てられません'
+            f'（§18.67: 遅く寄る銘柄ほどギャップが大きい）。'
+            f'実現できるのは<b>流動性のバンド順</b>だけです。<br>'
+            f'上の4行を見れば、<b>watch を広げた効果</b>と'
+            f'<b>発注順を現実的にした損</b>を分けて読めます。</div>'
+            f'</div>')
+    else:
+        _wall_c = "#f87171" if _miss_tot > _nb * 0.2 else "#94a3b8"
+        _h.append(
+            f'<div style="background:#1e293b;border:1px solid #334155;border-radius:6px;'
+            f'padding:10px;margin-bottom:12px;font-size:0.82rem;color:#cbd5e1">'
+            f'<b style="color:#fbbf24">📵 {_ng_watch}件の壁</b>（kabu は総登録50件が上限 / §18.44）<br>'
+            f'前夜の候補: 中央値 <b>{_cand_med:.0f}件/日</b> / 最大 <b>{_cand_max}件</b><br>'
+            f'候補が{_ng_watch}件を超えた日: <b>{_cap_days}/{len(_dd)}日 '
+            f'({_cap_days / max(1, len(_dd)) * 100:.0f}%)</b><br>'
+            f'そのせいで取り逃した（ギャップ条件は満たしていたのに板を読めなかった）: '
+            f'<b style="color:{_wall_c}">{_miss_tot:,}件</b>'
+            f'（建てた {_nb:,}件 の {_miss_tot / max(1, _nb) * 100:.0f}%）'
+            f'</div>')
 
     # ── 執行コストを引くといくら残るか ──────────────────────────
     #   ⛔ このタブの bp は **グロス**。analyze_gap_edge の EXEC_BP は合格ラインを
@@ -21981,6 +22049,13 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             if _NG_MIRROR_TAB:
                 _ng_sides.append(("long", "newgapm", "★ 鏡像(買い)",
                                   "#34d399", "#a7f3d0", _ng_lo, _ng_hi, ""))
+            if _NG_NOCAP_TAB:
+                # ★★ 50件制限なし(2026-09-07)。PUSH配信でローテーションできる
+                #   と実測できたので(§18.69)、watch を外した場合を並べる。
+                #   ⛔ 発注順も **流動性順**に変える。ライブはギャップ降順に
+                #     建てられない(§18.67)。スキャンは共有なので計算は増えない。
+                _ng_sides.append(("short", "newgapnc", "🔓 N 50件制限なし",
+                                  "#f59e0b", "#fcd34d", _ng_lo, _ng_hi, "nocap"))
             if _NG_NOPX_TAB:
                 # ★ 株価制限なし(2026-09-05)。スキャンは共有、価格帯だけ外す
                 _ng_sides.append(("short", "newgapx", "★ N 株価制限なし",
