@@ -133,6 +133,14 @@ REM   built at all. That block is exactly where the MemoryError kept
 REM   happening, and this .bat exists to look at N. Set it to 0 if you
 REM   want the usual tabs back.
 if not defined LSS_NEWGAP_ONLY set "LSS_NEWGAP_ONLY=1"
+REM *** NO DETAIL TABLES. *** The monthly summary, the per-day cards and
+REM   the trade tables are most of the HTML, and they are what kept
+REM   running the machine out of memory. Everything you actually judge
+REM   on is in the head of the tab (KPI, budget sweep, per-year,
+REM   per-gap-band, the 50-name wall, execution cost) and the same
+REM   numbers are written to n_report_YYYYMMDD.txt.
+REM   Turn them back on with:  set LSS_NEWGAP_NO_DETAIL=0
+if not defined LSS_NEWGAP_NO_DETAIL set "LSS_NEWGAP_NO_DETAIL=1"
 REM a second N tab at a different budget. 800 because the budget sweep
 REM showed the marginal money turning NEGATIVE past it (200-400 +107,
 REM 400-600 +58, 600-800 +12, 800-1200 -23 yen per 10k of extra peak).

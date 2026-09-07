@@ -714,6 +714,13 @@ _NG_BUD_LIST = os.environ.get("LSS_NEWGAP_BUDGETS", "200,400,600,800,1200")
 #   テストのタブが欲しい」)。0 で作らない。スキャンは共有なので追加の
 #   コストは予算シミュ1回ぶんだけ。
 _NG_BUD2 = float(os.environ.get("LSS_NEWGAP_BUDGET2", "0") or 0)
+# ★★ **明細を出さない** (2026-09-08)。月別サマリー・日別カード・取引テーブルは
+#   HTML の大半を占める。N の判断に要るのは head の集計(KPI / 予算スイープ /
+#   年別 / ギャップ帯別 / 50件の壁 / 執行コスト)で、1件ずつの行ではない。
+#   明細が要るときは **n_report_<日付>.txt** に同じ数字がある。
+#   ⛔ 何度もメモリ不足で落ちたので、`.\nlong` では既定でこちら。
+_NG_NO_DETAIL = os.environ.get("LSS_NEWGAP_NO_DETAIL", "0").strip().lower() \
+    not in ("0", "false", "no", "")
 # ★★ 発注順の比較 (2026-09-07 ユーザーの問い「合格33件で予算は9件。
 #   この9件の選び方はランダムしかない?」)。
 #   ⛔ **2条件を1回ずつ比べて差を語らない**(§18.24)。ランダムを何本か回して
@@ -12550,11 +12557,18 @@ function switchTbd(id, tab) {{
                     '<code>set LSS_BASE_DETAIL=1</code> で表示。'
                     '<b>集計・検定の数字はこの設定に影響されません</b>'
                     '（全件で別計算）。</td></tr>')
+    # ⛔ LSS_NEWGAP_ONLY=1 では **N 以外の明細行を1行も作らない**。
+    #   ここは全取引ぶんの <tr> を組むので HTML の大半を占める。
+    _NO_BASE = _NG_ONLY
     trade_rows_all = (_rows_for(_sorted_trades_for_all,
                                 f"直近{days}日に決済した取引なし", cap=0)
                       if _SHOW_BASE_DETAIL else _HIDDEN_NOTE)
-    trade_rows_bt70 = _rows_for(bt70_trades,   "BT70以上の取引なし")
-    trade_rows_bt40 = _rows_for(bt40_trades,   f"BT{_BT_TAB_MIN}以上の取引なし")
+    # ⛔ この2つは **どのフラグでもゲートされていなかった**(2026-09-08)。
+    #   全取引ぶんの <tr> を毎回組むので、N しか見ないときは丸ごと無駄。
+    trade_rows_bt70 = (_HIDDEN_NOTE if _NO_BASE else
+                       _rows_for(bt70_trades,   "BT70以上の取引なし"))
+    trade_rows_bt40 = (_HIDDEN_NOTE if _NO_BASE else
+                       _rows_for(bt40_trades,   f"BT{_BT_TAB_MIN}以上の取引なし"))
     trade_rows_bt60 = (_rows_for(bt60_trades, "BT60以上の取引なし")
                        if _SHOW_BASE_DETAIL else _HIDDEN_NOTE)
 
@@ -22936,10 +22950,26 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                     # ⛔ 日別カードの日数を切る。19年窓(4,706営業日)の HTML は
                     #   文字列連結で MemoryError になる(2026-09-07 実測)。
                     #   月別サマリー・合計は全期間のまま(別計算)。
-                    _ng_common = (_dup_toggle_html(_ng_tr, _ng_bd, _ng_dates,
-                                                   _dseq, key,
-                                                   max_days=_NG_MAX_DAYS)
-                                  if _ng_tr else "")
+                    if _NG_NO_DETAIL:
+                        # ⛔ 明細を作らない。HTML の大半はここ。
+                        _ng_common = (
+                            '<div style="background:#1e293b;'
+                            'border:1px solid #334155;border-radius:6px;'
+                            'padding:10px 14px;font-size:0.82rem;color:#94a3b8">'
+                            f'📄 <b>明細は出していません</b>（{len(_ng_tr):,}件）。'
+                            '月別サマリー・日別カード・取引テーブルが HTML の'
+                            '大半を占め、<b>何度もメモリ不足で落ちた</b>ためです。'
+                            '<b style="color:#e2e8f0">同じ数字は '
+                            '<code>n_report_日付.txt</code> にあります。</b><br>'
+                            '上の集計（KPI / 予算スイープ / 年別 / ギャップ帯別 / '
+                            '50件の壁 / 執行コスト）は全期間ぶんで正しい値です。<br>'
+                            '出すなら <code>set LSS_NEWGAP_NO_DETAIL=0</code>'
+                            '（落ちるかもしれません）。</div>')
+                    else:
+                        _ng_common = (_dup_toggle_html(_ng_tr, _ng_bd, _ng_dates,
+                                                       _dseq, key,
+                                                       max_days=_NG_MAX_DAYS)
+                                      if _ng_tr else "")
                 except Exception as _nge2:
                     # ⛔ **traceback を HTML にも出す。**ターミナルを貼ってもらう
                     #    より、画面のスクショだけで原因の行が分かるようにする
@@ -23423,7 +23453,12 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         f'<span style="font-size:0.72rem;color:#94a3b8">(直近{_ENTRY_GRID_DAYS}日)</span></button>')
 
     # 決済日別ペイン: 常時表示
+    # ⛔ 「決済日別ペイン: 常時表示」だった。全取引ぶんのアコーディオンを
+    #   毎回組むので、N しか見ないときは丸ごと無駄。
     _exit_pane_or_narrow = (
+        f'<div id="detail_{_dseq}_exit" class="detail-tab-pane">'
+        f'<p style="color:#64748b;padding:14px">この明細は出していません'
+        f'（LSS_NEWGAP_ONLY=1）。</p></div>') if _NO_BASE else (
         f'<div id="detail_{_dseq}_exit" class="detail-tab-pane">'
         f'<p style="color:#94a3b8;font-size:0.8rem;margin-bottom:10px">'
         f'決済（決着）した日ごとの集計。各日を <b>目標達成 / 損切り / タイムカット</b>'
