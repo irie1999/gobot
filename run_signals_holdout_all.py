@@ -1032,6 +1032,28 @@ if getattr(_args, "days_from_base", False):
         if _dfb > 0:
             _args.days = _dfb
             print(f"[days-from-base] 表示期間を基準月{_by}-{_bmo:02d}の翌月〜今日={_dfb}日 に設定")
+# ⛔⛔ --days に上限を掛ける (2026-09-07: `.\dailyfast --days 2000` で **PCが落ちた**)
+#
+#   --days は **5分足タブ(lss / H / J / L)の窓**。5分足は J-Quants の分足アドオンが
+#   全プラン2年ローリングで **2024-07 が最古**(§18.6)なので、それより前を指定しても
+#   データが1本も無い。にもかかわらずローダは指定ぶん読みにいくので、
+#   1,300銘柄 × 2,000日 × 60本/日 ≒ **1.5億行**を確保しようとして落ちる。
+#   full_trade_log も『表示窓+400日』で日足を取り直すので、そちらも膨らむ。
+#
+#   ★ 窓を伸ばしたいのは N。**N は日足だけなので別の環境変数**を使う:
+#         $env:LSS_NEWGAP_DAYS = "2000"   ← N の窓(日足。数千日いける)
+#         .\dailyfast --no-serve          ← --days は触らない
+#     もっと簡単なのは `.\nlong 2000`(N の窓だけ伸ばす .bat)。
+_MAX_DISP_DAYS = int(os.environ.get("LSS_MAX_DAYS", "800"))
+if _args.days and _args.days > _MAX_DISP_DAYS:
+    print(f"\n⛔ --days {_args.days:,} は大きすぎます → {_MAX_DISP_DAYS} に丸めました。",
+          flush=True)
+    print(f"   --days は **5分足タブの窓**です。5分足は 2024-07 が最古"
+          f"（≒{_MAX_DISP_DAYS}日）なので、それより前は1本もありません。"
+          f"読みにいくぶんメモリだけ食います（2026-09-07 に実際にPCが落ちました）。", flush=True)
+    print(f"   N の窓を伸ばしたいなら:  .\\nlong {_args.days}"
+          f"   （= LSS_NEWGAP_DAYS={_args.days} / --days は触らない）\n", flush=True)
+    _args.days = _MAX_DISP_DAYS
 # --forward-days/--back-days 指定時は表示窓=基準日の前後ぶん(since=基準日-back)。それ以外は --days。
 if _args.forward_days > 0 or _args.back_days > 0:
     _disp_days = _args.forward_days + _args.back_days
