@@ -793,6 +793,14 @@ def _newgap_rows_to_trades(det, side: str = "short") -> list:
 
 
 _NG_ROWS_CACHE: dict = {}
+# ★★ N のスキャンをディスクにも残す (2026-09-07)。実測 1,540銘柄で **30秒**、
+#   しかも `.\dailyfast` は lss ペインと h ペインで **別プロセス**を立てるため
+#   in-process キャッシュが効かず、1回の実行で約60秒払っていた。
+#   ⛔ スキャンの中身(_newgap_scan_one)を変えたら **必ず版を上げる**。
+#     上げないと古い結果を使い続けて、直したはずの不具合が消えない。
+_NG_SCAN_VER = "v1"
+_NG_DISK_CACHE = os.environ.get("LSS_NEWGAP_DISKCACHE", "1").strip().lower() \
+    not in ("0", "false", "no", "")
 # ★ 日別カードに出す「前夜の候補数 / 09:00の合格数」(2026-09-07 ユーザー依頼)。
 #   (タブのpfx, 'YYYY-MM-DD') -> {"cand": 前夜, "hit": 合格}
 #   ⛔ タブごとに別キーにする。変種で価格帯や watch が違うと cand も変わる。
@@ -823,6 +831,38 @@ def _newgap_build(days: int, min_price: float, max_price: float,
     #   で出せる(5分足を触らない日足だけの処理なので後処理は一瞬)。
     _ck = (days, len(symbols))
     _rows = _NG_ROWS_CACHE.get(_ck)
+    # ★★ ディスクにも残す (2026-09-07)。実測で **1,540銘柄のスキャンが 30秒**、
+    #   しかも `.\dailyfast` は lss ペインと h ペインで **別プロセス**を立てるので
+    #   in-process の _NG_ROWS_CACHE が効かず、1回の実行で 30.5s + 29.2s = 約60秒
+    #   払っていた。同じ日の2回目以降はまるごと消える。
+    #   キーに **期待される最新確定バー日付** を入れる(BTキャッシュと同じ作法)。
+    #   15:40 をまたぐと自動で別ファイル = 再スキャンになるので、引け前に作った
+    #   キャッシュが引け後も使い回される事故が起きない。
+    _ngc_f = None
+    if _rows is None and _NG_DISK_CACHE:
+        try:
+            from backtest_limit_entry import _expected_latest_bar_date as _ebd
+            _bar = str(_ebd())
+        except Exception:
+            _bar = "na"
+        _ngc_dir = Path(".ng_cache")
+        _ngc_dir.mkdir(exist_ok=True)
+        _ngc_f = _ngc_dir / f"ng_{_NG_SCAN_VER}_{days}_{len(symbols)}_{_bar}.pkl"
+        if _ngc_f.exists():
+            try:
+                _t_c = _time.time()
+                _rows = pd.read_pickle(_ngc_f).to_dict("records")
+                _NG_ROWS_CACHE[_ck] = _rows
+                print(f"  [新方式N] キャッシュ {len(_rows):,}行 / "
+                      f"{_time.time() - _t_c:.1f}s ({_ngc_f.name})", flush=True)
+            except Exception as _ce:
+                # ⛔ 壊れたキャッシュで黙って落ちない。消して普通にスキャンする
+                print(f"  ⚠ Nキャッシュを読めません({_ce})。作り直します", flush=True)
+                try:
+                    _ngc_f.unlink()
+                except OSError:
+                    pass
+                _rows = None
     if _rows is None:
         _rows = []
         try:
@@ -838,6 +878,23 @@ def _newgap_build(days: int, min_price: float, max_price: float,
             return {"head": f'<div style="color:#fbbf24">⛔ 新方式Nの計算に失敗: {_e}</div>',
                     "trades": []}
         _NG_ROWS_CACHE[_ck] = _rows
+        # ★ ディスクにも保存。DataFrame の pickle にすると list[dict] より
+        #   ずっと小さく読みも速い(戻すのは to_dict("records") で同じ形)。
+        if _ngc_f is not None and _rows:
+            try:
+                pd.DataFrame(_rows).to_pickle(_ngc_f)
+                print(f"  [新方式N] キャッシュ保存 {_ngc_f.name} "
+                      f"({_ngc_f.stat().st_size / 1e6:.1f}MB)", flush=True)
+                # 古い版・古いバー日付を掃除(放置すると溜まる)
+                for _old in _ngc_f.parent.glob("ng_*.pkl"):
+                    if (_old != _ngc_f
+                            and _old.stat().st_mtime < _time.time() - 86400 * 3):
+                        try:
+                            _old.unlink()
+                        except OSError:
+                            pass
+            except Exception as _se:
+                print(f"  ⚠ Nキャッシュを保存できません({_se})", flush=True)
         # ★★ **実際に取れた期間**を出す(§18.53: 要求した窓が取れたと思い込まない)。
         #   キャッシュが短いと黙って短い窓で走り、「不合格」が出るだけになる。
         if _rows:

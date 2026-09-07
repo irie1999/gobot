@@ -98,3 +98,6 @@ picks*.csv
 entry_slip.csv
 exec_sim.csv
 wait_sim.csv
+
+# N のスキャンキャッシュ (2026-09-07)。日付つきで自動更新・3日で自動削除
+.ng_cache/

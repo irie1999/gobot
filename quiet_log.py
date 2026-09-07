@@ -42,6 +42,13 @@ _KEEP_TAGS = (
     "[pairs]", "[⏱ 工程別", "[試行記録]", "[実行条件]", "[発注順]",
 )
 _KEEP_RE = re.compile(r"⛔|⚠|❌|✅|失敗|Traceback|エラー|\.html\b")
+# ⛔⛔ 2026-09-07: 工程別の所要時間は **見出しだけ残って中身が消えていた**。
+#   `[⏱ 工程別` はタグに入っているが、明細行は
+#       "    30.5s  (45.0%)  Nタブ 新方式N"
+#   の形でタグも記号も無いため、名前に ⛔ を含む1行しか通らなかった
+#   (合計67.8s のうち 0.4s しか表示されない状態)。**測るために出した
+#   出力を、絞り込みが食っていた。** この形の行は必ず残す。
+_KEEP_PHASE = re.compile(r"^\s+\d+\.\d+s\s+\(\s*\d+\.\d+%\)\s")
 # 進捗行: 先頭が「…」や「  … 200/1540」
 # 進捗行と、工程ごとの所要時間(最後の総括だけ残す)
 _DROP_RE = re.compile(r"^\s*(…|\.\.\.)|^\s*\[⏱\s+\d")
@@ -63,6 +70,8 @@ def _keep(line: str) -> bool:
         _seen[s] += 1
         return False
     _seen[s] = 1
+    if _KEEP_PHASE.match(line):
+        return True                      # ⛔ _DROP_RE より先に見る
     if _DROP_RE.match(line):
         return False
     if _KEEP_RE.search(s):
