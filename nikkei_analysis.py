@@ -22524,6 +22524,15 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 _ng_sides.append(("short", "newgapxhi", "N 上限撤廃(下限〜)",
                                   "#22d3ee", "#a5f3fc", _ng_lo, 1e9, "pxhi"))
             _ng_txt_items = []
+            _ng_made: list = []
+            _ng_skipped: list = []
+            # ★★ **何本作るつもりか**を先に出す (2026-09-07)。
+            #   env の取りこぼし(別プロセスに渡っていない等)はここで分かる。
+            print(f"  [新方式N] 変種 {len(_ng_sides)}本を作ります: "
+                  + " / ".join(_s[2] for _s in _ng_sides), flush=True)
+            print(f"     ON/OFF: 鏡像={_NG_MIRROR_TAB} 制限なし={_NG_NOCAP_TAB} "
+                  f"予算なし={_NG_ALL_TAB} 株価制限なし={_NG_NOPX_TAB} "
+                  f"価格4分解={_NG_PXSPLIT} / 窓={_NG_DAYS or days}日", flush=True)
             for (_ng_side, _ng_key, _ng_lbl, _ng_c1, _ng_c2,
                  _ng_pmin, _ng_pmax, _ng_var) in _ng_sides:
                 # ⛔ 2026-09-07: ここが **1つも計測されていなかった**。変種が
@@ -22541,6 +22550,11 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                         _ng = _newgap_build(days, _ng_pmin, _ng_pmax, _ng_syms,
                                             side=_ng_side, variant=_ng_var)
                     if not (_ng and _ng.get("head")):
+                        # ⛔ 黙って consume しない。**タブが出ない理由**を必ず出す
+                        #   (2026-09-07: 7本のはずが2本しか出ず、原因が
+                        #    画面から追えなかった)。
+                        _ng_skipped.append(
+                            f"{_ng_lbl}(head が空 / 対象データなし)")
                         continue
                     # ★ テキスト用は **HTML を組む前**に積む。HTML で落ちても
                     #   数字は残る(テキストのほうが軽い = 落ちにくい)。
@@ -22548,16 +22562,27 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                         _ng_txt_items.append(
                             (_ng_lbl.replace("★ ", ""), _ng["_raw"]))
                     _ng_build_one(_ng, _ng_key, _ng_lbl, _ng_c1, _ng_c2)
+                    _ng_made.append(_ng_lbl)
                 except KeyboardInterrupt:
                     raise
                 except BaseException as _nv:
                     import traceback as _tbv
+                    _ng_skipped.append(f"{_ng_lbl}({type(_nv).__name__}: {_nv})")
                     print(f"[新方式N] ⛔ 『{_ng_lbl}』を飛ばします: "
                           f"**{type(_nv).__name__}**: {_nv}", flush=True)
                     if isinstance(_nv, MemoryError):
                         print("   ★ メモリ不足です。窓を短くしてください:"
                               "  .\\nlong 4200  (11.5年 / 母集団87%)", flush=True)
                     _tbv.print_exc()
+            # ★★ **作れた本数を突き合わせる**。数が合わなければ理由が並ぶ
+            if len(_ng_made) == len(_ng_sides):
+                print(f"  [新方式N] ✅ 変種 {len(_ng_made)}/{len(_ng_sides)}本 "
+                      f"すべてタブにしました", flush=True)
+            else:
+                print(f"  [新方式N] ⚠ 変種 {len(_ng_made)}/{len(_ng_sides)}本"
+                      f"しかタブにできませんでした", flush=True)
+                for _sk in _ng_skipped:
+                    print(f"     ⛔ 出せなかった: {_sk}", flush=True)
             # ★ 全変種を1つのテキストに(HTML を目で写さないため)
             #   ⚠ 途中で落ちた変種があっても、**通ったぶんだけ必ず書く**
             if _ng_txt_items and _NG_TXT.lower() not in ("0", "off", "no", ""):
