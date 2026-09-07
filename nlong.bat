@@ -19,6 +19,20 @@ REM   N is different: it reads DAILY bars only, never 5-min, never the lss
 REM   backtest. So N alone can look back years. Its window is a separate
 REM   env var, LSS_NEWGAP_DAYS, and that is all this .bat sets.
 REM
+REM EVERY N TAB IS ON (2026-09-07, by request)
+REM   1 N                  the rule as traded
+REM   2 mirror (buy)       prev-day DOWN x gap DOWN, bought (18.56)
+REM   3 no 50-name cap     watch removed, order switched to liquidity
+REM   4 no budget          take every pass. A DIAGNOSTIC, not a rule (18.10)
+REM   5 no price band      1,000-6,000 removed
+REM   6 lower band only    1,000 floor removed, 6,000 cap kept
+REM   7 upper band only    6,000 cap removed, 1,000 floor kept
+REM   plus  n_report_YYYYMMDD.txt   the same numbers as text, and
+REM         n_days.csv              one row per session, for analyze_count_axes
+REM   The scan is shared, so tabs 2-7 add almost no scan time - but each one
+REM   still runs its own budget sim over the whole window.
+REM   N also opens FIRST here (only when LSS_NEWGAP_DAYS is set).
+REM
 REM WHAT IS TURNED OFF
 REM   LSS_HEAVY_BLOCKS=0   order-rank / budget sweep / per-strategy LOO /
 REM                        filter scan. Those re-run the budget sim dozens
@@ -82,7 +96,15 @@ echo ============================================================
 echo  N over %NDAYS% days  (daily bars only - no 5-min, no lss)
 echo    the 5-min tabs stay at --days 180
 echo    heavy analysis blocks are OFF
-echo    first run at a new day count refetches 1,540 names - be patient
+echo.
+echo    ALL 7 N TABS: N / mirror / no-50-cap / no-budget /
+echo                  no-price-band / lower-only / upper-only
+echo    plus n_report_YYYYMMDD.txt and n_days.csv
+echo    N opens first.
+echo.
+echo    A NEW day count re-runs the scan (7000 days: ~160s per pane).
+echo    It does NOT re-download - the daily bars are already local.
+echo    Same day count again reads the cache in ~8s.
 echo ============================================================
 if %NDAYS% GTR 7000 (
   echo.
@@ -98,5 +120,18 @@ echo.
 set "LSS_NEWGAP_DAYS=%NDAYS%"
 set "LSS_HEAVY_BLOCKS=0"
 set "LSS_PREOPEN_TAB=0"
+
+REM every N variant on
+set "LSS_NEWGAP_MIRROR=1"
+set "LSS_NEWGAP_NOCAP=1"
+set "LSS_NEWGAP_ALL=1"
+set "LSS_NEWGAP_NOPX=1"
+set "LSS_NEWGAP_PXSPLIT=1"
+set "LSS_NEWGAP_WBMATRIX=1"
+set "LSS_NEWGAP_CAP=1"
+REM text mirror of the tabs, so the numbers can be pasted without the HTML
+if not defined LSS_NEWGAP_TXT set "LSS_NEWGAP_TXT=auto"
+REM one row per session (date, cand, watched, hit, built, used, pnl, missed)
+if not defined LSS_NEWGAP_DAYS_CSV set "LSS_NEWGAP_DAYS_CSV=n_days.csv"
 
 call "%~dp0dailyfast.bat" --days 180 --no-serve %2 %3 %4 %5 %6 %7 %8 %9

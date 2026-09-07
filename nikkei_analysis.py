@@ -17793,10 +17793,20 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
     #   「既定で開くタブ」にだけ積む(HTML を軽くするため)ので、既定が K だと
     #   **実際に発注している J のタブに判定が1つも無い**状態になる。
     #   実際 2026-08-22 に「これのどこが判定？」となった。
-    _DEF_TAB = next((x for x in ("ehJ", "ehK", "ehL", "ehH", "budget")
+    # ⛔ **2つを分ける**(2026-09-07)。以前は1つの変数で
+    #     ①最初に開くタブ  ②⚖比較・🎯設定比較 を積むタブ
+    #   の両方を決めていた。①だけ N に変えると、②の置き場が
+    #   `("eh"+_ehk) == _DEF_TAB` を満たさなくなり **比較ブロックが丸ごと
+    #   消える**(どのペインにも積まれない)。
+    _CMP_TAB = next((x for x in ("ehJ", "ehK", "ehL", "ehH", "budget")
                      if x in _detail_tab_ids),
                     "entry" if (_SHOW_BASE_DETAIL
                                 and "entry" in _detail_tab_ids) else "all")
+    # ★ N の窓を伸ばして走らせたとき(= `.\nlong`)は **N を最初に開く**。
+    #   N だけを見にきているのに J が開くと毎回タブを探すことになる。
+    #   ⛔ 通常の `.\daily` / `.\dailyfast` は _NG_DAYS=0 なので何も変わらない。
+    _DEF_TAB = ("newgap" if (_NG_DAYS > 0 and "newgap" in _detail_tab_ids)
+                else _CMP_TAB)
 
     def _act(_tid: str) -> str:
         return " active" if _tid == _DEF_TAB else ""
@@ -22222,10 +22232,10 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             f'</p></details>'
             # ⛔ ⚖比較 + H設定比較は巨大なので、**既定で開くタブにだけ**入れる。
             #    E/H/J/K の全ペインに積むと HTML が数倍になる(2026-08-15)。
-            + (_EH_CMP_HTML if ("eh" + _ehk) == _DEF_TAB else
+            + (_EH_CMP_HTML if ("eh" + _ehk) == _CMP_TAB else
                f'<p style="color:#64748b;font-size:0.76rem;margin:0 0 10px">'
                f'⚖ 注文方式の比較・🎯 H の設定比較は、既定で開くタブ'
-               f'（{_EH_LBL.get(_DEF_TAB[2:], ("",))[0] or _DEF_TAB}）にまとめて'
+               f'（{_EH_LBL.get(_CMP_TAB[2:], ("",))[0] or _CMP_TAB}）にまとめて'
                f'置いています。HTML を軽くするためです。</p>')
             # ⛔ ブロックが **無い理由** を画面に出す (2026-08-21)。
             #   `.\dailyfast` は LSS_H_VARIANT_TAB=0 なので設定比較を作らない。
@@ -22236,7 +22246,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 'ATR期間・遅延の比較を見るには <code>.\\hvar</code> で流し直して'
                 'ください（<code>.\\dailyfast</code> / <code>.\\daily</code> では'
                 '既定OFF）。</p>')
-               if (("eh" + _ehk) == _DEF_TAB
+               if (("eh" + _ehk) == _CMP_TAB
                    and str(os.environ.get("LSS_H_VARIANT_TAB", "1")).strip()
                    in ("0", "false", "no")) else '')
             + _dup_toggle_html(_ss, _g[0], _g[1], _dseq, _ehpfx)
