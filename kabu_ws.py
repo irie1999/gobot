@@ -206,6 +206,17 @@ if __name__ == "__main__":
     ap.add_argument("--seconds", type=int, default=60, help="受信する秒数")
     ap.add_argument("--compare-rest", action="store_true",
                     help="同じ銘柄を REST でも1周読み、所要秒数を並べる")
+    # ★★ 本命 (2026-09-07)。登録上限50件を **回して** 超えられるか。
+    #   §18.44 は「2周目も REST が36秒かかる」ので棄却したが、それは
+    #   読み取りの話。PUSH なら読む時間はゼロで、残るのは
+    #   **登録してから配信が始まるまで**の待ちだけ。始値は動かないので
+    #   遅れて届いても値は正しい。そこが何秒かで採否が決まる。
+    ap.add_argument("--rotate", type=int, default=0,
+                    help="N銘柄を50件ずつ回して、バッチごとの"
+                         "『登録→初回受信』『登録→全件揃う』秒数を測る")
+    ap.add_argument("--batch", type=int, default=50, help="--rotate の1バッチ")
+    ap.add_argument("--batch-wait", type=int, default=90,
+                    help="--rotate で1バッチを待つ上限秒")
     a = ap.parse_args()
 
     # ⛔ 発注系は一切 import しない。KabuClient は登録と(比較時のみ)/board だけ。
@@ -232,15 +243,20 @@ if __name__ == "__main__":
                 if str(_r.get("watched_n") or _r.get("watched") or "").strip() \
                         not in ("", "0", "False", "false"):
                     _syms.append(_c)
-        if not _syms:
-            print(f"[info] watched_n が無いので先頭50件を使います")
+        if a.rotate:
+            # ★ 回すときは **候補全部**を使う(watched_n の50件では意味がない)
+            _syms = _all
+            print(f"[info] {_p} の候補 {len(_syms)}件 を回します")
+        elif not _syms:
+            print("[info] watched_n が無いので先頭50件を使います")
             _syms = _all
         else:
             print(f"[info] {_p} の watched_n から {len(_syms)}件")
-        _syms = _syms[:50]
     if not _syms:
         sys.exit("[error] 銘柄が0件です")
-    if len(_syms) > 50:
+    if a.rotate:
+        _syms = _syms[:max(1, a.rotate)]
+    elif len(_syms) > 50:
         print(f"[warn] {len(_syms)}件 → kabu の登録上限で先頭50件にします")
         _syms = _syms[:50]
 
@@ -252,6 +268,108 @@ if __name__ == "__main__":
 
     cli = KabuClient(prod=a.prod, dry_run=True)
     cli.connect()
+
+    # ══════════════════════════════════════════════════════════════════
+    #  --rotate : 登録上限50件を **回して** 超えられるか (2026-09-07)
+    # ══════════════════════════════════════════════════════════════════
+    # ⛔ §18.44 は「バッチ回しは不可能」と結論したが、それは **REST の
+    #   読み取りが2周目も36秒かかる**という測定。PUSH なら読む時間はゼロ。
+    #   残るのは『登録してから配信が始まるまで』の待ちだけで、そこは未測定。
+    # ★ 始値は動かないので、遅れて届いても **値は正しい**。
+    #   問われるのは「何秒遅れるか」= 何bp 失うか、だけ。
+    if a.rotate:
+        _bs = max(1, a.batch)
+        _batches = [_syms[i:i + _bs] for i in range(0, len(_syms), _bs)]
+        print(f"\n[rotate] {len(_syms)}銘柄 を {_bs}件 × {len(_batches)}バッチ")
+        print("[rotate] ⛔ 照会のみ。発注しません。建玉にも注文にも触れません")
+        st = BoardStream(cli.base_url, verbose=True)
+        if not st.start():
+            sys.exit("[error] PUSH配信に繋がりませんでした")
+        _res = []
+        for _bi, _b in enumerate(_batches, 1):
+            _want = {s.replace(".T", "") for s in _b}
+            try:
+                cli.unregister_all()
+            except Exception:
+                pass
+            # ⚠ 前バッチの残りを数えないよう、受信済みの銘柄集合を控える
+            _before = set(st.snapshot())
+            _t0 = _time.time()
+            _rr = cli.register_many(sorted(_want))
+            _nok = len((_rr or {}).get("RegistList") or [])
+            _t_reg = _time.time() - _t0
+            _first = None
+            _full = None
+            while _time.time() - _t0 < a.batch_wait:
+                _time.sleep(0.25)
+                _snap = st.snapshot()
+                _hit = {s for s in _want
+                        if float((_snap.get(s) or {}).get("OpeningPrice") or 0) > 0
+                        and s not in _before}
+                if _hit and _first is None:
+                    _first = _time.time() - _t0
+                    print(f"  [batch{_bi}] 初回受信 {_first:.1f}s", flush=True)
+                if len(_hit) >= _nok and _nok:
+                    _full = _time.time() - _t0
+                    break
+            _got = len({s for s in _want
+                        if float((st.snapshot().get(s) or {}).get(
+                            "OpeningPrice") or 0) > 0 and s not in _before})
+            _res.append((_bi, len(_b), _nok, _got, _t_reg, _first, _full))
+            print(f"  [batch{_bi}] 要求{len(_b)} 登録{_nok} 取得{_got} / "
+                  f"登録{_t_reg:.1f}s / 初回"
+                  f"{'—' if _first is None else f'{_first:.1f}s'} / 全件"
+                  f"{'届かず' if _full is None else f'{_full:.1f}s'}", flush=True)
+        st.stop()
+        try:
+            cli.unregister_all()
+        except Exception:
+            pass
+
+        print("\n" + "=" * 72)
+        print("■ 判定: PUSH なら50件の壁を回して超えられるか")
+        print("=" * 72)
+        print(f"  {'batch':>6} {'要求':>5} {'登録':>5} {'取得':>5} "
+              f"{'登録s':>7} {'初回s':>7} {'全件s':>7}")
+        for _bi, _nb, _nok, _got, _tr, _f1, _fa in _res:
+            print(f"  {_bi:>6} {_nb:>5} {_nok:>5} {_got:>5} {_tr:>7.1f} "
+                  f"{'—' if _f1 is None else f'{_f1:>7.1f}'} "
+                  f"{'—' if _fa is None else f'{_fa:>7.1f}'}")
+        # ★ 2バッチ目以降の『全件揃うまで』が実質のコスト。
+        #   §18.44 の1分足実測(1分 -15.8bp / 2分 -26.8 / 3分 -29.4 / 5分 -36.6)
+        #   で bp に直す。N のグロスは +15.7bp/件。
+        _later = [r[6] for r in _res[1:] if r[6] is not None]
+        if not _later:
+            print("\n  ⛔ **2バッチ目が届きませんでした**。回すのは不可能です"
+                  f"(上限 {a.batch_wait}秒)。50件のままにしてください")
+        else:
+            _avg = sum(_later) / len(_later)
+
+            def _bp(_s: float) -> float:
+                # 実測点を線形につなぐ(0s=0 / 60s=-15.8 / 120s=-26.8 /
+                # 180s=-29.4 / 300s=-36.6)。凹型なので短い側が効く。
+                _pts = [(0, 0.0), (60, 15.8), (120, 26.8),
+                        (180, 29.4), (300, 36.6)]
+                for (x0, y0), (x1, y1) in zip(_pts, _pts[1:]):
+                    if _s <= x1:
+                        return y0 + (y1 - y0) * (_s - x0) / (x1 - x0)
+                return 36.6
+            _c = _bp(_avg)
+            print(f"\n  2バッチ目以降の『全件揃うまで』 平均 **{_avg:.1f}秒**")
+            print(f"  → §18.44 の減衰カーブで **約 -{_c:.1f}bp**"
+                  f"(N のグロスは +15.7bp/件)")
+            if _c < 8.0:
+                print(f"  ✅ **回す価値があります**。いま1件も建てていない"
+                      f"51件目以降が +{15.7 - _c:.1f}bp で取れる計算")
+            elif _c < 15.7:
+                print(f"  ⚠ 薄いが黒字圏(+{15.7 - _c:.1f}bp)。"
+                      f"バッチ2までにして3以降は捨てるのが妥当")
+            else:
+                print(f"  ⛔ **グロスを食い切ります**。回しても意味がありません")
+            print("\n  ⚠ これは1日の1回の測定。**09:00 の板寄せ直後は混む**ので、"
+                  "採否は朝に測り直してから決めること")
+        raise SystemExit(0)
+
     _r = cli.register_many([s.replace(".T", "") for s in _syms])
     _ok = len((_r or {}).get("RegistList") or [])
     print(f"[info] 登録 {_ok}/{len(_syms)}件")
