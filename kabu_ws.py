@@ -68,6 +68,10 @@ class BoardStream:
         self.n_msg = 0
         self.t_connect: float = 0.0
         self.first_msg_ts: str = ""
+        # ★★ 再接続の回数 (2026-09-07)。ローテーション中に接続が落ちると
+        #   その間のメッセージを取りこぼす。**落ちていること自体が設計上の
+        #   問題**なので必ず数える(実測で毎バッチ落ちていた)。
+        self.n_reconnect = 0
         # 銘柄ごとに「始値が初めて 0 でなくなった時刻」。REST の到着時刻と
         # 突き合わせて、PUSH が何秒速かったかを実測するために使う。
         self.open_seen: dict[str, str] = {}
@@ -89,10 +93,16 @@ class BoardStream:
             return False
 
         def _on_open(_w):
+            _again = self.t_connect > 0
             self.connected = True
             self.t_connect = _time.time()
+            if _again:
+                self.n_reconnect += 1
             if self.verbose:
-                print(f"  [ws] 接続しました {self.url}", flush=True)
+                print(f"  [ws] {'**再接続**' if _again else '接続しました'}"
+                      f" {self.url}"
+                      + (f" (通算 {self.n_reconnect}回目)" if _again else ""),
+                      flush=True)
 
         def _on_msg(_w, _m):
             try:
@@ -340,27 +350,44 @@ if __name__ == "__main__":
             _rr = cli.register_many(sorted(_want))
             _nok = len((_rr or {}).get("RegistList") or [])
             _t_reg = _time.time() - _t0
+            # ★★ 「全件揃うか」で判定しない (2026-09-07 修正)。
+            #   実測で 47/50・45/50 が1秒以内に届いたのに、残り3〜5件が
+            #   来ないだけで『⛔ 回すのは不可能』と出していた。
+            #   ⚠ そもそも **一度も約定していない銘柄には始値が無い**ので、
+            #     100%は原理的に揃わないことがある。
+            #   → 銘柄ごとの到着時刻を記録し、**分位**で見る。
+            _arr: dict = {}                 # symbol -> 到着秒
             _first = None
-            _full = None
+            _rc0 = st.n_reconnect
             while _time.time() - _t0 < a.batch_wait:
                 _time.sleep(0.25)
                 _snap = st.snapshot()
-                _hit = {s for s in _want
-                        if float((_snap.get(s) or {}).get("OpeningPrice") or 0) > 0
-                        and s not in _before}
-                if _hit and _first is None:
-                    _first = _time.time() - _t0
+                _el = _time.time() - _t0
+                for _s in _want:
+                    if _s in _arr or _s in _before:
+                        continue
+                    if float((_snap.get(_s) or {}).get("OpeningPrice") or 0) > 0:
+                        _arr[_s] = _el
+                if _arr and _first is None:
+                    _first = min(_arr.values())
                     print(f"  [batch{_bi}] 初回受信 {_first:.1f}s", flush=True)
-                if len(_hit) >= _nok and _nok:
-                    _full = _time.time() - _t0
+                if len(_arr) >= _nok and _nok:
                     break
+            _sec = sorted(_arr.values())
+
+            def _pct(_p: float) -> float:
+                if not _sec:
+                    return float("nan")
+                return _sec[min(len(_sec) - 1, int(len(_sec) * _p))]
+            _full = _pct(0.90)              # ★ 判定は **90%点**で行う
             # ⛔ **登録に失敗したバッチは測定外**(2026-09-07)。
             #   register は部分受理されないので、1件でも無効なコード
             #   (上場廃止など)が混ざると PUT 全体が 400 で落ちる。
             #   そのとき届いた件数を数えると意味のない数字になる
             #   (実際 登録0件なのに『取得49』と表示して混乱した)。
             if _nok <= 0:
-                _res.append((_bi, len(_b), 0, None, _t_reg, None, None))
+                _res.append((_bi, len(_b), 0, None, _t_reg, None, None,
+                             None, 0, 0, 0, 0))
                 print(f"  [batch{_bi}] 要求{len(_b)} **登録に失敗** → 測定外",
                       flush=True)
                 # ★★ 原因を切り分ける。意味が正反対の2つがありうる:
@@ -411,14 +438,31 @@ if __name__ == "__main__":
                 except Exception:
                     pass
                 continue
-            _got = len({s for s in _want
-                        if float((st.snapshot().get(s) or {}).get(
-                            "OpeningPrice") or 0) > 0 and s not in _before})
-            _res.append((_bi, len(_b), _nok, _got, _t_reg, _first, _full))
-            print(f"  [batch{_bi}] 要求{len(_b)} 登録{_nok} 取得{_got} / "
+            _got = len(_arr)
+            # ★★ 届かなかった銘柄を **REST で確かめる**。
+            #   「PUSH が落とした」のか「そもそも今日まだ約定していない」のかで
+            #   意味が正反対。前者は実装の問題、後者は現実(始値が存在しない)。
+            _miss = [s for s in _want if s not in _arr and s not in _before]
+            _miss_traded, _miss_nottraded = [], []
+            for _s in _miss[:12]:            # ⚠ 429 を避けるため上限12件
+                try:
+                    _bb = cli.get_board(_s)
+                except Exception:
+                    _bb = {}
+                (_miss_traded if float((_bb or {}).get("OpeningPrice") or 0) > 0
+                 else _miss_nottraded).append(_s)
+            _res.append((_bi, len(_b), _nok, _got, _t_reg, _first, _full,
+                         _pct(0.5), len(_miss), len(_miss_traded),
+                         len(_miss_nottraded), st.n_reconnect - _rc0))
+            print(f"  [batch{_bi}] 要求{len(_b)} 登録{_nok} **取得{_got}** / "
                   f"登録{_t_reg:.1f}s / 初回"
-                  f"{'—' if _first is None else f'{_first:.1f}s'} / 全件"
-                  f"{'届かず' if _full is None else f'{_full:.1f}s'}", flush=True)
+                  f"{'—' if _first is None else f'{_first:.1f}s'}"
+                  f" / 中央{_pct(0.5):.1f}s / 90%点{_full:.1f}s"
+                  + (f" / ⛔ 未達{len(_miss)}件"
+                     f"(RESTで確認: 約定済み{len(_miss_traded)} "
+                     f"未約定{len(_miss_nottraded)})" if _miss else "")
+                  + (f" / ⚠ 再接続{st.n_reconnect - _rc0}回"
+                     if st.n_reconnect > _rc0 else ""), flush=True)
         st.stop()
         try:
             cli.unregister_all()
@@ -429,15 +473,36 @@ if __name__ == "__main__":
         print("■ 判定: PUSH なら50件の壁を回して超えられるか")
         print("=" * 72)
         print(f"  {'batch':>6} {'要求':>5} {'登録':>5} {'取得':>5} "
-              f"{'登録s':>7} {'初回s':>7} {'全件s':>7}")
-        for _bi, _nb, _nok, _got, _tr, _f1, _fa in _res:
+              f"{'初回s':>7} {'中央s':>7} {'90%s':>7} {'未達':>5} {'再接続':>6}")
+        for (_bi, _nb, _nok, _got, _tr, _f1, _fa, _md, _nm, _mt, _mn,
+             _rc) in _res:
             if _got is None:
-                print(f"  {_bi:>6} {_nb:>5} {0:>5} {'—':>5} {_tr:>7.1f} "
-                      f"{'—':>7} {'—':>7}   ⛔ 登録失敗 = 測定外")
+                print(f"  {_bi:>6} {_nb:>5} {0:>5} {'—':>5} "
+                      f"{'—':>7} {'—':>7} {'—':>7} {'—':>5} {'—':>6}"
+                      f"   ⛔ 登録失敗 = 測定外")
                 continue
-            print(f"  {_bi:>6} {_nb:>5} {_nok:>5} {_got:>5} {_tr:>7.1f} "
+            print(f"  {_bi:>6} {_nb:>5} {_nok:>5} {_got:>5} "
                   f"{'—' if _f1 is None else f'{_f1:>7.1f}'} "
-                  f"{'—' if _fa is None else f'{_fa:>7.1f}'}")
+                  f"{_md:>7.1f} {_fa:>7.1f} {_nm:>5} {_rc:>6}")
+        # ★ 未達の内訳。REST でも始値が無い = そもそも今日まだ約定していない
+        #   銘柄なので、PUSH の失敗ではない。
+        _mt_all = sum(r[9] for r in _res if r[3] is not None)
+        _mn_all = sum(r[10] for r in _res if r[3] is not None)
+        if _mt_all or _mn_all:
+            print(f"\n  未達の内訳(REST で確認・各バッチ先頭12件まで): "
+                  f"**約定済みなのに届かなかった {_mt_all}件** / "
+                  f"そもそも未約定 {_mn_all}件")
+            if _mt_all:
+                print(f"    ⛔ {_mt_all}件は **PUSH の取りこぼし**です。"
+                      f"再接続と同時に起きているなら接続の問題")
+            if _mn_all and not _mt_all:
+                print(f"    ✅ 未達はすべて『今日まだ約定していない銘柄』。"
+                      f"PUSH は取りこぼしていません")
+        _rc_all = sum(r[11] for r in _res if r[3] is not None)
+        if _rc_all:
+            print(f"\n  ⚠ **WebSocket が {_rc_all}回 再接続しています**。"
+                  f"ローテーションのたびに落ちているなら、その間の"
+                  f"メッセージを取りこぼします。実装の要修正点です")
         _bad = [r[0] for r in _res if r[3] is None]
         if _bad:
             print(f"\n  ⚠ batch{','.join(map(str, _bad))} は登録に失敗したので"
@@ -445,9 +510,11 @@ if __name__ == "__main__":
         # ★ 2バッチ目以降の『全件揃うまで』が実質のコスト。
         #   §18.44 の1分足実測(1分 -15.8bp / 2分 -26.8 / 3分 -29.4 / 5分 -36.6)
         #   で bp に直す。N のグロスは +15.7bp/件。
-        _later = [r[6] for r in _res[1:] if r[6] is not None]
+        # ★ 判定は **90%点**で行う(100%は原理的に揃わないことがある)
+        _later = [r[6] for r in _res[1:]
+                  if r[6] is not None and r[6] == r[6]]
         if not _later:
-            print("\n  ⛔ **2バッチ目が届きませんでした**。回すのは不可能です"
+            print("\n  ⛔ **2バッチ目が1件も届きませんでした**。回すのは不可能です"
                   f"(上限 {a.batch_wait}秒)。50件のままにしてください")
         else:
             _avg = sum(_later) / len(_later)
@@ -462,7 +529,7 @@ if __name__ == "__main__":
                         return y0 + (y1 - y0) * (_s - x0) / (x1 - x0)
                 return 36.6
             _c = _bp(_avg)
-            print(f"\n  2バッチ目以降の『全件揃うまで』 平均 **{_avg:.1f}秒**")
+            print(f"\n  2バッチ目以降の『**90%が届くまで**』 平均 **{_avg:.1f}秒**")
             print(f"  → §18.44 の減衰カーブで **約 -{_c:.1f}bp**"
                   f"(N のグロスは +15.7bp/件)")
             if _c < 8.0:
