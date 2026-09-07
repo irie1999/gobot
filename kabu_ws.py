@@ -219,11 +219,24 @@ if __name__ == "__main__":
         if not os.path.exists(_p):
             sys.exit(f"[error] {_p} がありません。--symbols で明示してください")
         import csv as _csv
+        _all: list[str] = []
         with open(_p, encoding="utf-8-sig") as _f:
             for _r in _csv.DictReader(_f):
                 _c = str(_r.get("symbol") or _r.get("code") or "").strip()
-                if _c:
-                    _syms.append(_c.replace(".T", ""))
+                if not _c:
+                    continue
+                _c = _c.replace(".T", "")
+                _all.append(_c)
+                # ★ 朝に実際に watch した50件を優先する(候補は126件ありうる)。
+                #   watched_n が無い古い CSV なら _all のほうを使う。
+                if str(_r.get("watched_n") or _r.get("watched") or "").strip() \
+                        not in ("", "0", "False", "false"):
+                    _syms.append(_c)
+        if not _syms:
+            print(f"[info] watched_n が無いので先頭50件を使います")
+            _syms = _all
+        else:
+            print(f"[info] {_p} の watched_n から {len(_syms)}件")
         _syms = _syms[:50]
     if not _syms:
         sys.exit("[error] 銘柄が0件です")
