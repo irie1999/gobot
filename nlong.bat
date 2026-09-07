@@ -143,8 +143,9 @@ REM   2026-09-08: THE DETAIL STAYS, ON EVERY TAB. The user reads it.
 REM   Everything else got cut instead - see LSS_NEWGAP_ONLY above, plus the
 REM   bt70/bt40 row builders and the exit-day pane, which were being built
 REM   every run without any flag stopping them.
-REM   The run now prints [HTML内訳] naming the biggest pieces in MB, so the
-REM   next thing to cut gets picked from a number, not from a guess.
+REM   The run now prints an HTML size breakdown naming the biggest
+REM   pieces in MB, so the next thing to cut is picked from a number,
+REM   not from a guess.
 REM   Base tab only: set LSS_NEWGAP_DETAIL_BASE=1
 REM   No detail:     set LSS_NEWGAP_NO_DETAIL=1
 REM a second N tab at a different budget. 800 because the budget sweep
