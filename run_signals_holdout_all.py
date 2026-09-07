@@ -3776,9 +3776,13 @@ out_path = Path(f"signals_holdout_all{_short_suffix}{_sym_suffix}_{date_str}{_ou
 # 巨大HTMLを write_text で一括書き込みすると str→bytes 変換でピークメモリが約2倍
 # になり MemoryError になることがある(Python3.14 / 銘柄詳細が多いとき)。
 # 1MBずつ分割書き込みしてピークを抑える。
-with open(out_path, "w", encoding="utf-8", newline="") as _f:
-    for _i in range(0, len(html), 1_000_000):
-        _f.write(html[_i:_i + 1_000_000])
+# ★ 2026-09-07: ここは **一度も計測していなかった**。19年窓では HTML が
+#   140MB になり、書き出しだけで無視できない時間になる。名前を付ける。
+_phase(f"HTML 組み立て完了 ({len(html) / 1e6:.0f}MB)")
+with _na._ptimer("HTML 書き出し"):
+    with open(out_path, "w", encoding="utf-8", newline="") as _f:
+        for _i in range(0, len(html), 1_000_000):
+            _f.write(html[_i:_i + 1_000_000])
 del html   # 後続(--both統合ラッパー等)のためにメモリを解放
 print(f"\nレポート生成完了: {out_path.resolve()}")
 print(_data_freshness_line())
