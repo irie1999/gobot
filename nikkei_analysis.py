@@ -685,6 +685,13 @@ _NG_NOPX_TAB = os.environ.get("LSS_NEWGAP_NOPX", "0").strip().lower() \
 #      (2026-08-25 に判定窓が 1日1.3銘柄になって「不合格」と出た)。
 #      → _newgap_scan_one で min_start_date を渡し、実際に取れた期間を出す。
 _NG_DAYS = int(os.environ.get("LSS_NEWGAP_DAYS", "0"))
+# ★★ 日別カードに出す **営業日数の上限** (2026-09-07)。0=無制限。
+#   ⛔ `.\nlong 7000` は 4,706営業日ぶんの日別カードを作ろうとして
+#     **MemoryError**(HTMLの文字列連結)で落ちた。実測のトレースバック:
+#       _ng_build_one → `_ng["head"] + _ng_common + tail` → MemoryError
+#   ⚠ 切るのは **カードだけ**。月別サマリーと合計は trades から別に計算する
+#     ので全期間のまま正しい。既定 500 ≒ 2年ぶんのカード。
+_NG_MAX_DAYS = int(os.environ.get("LSS_NEWGAP_MAX_DAYS", "500"))
 # ★ 09:00 に始値も帯の中か再確認する(ライブの挙動)。既定OFF。
 #   ⚠ ONにしても **watch50 の顔ぶれは前夜(前日終値)のまま**なので先読みにならない。
 _NG_PX_RECHECK = os.environ.get("LSS_NEWGAP_PX_RECHECK", "0").strip().lower() \
@@ -1316,7 +1323,23 @@ def _newgap_build(days: int, min_price: float, max_price: float,
         # ⛔ 4 watch × 4 予算 = **16回の予算シミュ**。上の4通り比較と合わせて
         #   このタブだけで20回まわる。重いなら LSS_NEWGAP_WBMATRIX=0 で切る
         #   (2026-09-07: 計測できるようにした)。
-        for _wv, _wlbl in (_wl if _NG_WB_MATRIX else []):
+        # ★★ 長い窓では既定で切る (2026-09-07)。実測: `.\nlong 7000` の
+        #   `🔓 N 50件制限なし` タブが **82.2秒**で、その大半がこの16回。
+        #   ⚠ watch と予算の話は「いま何件建てられるか」= **直近のレジーム**の
+        #     問いなので、19年窓で回す意味は薄い。明示すれば出る。
+        _wb_on = _NG_WB_MATRIX
+        if _wb_on and _NG_DAYS > 1500 and "LSS_NEWGAP_WBMATRIX" not in os.environ:
+            _wb_on = False
+            _h.append(
+                '<div style="background:#1e293b;border:1px solid #334155;'
+                'border-radius:6px;padding:8px 12px;margin-bottom:12px;'
+                'font-size:0.8rem;color:#94a3b8">'
+                '⚠ <b>watch×予算のマトリクスは、この長い窓では出していません</b>'
+                '（4×4=16回の予算シミュで実測 80秒近くかかるため）。'
+                'watch と予算は「いま何件建てられるか」= 直近のレジームの問いなので、'
+                '19年窓で回す意味は薄いはずです。'
+                '出すなら <code>set LSS_NEWGAP_WBMATRIX=1</code>。</div>')
+        for _wv, _wlbl in (_wl if _wb_on else []):
             _r2 = []
             for _bv in _bl:
                 try:
@@ -1382,9 +1405,11 @@ def _newgap_build(days: int, min_price: float, max_price: float,
             f'<div style="background:#1e293b;border:1px solid #334155;'
             f'border-radius:6px;padding:10px;margin-bottom:12px;'
             f'font-size:0.82rem;color:#94a3b8">'
-            f'💰 watch × 予算の行列は <code>LSS_NEWGAP_WBMATRIX=0</code> で'
-            f'切ってあります（予算シミュを16回まわすので重い）。'
-            f'見たいときは <code>=1</code> に。</div>')
+            f'💰 watch × 予算の行列は<b>この実行では作っていません</b>'
+            f'（予算シミュを 4×4=16回まわすので重い）。'
+            f'理由は上に出ています（明示的に <code>=0</code> か、'
+            f'長い窓で自動的に切ったか）。出すには '
+            f'<code>set LSS_NEWGAP_WBMATRIX=1</code>。</div>')
     else:
         _wall_c = "#f87171" if _miss_tot > _nb * 0.2 else "#94a3b8"
         _h.append(
@@ -15528,7 +15553,7 @@ function switchTbd(id, tab) {{
         return nl, nb, sorted(nb.keys(), key=str, reverse=True)
 
     def _dup_toggle_html(trades_list, by_date, sorted_dates, dseq, pfx,
-                         expand_months=2, expand_tenkan=True):
+                         expand_months=2, expand_tenkan=True, max_days=0):
         """「全件 / 重複保有なし」を切り替えられる 月別サマリー + 日別アコーディオン。
 
         同じ銘柄が複数の戦略で同時にシグナルを出すと、いまは100株ずつ **別建てで
@@ -15540,6 +15565,17 @@ function switchTbd(id, tab) {{
            pfx を変えて衝突を避ける。
         """
         _nl, _nb, _ndates = _drop_overlap(trades_list, by_date)
+        # ★★ 日別カードの日数を切る (2026-09-07)。
+        #   ⛔ `.\nlong 7000` は 4,706営業日 × 数万件で、日別カードの HTML を
+        #     組む文字列連結が **MemoryError** で落ちた(実測)。
+        #   ⚠ 切るのは **日別カードだけ**。月別サマリーは trades_list から
+        #     別に計算するので、**合計は全期間のまま正しい**。
+        #   sorted_dates は新しい順なので、頭から取れば直近が残る。
+        _cut_d = 0
+        if max_days and len(sorted_dates) > max_days:
+            _cut_d = len(sorted_dates) - max_days
+            sorted_dates = sorted_dates[:max_days]
+            _ndates = _ndates[:max_days]
 
         def _done(lst):
             return [t for t in (lst or [])
@@ -15580,7 +15616,16 @@ function switchTbd(id, tab) {{
             f'2本目以降を落として<b>1銘柄1ポジション</b>にした場合の成績。'
             f'<b>月別サマリーと日別カードの両方が切り替わる。</b></div>'
             f'</div>'
-            f'<div id="dup_{_uid}_all">'
+            + (f'<div style="background:#3f2d1d;border:1px solid #92400e;'
+               f'border-radius:6px;padding:8px 12px;margin:8px 0;'
+               f'font-size:0.8rem;color:#fcd34d">'
+               f'⚠ <b>日別カードは直近 {max_days:,}営業日ぶんだけ</b>出しています'
+               f'（古い {_cut_d:,}日ぶんは省略）。窓が長いと HTML が組めずに'
+               f'落ちるためです（<code>set LSS_NEWGAP_MAX_DAYS=0</code> で全部）。'
+               f'<b style="color:#e2e8f0">上の月別サマリーと合計は全期間のまま'
+               f'正しい値です</b>（別に計算しています）。</div>'
+               if _cut_d else '')
+            + f'<div id="dup_{_uid}_all">'
             + _month_summary_html(trades_list)
             + _month_accordion_html(by_date, sorted_dates, dseq, pfx,
                                     expand_months, expand_tenkan)
@@ -22400,8 +22445,13 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 #    (2026-08-26 にユーザーが遭遇)。
                 #    共通ブロックが落ちても N 固有の head だけは必ず出す。
                 try:
+                    # ⛔ 日別カードの日数を切る。19年窓(4,706営業日)の HTML は
+                    #   文字列連結で MemoryError になる(2026-09-07 実測)。
+                    #   月別サマリー・合計は全期間のまま(別計算)。
                     _ng_common = (_dup_toggle_html(_ng_tr, _ng_bd, _ng_dates,
-                                                   _dseq, key) if _ng_tr else "")
+                                                   _dseq, key,
+                                                   max_days=_NG_MAX_DAYS)
+                                  if _ng_tr else "")
                 except Exception as _nge2:
                     # ⛔ **traceback を HTML にも出す。**ターミナルを貼ってもらう
                     #    より、画面のスクショだけで原因の行が分かるようにする

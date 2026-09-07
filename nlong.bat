@@ -127,8 +127,13 @@ set "LSS_NEWGAP_NOCAP=1"
 set "LSS_NEWGAP_ALL=1"
 set "LSS_NEWGAP_NOPX=1"
 set "LSS_NEWGAP_PXSPLIT=1"
-set "LSS_NEWGAP_WBMATRIX=1"
 set "LSS_NEWGAP_CAP=1"
+REM NOT LSS_NEWGAP_WBMATRIX. The watch x budget grid is 4x4 = 16 budget sims
+REM and measured 80 seconds of the 82s that the no-50-cap tab took over a
+REM 19-year window. watch and budget are a "how many can I place TODAY"
+REM question, so a 19-year window adds nothing. The report skips it by
+REM itself past 1500 days UNLESS this var is set - so leave it unset here.
+REM Force it back on with:  set LSS_NEWGAP_WBMATRIX=1
 REM text mirror of the tabs, so the numbers can be pasted without the HTML
 if not defined LSS_NEWGAP_TXT set "LSS_NEWGAP_TXT=auto"
 REM one row per session (date, cand, watched, hit, built, used, pnl, missed)
