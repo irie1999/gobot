@@ -691,7 +691,10 @@ _NG_DAYS = int(os.environ.get("LSS_NEWGAP_DAYS", "0"))
 #       _ng_build_one → `_ng["head"] + _ng_common + tail` → MemoryError
 #   ⚠ 切るのは **カードだけ**。月別サマリーと合計は trades から別に計算する
 #     ので全期間のまま正しい。既定 500 ≒ 2年ぶんのカード。
-_NG_MAX_DAYS = int(os.environ.get("LSS_NEWGAP_MAX_DAYS", "500"))
+#   ⚠ 2026-09-08: 500 → **250** に下げた。7変種を出したら **PC全体が
+#     メモリ不足**になり VS Code が oom で落ちた。カードは直近1年あれば
+#     足りる(それ以前を日ごとに見ることはない)。全部見るなら =0。
+_NG_MAX_DAYS = int(os.environ.get("LSS_NEWGAP_MAX_DAYS", "250"))
 # ★★ 発注順の比較 (2026-09-07 ユーザーの問い「合格33件で予算は9件。
 #   この9件の選び方はランダムしかない?」)。
 #   ⛔ **2条件を1回ずつ比べて差を語らない**(§18.24)。ランダムを何本か回して

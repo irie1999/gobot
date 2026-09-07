@@ -2,9 +2,16 @@
 REM ============================================================
 REM nlong.bat - run the report with a LONG window FOR N ONLY
 REM
-REM   .\nlong            N over 2000 days (about 8 years)
-REM   .\nlong 4200       N over 4200 days (about 11.5 years)
-REM   .\nlong 7000       N over 7000 days (about 19 years)
+REM   .\nlong 700        N over 700 days, 3 tabs   (DEFAULT - fits in RAM)
+REM   .\nlong 700 all    N over 700 days, all 7 tabs
+REM   .\nlong 4200       11.5 years, 3 tabs
+REM
+REM   *** 3 TABS IS THE DEFAULT BECAUSE 7 RAN THE MACHINE OUT OF MEMORY. ***
+REM   On 2026-09-08 all 7 variants over 700 days took the whole PC down -
+REM   VS Code died with 'oom' and PowerToys crashed too. Each variant holds
+REM   its own detail HTML, and the lss pane already carries H/J/L/K on top.
+REM   Add "all" only when you actually need the other four, and close other
+REM   apps first.
 REM
 REM WHY THIS EXISTS (2026-09-07)
 REM   `.\dailyfast --days 2000` CRASHED THE MACHINE.
@@ -19,14 +26,12 @@ REM   N is different: it reads DAILY bars only, never 5-min, never the lss
 REM   backtest. So N alone can look back years. Its window is a separate
 REM   env var, LSS_NEWGAP_DAYS, and that is all this .bat sets.
 REM
-REM EVERY N TAB IS ON (2026-09-07, by request)
-REM   1 N                  the rule as traded
-REM   2 mirror (buy)       prev-day DOWN x gap DOWN, bought (18.56)
-REM   3 no 50-name cap     watch removed, order switched to liquidity
-REM   4 no budget          take every pass. A DIAGNOSTIC, not a rule (18.10)
-REM   5 no price band      1,000-6,000 removed
-REM   6 lower band only    1,000 floor removed, 6,000 cap kept
-REM   7 upper band only    6,000 cap removed, 1,000 floor kept
+REM WHICH N TABS
+REM   DEFAULT (3)          1 N / 2 mirror / 3 no 50-name cap
+REM   with "all" (7 more)  4 no budget      a DIAGNOSTIC, not a rule (18.10)
+REM                        5 no price band  1,000-6,000 removed
+REM                        6 lower band only
+REM                        7 upper band only
 REM   plus  n_report_YYYYMMDD.txt   the same numbers as text, and
 REM         n_days.csv              one row per session, for analyze_count_axes
 REM   The scan is shared, so tabs 2-7 add almost no scan time - but each one
@@ -97,8 +102,7 @@ echo  N over %NDAYS% days  (daily bars only - no 5-min, no lss)
 echo    the 5-min tabs stay at --days 180
 echo    heavy analysis blocks are OFF
 echo.
-echo    ALL 7 N TABS: N / mirror / no-50-cap / no-budget /
-echo                  no-price-band / lower-only / upper-only
+echo    N TABS: N / mirror / no-50-cap    (add "all" for 7)
 echo    plus n_report_YYYYMMDD.txt and n_days.csv
 echo    N opens first.
 echo.
@@ -124,10 +128,18 @@ set "LSS_PREOPEN_TAB=0"
 REM every N variant on
 set "LSS_NEWGAP_MIRROR=1"
 set "LSS_NEWGAP_NOCAP=1"
-set "LSS_NEWGAP_ALL=1"
-set "LSS_NEWGAP_NOPX=1"
-set "LSS_NEWGAP_PXSPLIT=1"
 set "LSS_NEWGAP_CAP=1"
+REM the other four only with "all" - they are what ran the PC out of memory
+if /i "%~2"=="all" (
+  set "LSS_NEWGAP_ALL=1"
+  set "LSS_NEWGAP_NOPX=1"
+  set "LSS_NEWGAP_PXSPLIT=1"
+  echo    *** all 7 N tabs - close other apps first, this needs RAM ***
+) else (
+  set "LSS_NEWGAP_ALL=0"
+  set "LSS_NEWGAP_NOPX=0"
+  set "LSS_NEWGAP_PXSPLIT=0"
+)
 REM NOT LSS_NEWGAP_WBMATRIX. The watch x budget grid is 4x4 = 16 budget sims
 REM and measured 80 seconds of the 82s that the no-50-cap tab took over a
 REM 19-year window. watch and budget are a "how many can I place TODAY"
@@ -139,4 +151,8 @@ if not defined LSS_NEWGAP_TXT set "LSS_NEWGAP_TXT=auto"
 REM one row per session (date, cand, watched, hit, built, used, pnl, missed)
 if not defined LSS_NEWGAP_DAYS_CSV set "LSS_NEWGAP_DAYS_CSV=n_days.csv"
 
-call "%~dp0dailyfast.bat" --days 180 --no-serve %2 %3 %4 %5 %6 %7 %8 %9
+REM *** %2 may be the word "all", which is OURS - it must NOT reach python.
+REM   Without this, run_signals_holdout_all.py sees a stray positional arg.
+set "PASS=%3 %4 %5 %6 %7 %8 %9"
+if /i not "%~2"=="all" set "PASS=%2 %3 %4 %5 %6 %7 %8 %9"
+call "%~dp0dailyfast.bat" --days 180 --no-serve %PASS%
