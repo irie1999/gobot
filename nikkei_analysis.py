@@ -503,10 +503,19 @@ class _ptimer:
         return False
 
 
+_PHASE_DONE: list = []
+
+
 def _phase_summary(top: int = 12) -> None:
-    """所要時間の総括を降順で出す。合計の何%かも併記する。"""
-    if not _PHASE_SEC:
+    """所要時間の総括を降順で出す。合計の何%かも併記する。
+
+    ⛔ **2回出さない**(2026-09-07)。run_signals_holdout_all.py:3765 が明示的に
+      呼び、その直後に壁時計の『★ 全体』を足す。atexit でも呼ぶと同じ表が
+      もう一度出る(LSS_QUIET=1 のときは重複除去に隠れて気づけない)。
+    """
+    if not _PHASE_SEC or _PHASE_DONE:
         return
+    _PHASE_DONE.append(1)
     _tot = sum(_PHASE_SEC.values())
     print(f"\n[⏱ 工程別 所要時間]  計測分 合計 {_tot:6.1f}s", flush=True)
     for _n, _s in sorted(_PHASE_SEC.items(), key=lambda kv: -kv[1])[:top]:
@@ -518,11 +527,12 @@ def _phase_summary(top: int = 12) -> None:
           flush=True)
 
 
-# ⛔⛔ 2026-09-07: この総括が **一度も呼ばれていなかった**。計測はしていたのに
-#   出力が無く、「どこが重いか」を推測で語る状態になっていた(§18.38 の
-#   「速度も推測で潰さない」に反する)。atexit なら入口(nikkei_analysis の
-#   main / run_signals_holdout_all からの import)に関係なく必ず出る。
-#   _PHASE_SEC が空なら _phase_summary は何も出さないので、無害。
+# ★ 保険。run_signals_holdout_all.py:3765 が明示的に呼ぶが、
+#   nikkei_analysis.py を単体で走らせた場合はその経路を通らない。
+#   ⛔ 2回目は _PHASE_DONE で自動的に無視されるので重複しない。
+#   ⚠ 2026-09-07 の訂正: 当初「一度も呼ばれていなかった」と書いたが誤り。
+#     呼ばれてはいて、**明細行を LSS_QUIET が食っていた**のが真因
+#     (quiet_log の _KEEP_PHASE で修正済み)。
 import atexit as _atexit                                          # noqa: E402
 _atexit.register(_phase_summary)
 
@@ -9454,7 +9464,10 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                 _wl_stop = [(s, n, st) for s, n, st in _wl_stop if st in strategy_filter]
                 _wl_brk  = [(s, n, st) for s, n, st in _wl_brk  if st in strategy_filter]
             items: list[dict] = []
-            with _TPE(max_workers=workers) as ex:
+            # ⛔ 2026-09-07: ここが **計測外だった**。壁時計の54%(52秒)が
+            #   どの工程にも計上されていなかったので、名前を付ける。
+            with _ptimer("BT収集(WATCHLIST全ペア)"), \
+                    _TPE(max_workers=workers) as ex:
                 futs = {}
                 for sym, name, strat in _wl_stop:
                     futs[ex.submit(_mod_for(strat).backtest_one, sym, name, strat)] = None
@@ -9535,7 +9548,8 @@ def _tab5_pnl_html(days: int, workers: int, cfg_filter: str | None = None,
                     except Exception:
                         return None
 
-                with _TPE(max_workers=workers) as _ex2:
+                with _ptimer("full_trade_log 収集(as-of BT用)"), \
+                        _TPE(max_workers=workers) as _ex2:
                     _f2 = {_ex2.submit(_full_log, it["symbol"], it["name"], it["strategy"]): it
                            for it in items}
                     for _fut in _asc(_f2):
