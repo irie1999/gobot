@@ -419,9 +419,24 @@ if __name__ == "__main__":
             #   ⚠ そもそも **一度も約定していない銘柄には始値が無い**ので、
             #     100%は原理的に揃わないことがある。
             #   → 銘柄ごとの到着時刻を記録し、**分位**で見る。
-            _arr: dict = {}                 # symbol -> 到着秒
+            _arr: dict = {}                 # symbol -> 登録からの到着秒
+            # ★★ **本命の指標**(2026-09-07 指摘で追加)。
+            #   減衰カーブ(§18.44)は「**寄りからの経過**」で定義されている。
+            #   「登録からの経過」で測ると、09:00:00 に寄った銘柄を
+            #   09:00:05 に登録した場合の5秒が丸ごと抜ける。
+            #       判定遅延 = 判定できた時刻 − OpeningPriceTime
+            _lag: dict = {}                 # symbol -> 判定遅延(秒)
             _first = None
             _rc0 = st.n_reconnect
+
+            def _open_epoch(_bd: dict):
+                _ot = str((_bd or {}).get("OpeningPriceTime") or "")
+                if not _ot:
+                    return None
+                try:
+                    return _dt.datetime.fromisoformat(_ot).timestamp()
+                except Exception:
+                    return None
             while _time.time() - _t0 < a.batch_wait:
                 _time.sleep(0.25)
                 _snap = st.snapshot()
@@ -431,6 +446,9 @@ if __name__ == "__main__":
                         continue
                     if float((_snap.get(_s) or {}).get("OpeningPrice") or 0) > 0:
                         _arr[_s] = _el
+                        _oe = _open_epoch(_snap.get(_s))
+                        if _oe:
+                            _lag[_s] = _time.time() - _oe
                 if _arr and _first is None:
                     _first = min(_arr.values())
                     print(f"  [batch{_bi}] 初回受信 {_first:.1f}s", flush=True)
@@ -441,11 +459,18 @@ if __name__ == "__main__":
                     break
             _sec = sorted(_arr.values())
 
-            def _pct(_p: float) -> float:
-                if not _sec:
+            def _q(_v: list, _p: float) -> float:
+                if not _v:
                     return float("nan")
-                return _sec[min(len(_sec) - 1, int(len(_sec) * _p))]
+                _sv = sorted(_v)
+                return _sv[min(len(_sv) - 1, int(len(_sv) * _p))]
+
+            def _pct(_p: float) -> float:
+                return _q(_sec, _p)
             _full = _pct(0.90)              # ★ 判定は **90%点**で行う
+            # ★ 判定遅延(寄りからの経過)。減衰カーブと同じ土俵の量。
+            _lagv = list(_lag.values())
+            _lag50, _lag90 = _q(_lagv, 0.5), _q(_lagv, 0.9)
             # ⛔ **登録に失敗したバッチは測定外**(2026-09-07)。
             #   register は部分受理されないので、1件でも無効なコード
             #   (上場廃止など)が混ざると PUT 全体が 400 で落ちる。
@@ -574,6 +599,8 @@ if __name__ == "__main__":
                   f"登録{_t_reg:.1f}s / 初回"
                   f"{'—' if _first is None else f'{_first:.1f}s'}"
                   f" / 中央{_pct(0.5):.1f}s / 90%点{_full:.1f}s"
+                  + (f" / **判定遅延(寄りから) 中央{_lag50:.0f}s "
+                     f"90%点{_lag90:.0f}s**" if _lagv else "")
                   + (f" / ⛔ 未達{len(_miss)}件[{_cls_s}]" if _miss else "")
                   + (f" / ⚠ 再接続{st.n_reconnect - _rc0}回"
                      if st.n_reconnect > _rc0 else ""), flush=True)
@@ -631,11 +658,21 @@ if __name__ == "__main__":
                           "PUSH は値が動いたときしか飛ばないので、"
                           "ティックの少ない銘柄は購読しても来ません。"
                           "**バグではありません。**")
-            print("    ⛔⛔ **場中のこの数字は悲観側の下限です。**"
-                  " 09:00 は板寄せで全銘柄が必ず約定するので PUSH は即座に"
-                  "飛びます。**採否は朝の実測に置き換えてから**判断すること")
-            print("    → live は PUSH の裾を待たず、"
-                  "届いていない銘柄だけ REST で読む(下のハイブリッド)")
+            # ⛔⛔ **「09:00 なら取得率が上がる」とは言えない**(2026-09-07 撤回)。
+            #   ① 全銘柄が09:00に寄るわけではない(実測 7384=09:00:50 /
+            #      5801=09:06)
+            #   ② batch2 を 09:00:05 に登録した時点で、09:00:00 の板寄せ
+            #      イベントは **購読前に終わっている**
+            #   ③ PUSH が本当に差分配信だけなら、その後値が動かない銘柄は
+            #      朝でも届かない
+            #   そして今日のデータは **差分配信説と整合する**(流動性の高い
+            #   batch1 だけ100%。購読時に現在値を送るなら流動性と相関しない)。
+            print("    ⛔ **『09:00 なら届く』とは言えません。**"
+                  " PUSH が差分配信なら、09:00:05 に登録した時点で"
+                  "板寄せイベントは購読前に終わっています。"
+                  "朝も同じかそれ以上に届かない可能性があります")
+            print("    → だから live は **PUSH を1秒だけ待ち、来ない銘柄は"
+                  "REST で読む**。PUSH の被覆率に賭けない設計にすること")
         _rc_all = sum(r[11] for r in _res if r[3] is not None)
         if _rc_all:
             print(f"\n  ⚠ **WebSocket が {_rc_all}回 再接続しています**。"
