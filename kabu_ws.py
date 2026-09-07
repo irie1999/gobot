@@ -338,6 +338,18 @@ if __name__ == "__main__":
                 if len(_hit) >= _nok and _nok:
                     _full = _time.time() - _t0
                     break
+            # ⛔ **登録に失敗したバッチは測定外**(2026-09-07)。
+            #   register は部分受理されないので、1件でも無効なコード
+            #   (上場廃止など)が混ざると PUT 全体が 400 で落ちる。
+            #   そのとき届いた件数を数えると意味のない数字になる
+            #   (実際 登録0件なのに『取得49』と表示して混乱した)。
+            if _nok <= 0:
+                _res.append((_bi, len(_b), 0, None, _t_reg, None, None))
+                print(f"  [batch{_bi}] 要求{len(_b)} **登録に失敗** → 測定外。"
+                      f"1件でも無効なコードがあると PUT 全体が 400 で落ちます"
+                      f"(部分受理なし)。--symbols で有効な銘柄を明示するか、"
+                      f"件数を減らしてください", flush=True)
+                continue
             _got = len({s for s in _want
                         if float((st.snapshot().get(s) or {}).get(
                             "OpeningPrice") or 0) > 0 and s not in _before})
@@ -358,9 +370,17 @@ if __name__ == "__main__":
         print(f"  {'batch':>6} {'要求':>5} {'登録':>5} {'取得':>5} "
               f"{'登録s':>7} {'初回s':>7} {'全件s':>7}")
         for _bi, _nb, _nok, _got, _tr, _f1, _fa in _res:
+            if _got is None:
+                print(f"  {_bi:>6} {_nb:>5} {0:>5} {'—':>5} {_tr:>7.1f} "
+                      f"{'—':>7} {'—':>7}   ⛔ 登録失敗 = 測定外")
+                continue
             print(f"  {_bi:>6} {_nb:>5} {_nok:>5} {_got:>5} {_tr:>7.1f} "
                   f"{'—' if _f1 is None else f'{_f1:>7.1f}'} "
                   f"{'—' if _fa is None else f'{_fa:>7.1f}'}")
+        _bad = [r[0] for r in _res if r[3] is None]
+        if _bad:
+            print(f"\n  ⚠ batch{','.join(map(str, _bad))} は登録に失敗したので"
+                  f"判定に含めていません")
         # ★ 2バッチ目以降の『全件揃うまで』が実質のコスト。
         #   §18.44 の1分足実測(1分 -15.8bp / 2分 -26.8 / 3分 -29.4 / 5分 -36.6)
         #   で bp に直す。N のグロスは +15.7bp/件。
