@@ -1030,6 +1030,74 @@ def _newgap_build(days: int, min_price: float, max_price: float,
             f'上の4行を見れば、<b>watch を広げた効果</b>と'
             f'<b>発注順を現実的にした損</b>を分けて読めます。</div>'
             f'</div>')
+        # ★★ watch × 予算 の2次元 (2026-09-07 ユーザー指摘)。
+        #   §18.35b に「予算を上げれば律速が外れるので watch の価値は上がる。
+        #   **『予算を上げる』と『watch を増やす』はセット**」と書いてある。
+        #   ⛔ 予算が張り付いている窓で watch だけ広げても1件も増えない。
+        #     どちらが律速かは窓で変わる(TRAIN 2015-2020 は watch が律速 /
+        #     直近13ヶ月は予算が律速)ので、**必ず2次元で見る**。
+        _nmo = max(1.0, len(_dd) / 20.0)         # 月数の近似(20営業日/月)
+        _bl = [_NG_BUDGET, _NG_BUDGET * 1.5, _NG_BUDGET * 2, _NG_BUDGET * 3]
+        _wl = [(_NG_WATCH, f"{_NG_WATCH}件"), (_NG_WATCH * 2,
+                                               f"{_NG_WATCH * 2}件"),
+               (0, "制限なし")]
+        _mx, _peak = [], {}
+        for _wv, _wlbl in _wl:
+            _r2 = []
+            for _bv in _bl:
+                try:
+                    _s3 = _newgap_sim(_rows, _bv, _wv, _NG_GAP_BP, _NG_RET1,
+                                      order="liq")
+                    _d3 = _s3["days"]
+                    _r2.append((float(_d3["pnl"].sum()) / _nmo,
+                                int(_d3["built"].sum())))
+                    _peak[(_wv, _bv)] = float(_d3["used"].max())
+                except Exception:
+                    _r2.append((0.0, 0))
+            _mx.append((_wlbl, _r2))
+        _base_mo = _mx[0][1][0][0] if _mx and _mx[0][1] else 0.0
+        _mrows = ""
+        for _wlbl, _r2 in _mx:
+            _tds = ""
+            for _i2, (_pm, _nn) in enumerate(_r2):
+                _d_ = _pm - _base_mo
+                _is_base = (_wlbl == _wl[0][1] and _i2 == 0)
+                _tds += (
+                    f'<td style="padding:3px 8px;text-align:right;'
+                    f'{"background:#0f172a;font-weight:700" if _is_base else ""}">'
+                    f'<span style="color:{"#34d399" if _pm >= 0 else "#f87171"}">'
+                    f'{_pm:+,.0f}</span>'
+                    f'<div style="font-size:0.7rem;color:#64748b">{_nn:,}件'
+                    + ("" if _is_base else
+                       f' / {_d_:+,.0f}') + '</div></td>')
+            _mrows += (f'<tr><td style="padding:3px 8px;color:#cbd5e1">'
+                       f'watch <b>{_wlbl}</b></td>{_tds}</tr>')
+        _bhead = "".join(
+            f'<th style="text-align:right;padding:3px 8px">{_bv:,.0f}万</th>'
+            for _bv in _bl)
+        _pk = _peak.get((0, _bl[-1]), 0.0)
+        _h.append(
+            f'<div style="background:#1e293b;border:1px solid #334155;'
+            f'border-radius:6px;padding:10px;margin-bottom:12px;'
+            f'font-size:0.82rem;color:#cbd5e1">'
+            f'<b style="color:#f59e0b">💰 watch × 予算（月平均・流動性順）</b><br>'
+            f'<span style="color:#94a3b8">⛔ <b>この2つはセットで効きます</b>'
+            f'（§18.35b）。予算が張り付いている窓で watch だけ広げても'
+            f'1件も増えません。逆も同じです。</span>'
+            f'<table style="border-collapse:collapse;margin-top:8px;width:100%">'
+            f'<tr style="color:#94a3b8"><th style="text-align:left;'
+            f'padding:3px 8px">予算 →</th>{_bhead}</tr>{_mrows}</table>'
+            f'<div style="margin-top:8px;color:#94a3b8">'
+            f'小さい字は <b>建てた件数 / 現行との差（月）</b>。'
+            f'左上（濃い枠）が現行です。<br>'
+            f'⚠ 予算を上げるのは<b>レバレッジ</b>です（§18.38 #3b）。'
+            f'損益もσも同率で伸びるので、月平均だけで判断しないこと。'
+            f'制限なし×{_bl[-1]:,.0f}万 の同時保有ピークは'
+            f' <b>{_pk:,.0f}円</b>（委託保証金33.3%なら'
+            f' {_pk * 0.333:,.0f}円 が必要）。<br>'
+            f'⚠ 発注直前の信用余力を毎回ゲートにすること'
+            f'（評価損・諸経費で必要額は増え、維持率20%未満は追証対象）。'
+            f'</div></div>')
     else:
         _wall_c = "#f87171" if _miss_tot > _nb * 0.2 else "#94a3b8"
         _h.append(
