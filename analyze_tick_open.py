@@ -226,6 +226,12 @@ _st: dict = defaultdict(St)
 _n_row = _n_win = _n_skip = 0
 _hdr_new = _hdr_old = 0
 _t0 = time.time()
+# ⛔⛔ **0件で終わったときに原因を言えるようにする**(2026-09-07)。
+#   9,820万行を読んで「窓内0」とだけ出て何も分からなかった。
+#   フィルタの各段で何件落ちたかと、生データの実物を控える。
+_diag = {"raw": [], "sess": defaultdict(int), "tlen": defaultdict(int),
+         "hh": defaultdict(int), "drop_sess": 0, "drop_only": 0,
+         "drop_time": 0, "head": None}
 
 for _fp in _files:
     with open(_fp, encoding="utf-8-sig", newline="") as _f:
@@ -235,6 +241,7 @@ for _fp in _files:
         except StopIteration:
             continue
         _hl = [h.strip().lower() for h in _head]
+        _diag["head"] = _head
         try:
             _i_date = _hl.index("date")
             _i_code = _hl.index("issue code")
@@ -255,13 +262,22 @@ for _fp in _files:
             if _n_row % a.progress == 0:
                 print(f"  … {_n_row:,}行 / {time.time() - _t0:.0f}s "
                       f"（窓内 {_n_win:,}）", flush=True)
+            if len(_diag["raw"]) < 5:
+                _diag["raw"].append(_r)
             try:
                 _sess = _r[_i_sess].strip()
+                if _n_row <= 200_000:
+                    _diag["sess"][_sess] += 1
+                    _tt = _r[_i_time].strip()
+                    _diag["tlen"][len(_tt)] += 1
+                    _diag["hh"][_tt[:2] if len(_tt) >= 10 else _tt[:1]] += 1
                 if _sess != "1":
+                    _diag["drop_sess"] += 1
                     continue                    # 後場は見ない
                 _code4 = _r[_i_code].strip()
                 _c4 = _code4[:4] if len(_code4) >= 5 else _code4.zfill(4)
                 if _only and _c4 not in _only:
+                    _diag["drop_only"] += 1
                     continue
                 _px = float(_r[_i_px])
                 _vol = float(_r[_i_vol])
@@ -273,6 +289,7 @@ for _fp in _files:
             _s.turn += _px * _vol               # ★ 帯分け用（窓の外も足す）
             _hs = _hhmmss(_r[_i_time])
             if _hs < _FROM or _hs > _UNTIL:
+                _diag["drop_time"] += 1
                 continue
             _ts = _epoch_s(_r[_i_time])
             if _ts < 0:
@@ -295,8 +312,29 @@ for _fp in _files:
 print(f"[読了] {_n_row:,}行 / 窓内 {_n_win:,}行 / スキップ {_n_skip:,} "
       f"/ {time.time() - _t0:.0f}s")
 print(f"[形式] 新(2021-08〜) {_hdr_new}ファイル / 旧 {_hdr_old}ファイル")
-if not _st:
-    sys.exit("[error] 対象データが0件です（窓・銘柄の指定を確認してください）")
+if not _st or _n_win == 0:
+    print("\n" + "=" * 78)
+    print("⛔ 対象データが0件です。**どこで落ちたか**を出します")
+    print("=" * 78)
+    print(f"  読んだ行             {_n_row:,}")
+    print(f"  session が '1' でない {_diag['drop_sess']:,}  ← ここが全部なら"
+          f" session の値が想定と違う")
+    print(f"  --symbols で除外      {_diag['drop_only']:,}")
+    print(f"  窓({a.t_from}〜{a.until})の外  {_diag['drop_time']:,}"
+          f"  ← ここが全部なら時刻の解釈が違う")
+    print(f"\n  列(ヘッダ): {_diag['head']}")
+    print(f"  使った列: date={_i_date} code={_i_code} time={_i_time} "
+          f"session={_i_sess} price={_i_px} volume={_i_vol}")
+    print("\n  生データ 先頭5行:")
+    for _rr in _diag["raw"]:
+        print(f"    {_rr}")
+    print(f"\n  session の値(先頭20万行): {dict(_diag['sess'])}")
+    print(f"  time の桁数(同): {dict(_diag['tlen'])}")
+    print(f"  time の先頭2桁(同): "
+          f"{dict(sorted(_diag['hh'].items())[:12])}")
+    print(f"\n  ⚠ 参考: いまの窓は HHMMSS で {_FROM}〜{_UNTIL} "
+          f"({a.t_from}〜{a.until})")
+    sys.exit(1)
 
 # ── 日ごとに売買代金で順位をつけ、帯に分ける ─────────────────────────
 _by_date: dict = defaultdict(list)
