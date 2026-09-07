@@ -22069,8 +22069,14 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         print(f"[調査ログ] ブロック生成に失敗: {_fnce}", flush=True)
 
     # ── E/H タブのボタンとペイン(400万円タブと同じ描画関数を使う) ──────
-    _eh_btn = ""
-    _eh_pane = ""
+    # ⛔⛔ 2026-09-07: ここは **文字列の += だった**。1回ごとに全体を
+    #   コピーするので、タブが増えて 47MB を超えたところで MemoryError
+    #   (nikkei_analysis.py:22551 の `_eh_pane += (...123行...)`)。
+    #   **リストに貯めて最後に join** すればコピーが起きない。
+    #   ⚠ 中で `nonlocal _eh_btn, _eh_pane` して += している箇所があるので、
+    #     リストの append に統一する(名前は変えない = 参照箇所を壊さない)。
+    _eh_btn_L: list = []
+    _eh_pane_L: list = []
     # ★★ 実行条件のログ (2026-08-16 ユーザー指摘「さっきと結果が変わっている」)。
     #   HTML は毎回上書きされるので、**条件と件数を1行ずつ追記**しておき、
     #   実行の最後に **前回との差分**をコンソールに出す。
@@ -22197,7 +22203,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         _srck = ({"J": _EQ_TAB_J, "L": _EQ_TAB_L,
                   "K": _EQ_TAB_K}).get(_ehk, _ehk)
         _ss = _eh_sorted.get(_ehk) or []
-        _eh_btn += (
+        _eh_btn_L.append(
             f'<button class="detail-tab-btn{_act("eh" + _ehk)}" '
             f'onclick="switchDetailTab({_dseq},\'eh{_ehk}\')" '
             f'style="border-color:{_bc}">🔁 {_lbl} '
@@ -22206,14 +22212,14 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         _ga = _eh_all_grid.get(_ehk)
         _sa = _eh_all.get(_ehk) or []
         if _ga and _sa:
-            _eh_btn += (
+            _eh_btn_L.append(
                 f'<button class="detail-tab-btn" '
                 f'onclick="switchDetailTab({_dseq},\'ehA{_ehk}\')" '
                 f'style="border-color:{_bc};border-style:dashed">'
                 f'📋 {_lbl} <b>全取引</b> '
                 f'<span style="font-size:0.72rem;color:{_tc}">'
                 f'({len(_sa)}件)</span></button>')
-            _eh_pane += (
+            _eh_pane_L.append(
                 f'<div id="detail_{_dseq}_ehA{_ehk}" class="detail-tab-pane">'
                 f'<p style="color:{_tc};font-size:0.8rem;margin-bottom:10px">'
                 f'📋 <b>{_lbl} の全取引（予算の制約なし）</b>: {_desc}。'
@@ -22548,7 +22554,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                        and str(_cond.get("pool", "")).split(":")[0]
                        == str(_cond.get("sel", "")).split(":")[0]) else '')
                 + f'</div>')
-        _eh_pane += (
+        _eh_pane_L.append(
             f'<div id="detail_{_dseq}_eh{_ehk}" '
             f'class="detail-tab-pane{_act("eh" + _ehk)}">'
             + _stamp
@@ -22691,7 +22697,7 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
 
                 ⛔ 2つ書くと片方だけ直して食い違う(§18.48 ⑧d)。
                 """
-                nonlocal _eh_btn, _eh_pane
+                # ⚠ list に貯めるので nonlocal は不要(append は再束縛しない)
                 # ★ 月別サマリー・日別アコーディオン・明細は **既存タブと同じ
                 #   `_dup_toggle_html`** に通す(2026-08-25 ユーザー指摘
                 #   「他のtabと形式が異なりすぎている」)。head はこの方式に
@@ -22763,13 +22769,13 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                     f'<div id="detail_{_dseq}_{key}" class="detail-tab-pane">'
                     + _ng["head"] + _ng_common + (_ng.get("tail") or "")
                     + '</div>')
-                _eh_btn += (
+                _eh_btn_L.append(
                     f'<button class="detail-tab-btn" '
                     f'onclick="switchDetailTab({_dseq},\'{key}\')" '
                     f'style="border-color:{c1}">{lbl} '
                     f'<span style="font-size:0.72rem;color:{c2}">'
                     f'({len(_ng_tr):,}件)</span></button>')
-                _eh_pane += _ng_pane
+                _eh_pane_L.append(_ng_pane)
             # ★ N と鏡像を両方作る(§18.56)。スキャンは _NG_ROWS_CACHE で
             #   共有するので、2つ目はほぼ計算が増えない(符号を反転するだけ)。
             _ng_lo = _PNL_ENTRY_MIN_PRICE if _PNL_ENTRY_MIN_PRICE > 0 else 0.0
@@ -23217,6 +23223,12 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
         f' 別に分けて表示（決済日をクリックで明細・直近{_ENTRY_GRID_DAYS}日）</p>'
         + _month_accordion_exit_html(*_build_exit_grid(entry_sorted_trades), _dseq, "x")
         + '</div>')
+
+    # ★ リストに貯めたぶんをここで1回だけ連結する(2026-09-07)。
+    #   ⛔ ループ中の `+=` は毎回 全体をコピーするので、47MB を超えたところで
+    #     MemoryError になった。join は1回しか確保しない。
+    _eh_btn = "".join(_eh_btn_L)
+    _eh_pane = "".join(_eh_pane_L)
 
     return f"""
 <h2>直近{days}日 取引損益 <span style="font-size:0.8rem;color:#64748b;font-weight:400">（{since} 〜 {until}）</span></h2>
