@@ -50,7 +50,11 @@ from collections import defaultdict
 ap = argparse.ArgumentParser(
     description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 ap.add_argument("--csv", type=str, required=True,
-                help="歩み値CSV（グロブ可）。⛔ .7z は先に展開すること")
+                help="歩み値CSV / フォルダ / .7z / .zip。"
+                     ".7z は py7zr があれば自動展開する")
+ap.add_argument("--extract-to", type=str, default="",
+                help=".7z の展開先（既定はアーカイブと同じ場所）。"
+                     "⛔ 空き容量が足りないときは別ドライブを指定")
 ap.add_argument("--from", dest="t_from", type=str, default="0900",
                 help="窓の開始 HHMM（既定 0900）")
 ap.add_argument("--until", type=str, default="0930",
@@ -73,6 +77,45 @@ _FROM = int(a.t_from) * 100
 _UNTIL = int(a.until) * 100
 _OFFS = [int(x) for x in a.offsets.split(",") if x.strip()]
 _BANDS = [int(x) for x in a.bands.split(",") if x.strip()]
+
+# ★ .7z をそのまま渡せるようにする(2026-09-07)。
+#   ⚠ 568MB の圧縮が 4〜6GB に展開される。**空き容量を先に見る**。
+#     7z は solid 圧縮なのでメモリ内ストリームは現実的でなく、
+#     いったんディスクに出すしかない。
+if a.csv.lower().endswith((".7z", ".zip")):
+    import shutil
+    _arc = a.csv
+    _dst = a.extract_to or os.path.splitext(_arc)[0]
+    _free = shutil.disk_usage(os.path.dirname(_arc) or ".").free
+    _need = os.path.getsize(_arc) * 10          # LZMA2 の CSV は8〜10倍
+    print(f"[展開] {os.path.basename(_arc)} "
+          f"({os.path.getsize(_arc) / 1e9:.2f}GB) → {_dst}")
+    print(f"       必要 約{_need / 1e9:.1f}GB / 空き {_free / 1e9:.1f}GB")
+    if _free < _need:
+        sys.exit(f"[error] **空き容量が足りません**。"
+                 f"約{_need / 1e9:.1f}GB 必要ですが {_free / 1e9:.1f}GB しか"
+                 f"ありません。\n"
+                 f"        別ドライブに展開して --csv でそのフォルダを"
+                 f"指定してください")
+    if os.path.isdir(_dst) and glob.glob(os.path.join(_dst, "**", "*.csv"),
+                                         recursive=True):
+        print("       既に展開済みのようなので、そのまま使います")
+    elif _arc.lower().endswith(".zip"):
+        import zipfile
+        with zipfile.ZipFile(_arc) as _z:
+            _z.extractall(_dst)
+    else:
+        try:
+            import py7zr
+        except ImportError:
+            sys.exit("[error] .7z を読むには py7zr が要ります:\n"
+                     "          pip install py7zr\n"
+                     "        または 7-Zip で展開してフォルダを渡してください")
+        _t9 = time.time()
+        with py7zr.SevenZipFile(_arc, mode="r") as _z:
+            _z.extractall(path=_dst)
+        print(f"       展開 {time.time() - _t9:.0f}秒")
+    a.csv = _dst
 
 # ★ フォルダを渡されたら中を再帰的に探す。глоб に ** が無くても拾う。
 #   ⛔ 「見つかりません」で終わらせず、**そこに何があるか**を出すこと
