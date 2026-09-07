@@ -1054,22 +1054,27 @@ def _newgap_build(days: int, min_price: float, max_price: float,
                     _peak[(_wv, _bv)] = float(_d3["used"].max())
                 except Exception:
                     _r2.append((0.0, 0))
-            _mx.append((_wlbl, _r2))
+            _mx.append((_wlbl, _r2, _wv))
         _base_mo = _mx[0][1][0][0] if _mx and _mx[0][1] else 0.0
         _mrows = ""
-        for _wlbl, _r2 in _mx:
+        for _wlbl, _r2, _wv in _mx:
             _tds = ""
             for _i2, (_pm, _nn) in enumerate(_r2):
                 _d_ = _pm - _base_mo
                 _is_base = (_wlbl == _wl[0][1] and _i2 == 0)
+                # ★ セルごとの **必要保証金** を出す(2026-09-07)。
+                #   どのセルが手持ちで届くかが分からないと表が判断に使えない。
+                #   委託保証金率 33.3% は最低条件で、評価損・諸経費で増える。
+                _mg = _peak.get((_wv, _bl[_i2]), 0.0) * 0.333
                 _tds += (
                     f'<td style="padding:3px 8px;text-align:right;'
                     f'{"background:#0f172a;font-weight:700" if _is_base else ""}">'
                     f'<span style="color:{"#34d399" if _pm >= 0 else "#f87171"}">'
                     f'{_pm:+,.0f}</span>'
                     f'<div style="font-size:0.7rem;color:#64748b">{_nn:,}件'
-                    + ("" if _is_base else
-                       f' / {_d_:+,.0f}') + '</div></td>')
+                    + ("" if _is_base else f' / {_d_:+,.0f}')
+                    + (f'<br>保証金 {_mg / 1e4:,.0f}万' if _mg > 0 else "")
+                    + '</div></td>')
             _mrows += (f'<tr><td style="padding:3px 8px;color:#cbd5e1">'
                        f'watch <b>{_wlbl}</b></td>{_tds}</tr>')
         _bhead = "".join(
