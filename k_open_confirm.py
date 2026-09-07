@@ -154,6 +154,16 @@ ap.add_argument("--watch-j", type=int, default=50, help="J が09:00に読める�
 ap.add_argument("--open-at", type=str, default="09:00")
 ap.add_argument("--warm-at", type=str, default="08:55")
 ap.add_argument("--now", action="store_true", help="待たずに いま1回読む")
+# ★★ PUSH配信(WebSocket)で読む (2026-09-07)。**既定OFF**。
+#   REST は 50銘柄 36.5秒(0.73秒/銘柄 / §18.44)なので平均18秒待つ = 約-6bp。
+#   PUSH なら寄った瞬間に届くのでこの待ち時間が消える。
+#   ⛔ 登録上限50件は REST と同じ。**速度だけ**を取りに行くもの(§18.45)。
+#   ⚠ PUSH は変化時しか来ないので REST は捨てない。**届いたぶんだけ省く**。
+ap.add_argument("--ws", action="store_true",
+                help="PUSH配信(WebSocket)で板を受ける。届かない銘柄は"
+                     "従来どおり REST で読む(既定OFF)")
+ap.add_argument("--ws-only", action="store_true",
+                help="⛔ 検証用。PUSH で届かない銘柄を REST で補わない")
 # ★★ ポーリング (2026-08-16 ユーザー提案)
 ap.add_argument("--poll", action="store_true",
                 help="09:00 以降も回し続け、**寄った銘柄から順に**拾う")
@@ -1543,13 +1553,42 @@ _REGISTERED: list = []
 #   周回の時刻を全銘柄に付けると秒単位の減衰が測れない。
 #   symbol -> (req_ts, resp_ts)。各スレッドが自分のキーだけを書く。
 _BOARD_TS: dict = {}
+# ★ PUSH配信(--ws)。**既定は None = 従来どおり REST だけ**(2026-09-07)。
+#   ウォームアップの直後に繋ぐ(登録が済んでいないと何も飛んでこない)。
+_WS = None
+
+
+def _open_today(_bd: dict) -> tuple[float, int]:
+    """板 → (当日の始値, 前日ぶんを掴んだか)。当日でなければ (0.0, 1)。
+
+    ⛔⛔ **この判定を2箇所に書かないこと**(2026-09-07 に共通化)。
+      /board は引け後も当日の OpeningPrice を返し続けるので、まだ寄って
+      いない銘柄は **前日の**始値を返しうる(詳細は _mk_row のコメント)。
+      _mk_row と PUSH の充足判定が別実装だと、片方だけ直して片方が残る。
+      CLAUDE.md に何度も出てくる形なので、入口を1つにしておく。
+    """
+    _op = float(_bd.get("OpeningPrice") or 0)
+    if _op <= 0:
+        return 0.0, 0
+    _ot = str(_bd.get("OpeningPriceTime") or "")
+    _md = re.search(r"(\d{4})-(\d{2})-(\d{2})", _ot)
+    if not _md or _md.group(0) != f"{_dt.date.today()}":
+        return 0.0, 1                      # 当日の始値ではない = 未取得と同じ
+    return _op, 0
 
 
 def _read_all(tag: str) -> dict:
-    """全候補を50件バッチで読む。symbol -> board。"""
+    """全候補を50件バッチで読む。symbol -> board。
+
+    ★ --ws のとき: PUSH で **当日の始値まで届いている**銘柄は HTTP を省く。
+      届いていない銘柄(=まだ寄っていない)は従来どおり REST で読むので、
+      PUSH が無音でも今日より遅くはならない。寄る銘柄が増えるほど REST の
+      対象が減るので、周回が進むほど速くなる(§18.44 の待ち時間が消える)。
+    """
     _t0 = time.time()
     _out: dict = {}
     _n_reg = 0
+    _n_ws = 0
     for _i in range(0, len(_syms), args.batch):
         _b = _syms[_i:_i + args.batch]
         if _REGISTERED != _b:
@@ -1567,6 +1606,25 @@ def _read_all(tag: str) -> dict:
                       flush=True)
                 _REGISTERED.clear()       # 失敗したら次回やり直す
 
+        # ★ PUSH で当日の始値まで届いている銘柄は HTTP を省く。
+        #   ⚠ 「届いている」の判定は _open_today なので、前日の始値を掴んだ
+        #      銘柄は **省かれない**(REST で読み直す)。
+        _rest = list(_b)
+        if _WS is not None and _WS.ok:
+            _snap = _WS.snapshot()
+            _rest = []
+            for _s in _b:
+                _bw = _snap.get(_s) or _snap.get(str(_s).replace(".T", "")) or {}
+                if _bw and _open_today(_bw)[0] > 0:
+                    _out[_s] = _bw
+                    _n_ws += 1
+                    _BOARD_TS[_s] = ("push", _WS.open_seen.get(
+                        _s, f"{_dt.datetime.now():%H:%M:%S.%f}"[:-3]))
+                else:
+                    _rest.append(_s)
+            if args.ws_only:
+                _rest = []                 # ⛔ 検証用。本番では使わない
+
         def _one(s):
             # ★★ **銘柄ごとの** 送信/受信時刻を残す(2026-09-01)。
             #   ⚠ 各スレッドは自分の銘柄キーだけを書くので競合しない。
@@ -1578,15 +1636,18 @@ def _read_all(tag: str) -> dict:
             _BOARD_TS[s] = (f"{_q0:%H:%M:%S.%f}"[:-3],
                             f"{_dt.datetime.now():%H:%M:%S.%f}"[:-3])
             return s, _b_
-        with ThreadPoolExecutor(max_workers=max(1, args.workers)) as ex:
-            for _s, _bd in ex.map(_one, _b):
-                if _bd:
-                    _out[_s] = _bd
+        if _rest:
+            with ThreadPoolExecutor(max_workers=max(1, args.workers)) as ex:
+                for _s, _bd in ex.map(_one, _rest):
+                    if _bd:
+                        _out[_s] = _bd
     # ★ 登録が何回走ったかを出す。0 = 登録し直していない(=期待どおり)。
     #   毎周 1以上なら銘柄集合が動いているので、その理由を疑うこと。
     _el = time.time() - _t0
     print(f"  [{tag}] {len(_out):,}/{len(_syms):,}銘柄 を {_el:.1f}秒 で取得"
-          f" ({len(_out) / max(0.1, _el):.1f}件/秒 / 登録 {_n_reg}回)",
+          f" ({len(_out) / max(0.1, _el):.1f}件/秒 / 登録 {_n_reg}回"
+          + (f" / **PUSH {_n_ws}件** HTTP {len(_syms) - _n_ws}件"
+             if _WS is not None and _WS.ok else "") + ")",
           flush=True)
     return _out
 
@@ -1605,7 +1666,6 @@ def _wait(hm: str, why: str) -> None:
 def _mk_row(_s: str, _bd: dict, _ts: str, _grp: int) -> dict:
     """板1件 → 記録用の1行。判定(合格/遅寄り/ガード)もここで済ませる。"""
     _pc = float(_bd.get("PreviousClose") or 0)
-    _op = float(_bd.get("OpeningPrice") or 0)
     _ot = str(_bd.get("OpeningPriceTime") or "")
     # ⛔⛔ **OpeningPriceTime の日付を必ず見る** (2026-08-20)。
     #   /board は引け後も当日の OpeningPrice を返し続ける(:172)。つまり 09:00 に
@@ -1616,12 +1676,8 @@ def _mk_row(_s: str, _bd: dict, _ts: str, _grp: int) -> dict:
     #   **銘柄単位**の取り違えは防げない。
     #   日付が今日でない / そもそも取れない ものは『まだ寄っていない』とみなす。
     #   建てないコストは0、誤って建てるコストは実損なので厳しい側に倒す。
-    _stale = 0
-    if _op > 0:
-        _md = re.search(r"(\d{4})-(\d{2})-(\d{2})", _ot)
-        if not _md or _md.group(0) != f"{_dt.date.today()}":
-            _stale = 1
-            _op = 0.0                      # 当日の始値ではない = 未取得と同じ
+    #   判定の実体は _open_today() に置いてある(PUSH の充足判定と共通)。
+    _op, _stale = _open_today(_bd)
     # ★ 09:00 に寄ったか。OpeningPrice が無い or 時刻が 09:00 より後なら遅寄り。
     #   ⚠ --poll では遅寄りも **建てる**(グループを分けて配分する)ので、
     #      late は記録用のフラグでしかない。
@@ -1934,6 +1990,24 @@ if not args.now:
     _wait(args.warm_at, "登録して1回空読み(これを飛ばすと09:00が数分かかる)")
 print("\n▶ ウォームアップ（空読み。値は使いません）", flush=True)
 _read_all("warm")
+
+# ── ①' PUSH配信に繋ぐ (--ws / 既定OFF) ────────────────────────────────
+# ★ **登録が済んだ後**に繋ぐこと。/register していない銘柄は何も飛んでこない。
+# ⛔ 繋げなくても止めない。REST だけで今日と同じ動きになる(fail-safe)。
+if args.ws:
+    try:
+        from kabu_ws import BoardStream as _BS
+        _WS = _BS(cli.base_url)
+        if not _WS.start():
+            _WS = None
+        else:
+            print(f"  [ws] PUSH配信を使います。{_WS.describe()}", flush=True)
+            print("       ⚠ 届いていない銘柄は従来どおり REST で読みます"
+                  "(PUSH は変化時しか来ない)", flush=True)
+    except Exception as _e:                                  # noqa: BLE001
+        print(f"  ⚠ PUSH配信を使いません({type(_e).__name__}: {_e})。"
+              f"REST だけで進みます", flush=True)
+        _WS = None
 
 # ══════════════════════════════════════════════════════════════════════
 #  ポーリング (--poll) — 09:00 以降に寄る銘柄も拾う
