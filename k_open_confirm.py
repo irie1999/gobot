@@ -249,6 +249,16 @@ ap.add_argument("--n-mode", action="store_true",
                      " watcher 不要")
 args = ap.parse_args()
 
+# ── --ws のときは周回を速くする (2026-09-07) ──────────────────────────
+# ⛔ **PUSH にしただけでは利得を取りきれない。** データは 09:00:00 に手元へ
+#   届いているのに、ループが10秒おきだと平均5秒 気づくのが遅れる。
+#   PUSH で読むぶんには HTTP が1回も出ないので、速く回してもコストが無い。
+#   ⚠ 明示指定(--every)はそのまま尊重する。
+if args.ws and args.every == 10:
+    args.every = 2
+    print("[ws] --every 10 → **2** に下げました"
+          "(PUSH は HTTP を出さないので速く回してもコストが無い)")
+
 # ── N の既定値 ────────────────────────────────────────────────────────
 #   ⛔ J の既定と違う値だけを差し替える。**明示指定はそのまま尊重する**ため、
 #     「J の既定のままなら N の既定にする」という形にしている。
@@ -1808,6 +1818,9 @@ def _mkt100(_bd: dict, _qty: int = 100) -> tuple:
     return _px, _got, _lv
 
 
+_QLAST = [0.0]        # _qdump を最後に書いた時刻(--ws で周回が速くなるため)
+
+
 def _qdump(_bd_all: dict, _ts: str, _poll: int) -> None:
     """この周に読んだ板を1行ずつ追記する。まだ寄っていない銘柄は書かない。"""
     try:
@@ -2040,8 +2053,6 @@ if args.poll:
         _n_poll += 1
         _bd_all = _read_all(f"poll{_n_poll}")
         _now_s = f"{_dt.datetime.now():%H:%M:%S}"
-        # ★ 気配の推移を記録する(記録専用。発注には一切使わない)
-        _qdump(_bd_all, _now_s, _n_poll)
         _new = []
         for _s, _bd in _bd_all.items():
             if _s in _seen:
@@ -2051,6 +2062,12 @@ if args.poll:
                 continue          # まだ寄っていない
             _seen[_s] = _now_s
             _new.append((_s, _bd))
+        # ★ 気配の推移を記録する(記録専用。発注には一切使わない)。
+        #   ⚠ --ws だと周回が速くなるので、**新しく寄った周**か 10秒経った時
+        #   だけ書く。毎周書くと1銘柄あたり数百行に膨らむ(中身は同じ)。
+        if _new or (time.time() - _QLAST[0]) >= 10.0:
+            _QLAST[0] = time.time()
+            _qdump(_bd_all, _now_s, _n_poll)
         if _new:
             _groups.append((_now_s, [x[0] for x in _new]))
             for _s, _bd in _new:
