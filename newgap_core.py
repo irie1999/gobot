@@ -176,8 +176,28 @@ def _newgap_sim(rows: list, budget_man: float, watch: int,
         #   ⛔ watch を広げる話をするときは必ず "liq" で測ること。
         #     "gap" のまま候補を増やすと『強い順に選び放題』になり、
         #     実現できない上振れが出る。
+        #   "price" … 建値の安い順(1件あたりを小さくして件数を稼ぐ)
+        #   "rand:<seed>" … ランダム。**帯を作るため**(§18.24)。
+        #       ⛔ 2条件を1回ずつ比べて差を語らない。ランダムを何本か回して
+        #         散らばりを出し、その外に出て初めて『効いている』と言える。
         if order == "liq":
             _hit = _hit.sort_values("liq", ascending=False, na_position="last")
+        elif order == "price":
+            _hit = _hit.sort_values("entry_p", ascending=True)
+        elif str(order).startswith("rand"):
+            # 日ごとに違う並びにする(同じ seed でも日で変える)。再現性はある
+            _sd = 0
+            try:
+                _sd = int(str(order).split(":", 1)[1])
+            except Exception:
+                _sd = 0
+            # ⛔ `hash(str)` は実行ごとに変わる(PYTHONHASHSEED)ので再現しない。
+            #   crc32 は決定的なので、同じ seed なら何度回しても同じ並びになる。
+            import zlib as _zl
+            _hit = _hit.sample(
+                frac=1.0,
+                random_state=(_sd * 100003
+                              + _zl.crc32(str(_d).encode())) % (2 ** 31 - 1))
         else:
             _hit = _hit.sort_values("gap_bp", ascending=False)
         # ★ 資金均等: 予算 ÷ 合格件数(09:00 に確定するので先読みではない)

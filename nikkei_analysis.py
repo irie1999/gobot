@@ -692,6 +692,14 @@ _NG_DAYS = int(os.environ.get("LSS_NEWGAP_DAYS", "0"))
 #   ⚠ 切るのは **カードだけ**。月別サマリーと合計は trades から別に計算する
 #     ので全期間のまま正しい。既定 500 ≒ 2年ぶんのカード。
 _NG_MAX_DAYS = int(os.environ.get("LSS_NEWGAP_MAX_DAYS", "500"))
+# ★★ 発注順の比較 (2026-09-07 ユーザーの問い「合格33件で予算は9件。
+#   この9件の選び方はランダムしかない?」)。
+#   ⛔ **2条件を1回ずつ比べて差を語らない**(§18.24)。ランダムを何本か回して
+#     散らばり(帯)を作り、その外に出て初めて『効いている』と言える。
+#   ⚠ 1本ごとに窓ぶんの予算シミュを回すので、19年窓では重い。既定の本数は
+#     控えめにし、長い窓では既定OFF(明示すれば出る)。
+_NG_ORD_SEEDS = int(os.environ.get("LSS_NEWGAP_ORDER_SEEDS", "8"))
+_NG_ORD_TAB = os.environ.get("LSS_NEWGAP_ORDER_TAB", "").strip().lower()
 # ★ 09:00 に始値も帯の中か再確認する(ライブの挙動)。既定OFF。
 #   ⚠ ONにしても **watch50 の顔ぶれは前夜(前日終値)のまま**なので先読みにならない。
 _NG_PX_RECHECK = os.environ.get("LSS_NEWGAP_PX_RECHECK", "0").strip().lower() \
@@ -1207,6 +1215,85 @@ def _newgap_build(days: int, min_price: float, max_price: float,
                 f'<td style="text-align:right;padding:3px 10px">'
                 f'{int(_r["勝日"])}/{int(_r["日数"])}</td></tr>')
         _h.append('</table></details>')
+
+    # ★★ 発注順の帯 (2026-09-07)。**基準タブだけ**で出す。
+    #   問い: 合格33件で予算は9件。その9件をどう選ぶか。
+    #   ⛔ ランダムを何本か回して散らばりを作らないと判定できない(§18.24)。
+    #   ⚠ ライブが実際に建てられるのは「寄った順」だけ(§18.67)。しかも
+    #     §18.70⑤ の実測で **遅く寄る銘柄ほどギャップが大きい**(スピアマン
+    #     +0.651 / 19営業日すべてプラス / t=+14.37)ので、ライブは
+    #     **小さいギャップから埋まって大きいのが予算落ちする** = レポートの
+    #     ギャップ降順と systematic に逆。ここが効くかどうかが本題。
+    _ord_on = (_NG_ORD_TAB not in ("0", "false", "no")
+               and not variant and side == "short"
+               and (_NG_ORD_TAB in ("1", "true", "yes", "on")
+                    or (_NG_DAYS or days) <= 1500))
+    if _ord_on and _NG_ORD_SEEDS > 0:
+        def _ord_sum(_o):
+            _s = _newgap_sim(_rows, _ng_budget, _ng_watch, _NG_GAP_BP,
+                             _NG_RET1, order=_o)
+            _d = _s.get("days")
+            if _d is None or _d.empty:
+                return None
+            return (float(_d["pnl"].sum()), int(_d["built"].sum()))
+        _rb = []
+        for _si in range(_NG_ORD_SEEDS):
+            _r = _ord_sum(f"rand:{_si}")
+            if _r:
+                _rb.append(_r[0])
+        if len(_rb) >= 3:
+            import statistics as _st
+            _rm, _rs = _st.mean(_rb), (_st.stdev(_rb) if len(_rb) > 1 else 0.0)
+            _ordrows = ""
+            for _lb3, _o3 in (("ギャップ降順（レポートの現行・"
+                               "<b>ライブでは実現できない</b>）", "gap"),
+                              ("流動性降順（前夜に決まる。ライブで出せる）", "liq"),
+                              ("建値の安い順（件数を稼ぐ）", "price")):
+                _r3 = _ord_sum(_o3)
+                if not _r3:
+                    continue
+                _z = ((_r3[0] - _rm) / _rs) if _rs else 0.0
+                _jd = ("帯の外（良い側）" if _z >= 2.0 else
+                       "帯の外（悪い側）" if _z <= -2.0 else "帯の中＝差は測れていない")
+                _c3 = ("#4ade80" if _z >= 2.0 else
+                       "#f87171" if _z <= -2.0 else "#94a3b8")
+                _ordrows += (
+                    f'<tr><td style="padding:3px 10px">{_lb3}</td>'
+                    f'<td style="text-align:right;padding:3px 10px">'
+                    f'{_r3[1]:,}件</td>'
+                    f'<td style="text-align:right;padding:3px 10px">'
+                    f'{_r3[0]:+,.0f}</td>'
+                    f'<td style="text-align:right;padding:3px 10px;'
+                    f'color:{_c3};font-weight:700">{_z:+.2f}</td>'
+                    f'<td style="padding:3px 10px;color:{_c3}">{_jd}</td></tr>')
+            _h.append(
+                f'<details style="margin:0 0 12px"><summary style="cursor:pointer;'
+                f'color:#fbbf24;font-weight:700">▶ 予算で切るとき、どの順に建てるか'
+                f'（ランダム{len(_rb)}本の帯と比べる）</summary>'
+                f'<div style="color:#94a3b8;font-size:0.78rem;margin:8px 0">'
+                f'合格しても予算で全部は建ちません。その並べ方を'
+                f'<b>ランダム{len(_rb)}本</b>と比べます。'
+                f'帯: 平均 <b>{_rm:+,.0f}円</b> / σ <b>{_rs:,.0f}円</b>。'
+                f'|z| ≥ 2.0 で帯の外。<br>'
+                f'⛔ <b>ギャップ降順はライブでは実現できません</b>（§18.67）。'
+                f'09:00 に全銘柄のギャップが同時に分かるわけではなく、'
+                f'<b>寄った順</b>にしか処理できないからです。しかも実測で'
+                f'<b>遅く寄る銘柄ほどギャップが大きい</b>（§18.70⑤ / '
+                f'スピアマン +0.651 / t=+14.37）ので、ライブは'
+                f'<b>小さいギャップから埋まって大きいのが予算落ちします</b>。<br>'
+                f'⚠ 発注順は lss/J の母集団では <b>4回とも帯の中</b>でした'
+                f'（§18.21 / §18.24 / §18.31 / §18.70）。N でも帯の中なら'
+                f'<b>「どれを選んでも同じ」が答え</b>で、選ぶ基準は成績ではなく'
+                f'<b>実行できるか</b>と<b>執行コスト</b>になります。'
+                f'</div>'
+                f'<table style="border-collapse:collapse;font-size:0.8rem">'
+                f'<tr style="color:#94a3b8"><th style="text-align:left;'
+                f'padding:3px 10px">並べ方</th>'
+                f'<th style="text-align:right;padding:3px 10px">建てた</th>'
+                f'<th style="text-align:right;padding:3px 10px">合計</th>'
+                f'<th style="text-align:right;padding:3px 10px">z</th>'
+                f'<th style="padding:3px 10px">判定</th></tr>'
+                f'{_ordrows}</table></details>')
 
     # ── 50件の壁 ──
     if _ng_all:
