@@ -26,6 +26,7 @@ Windows / macOS / Linux のいずれでも同じ内容が走る (外部シェル
  17. 採用基準        … 材料として使える動画だけを通し、除外理由を残せるか
  18. テーマ収集      … --theme のソース定義と --topic の絞り込み
  19. yt-dlp 引数     … 追加引数の受け渡しとエラー表示
+ 20. 部分成功        … 一部言語が 429 でも取れた字幕を使えるか
 """
 
 from __future__ import annotations
@@ -977,6 +978,47 @@ def test_ytdlp_options() -> None:
     check("切り詰めても原因が読める長さ", len(yt._ytdlp_error(p)) > 40)
 
 
+def test_partial_subtitles() -> None:
+    print("20. 一部の言語が失敗しても字幕を捨てない (429 対策)")
+    import json as _json
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    vid = "5Cq5n3L-lpw"
+    err = subprocess.CompletedProcess(
+        [], 1, "", "ERROR: Unable to download video subtitles for 'en': "
+                   "HTTP Error 429: Too Many Requests")
+    with tempfile.TemporaryDirectory() as td:
+        w = Path(td)
+        (w / f"{vid}.ja.vtt").write_text(
+            "WEBVTT\n\n00:00:01.000 --> 00:00:03.000\nギャップアップの話です\n",
+            encoding="utf-8")
+        (w / f"{vid}.info.json").write_text(
+            _json.dumps({"id": vid, "title": "窓開けの攻略", "duration": 600}),
+            encoding="utf-8")
+
+        d = yt._collect_ytdlp_output(w, vid, err)
+        check("落ちた日本語字幕を採用する", d["lang"] == "ja" and len(d["segments"]) == 1, d)
+        check("メタも拾える", d["meta"]["title"] == "窓開けの攻略", d["meta"])
+        check("字幕があればエラー扱いにしない", d["error"] == "", d["error"])
+
+        (w / f"{vid}.info.json").unlink()
+        d2 = yt._collect_ytdlp_output(w, vid, err)
+        check("info.json が無くても続行する",
+              len(d2["segments"]) == 1 and vid in d2["meta"]["url"], d2["meta"])
+
+    with tempfile.TemporaryDirectory() as td2:
+        try:
+            yt._collect_ytdlp_output(Path(td2), vid, err)
+            check("字幕が 1 本も無ければ失敗にする", False, "例外が出なかった")
+        except RuntimeError as e:
+            check("字幕が 1 本も無ければ失敗にする", "429" in str(e), str(e)[:60])
+
+    check("要求する言語を絞っている (429 回避)",
+          len(yt.SUB_LANGS.split(",")) <= 3, yt.SUB_LANGS)
+
+
 def test_theme_topic() -> None:
     print("18. テーマ収集 (--theme) と絞り込み (--topic)")
     import youtube_sources as src
@@ -1026,7 +1068,7 @@ def main() -> int:
                test_providers, test_isolation, test_fallback_marking,
                test_stats_exclusion, test_windows_console, test_integration_jsonl,
                test_static_check, test_curation, test_theme_topic,
-               test_ytdlp_options):
+               test_ytdlp_options, test_partial_subtitles):
         fn()
     print()
     if _fails:

@@ -64,7 +64,9 @@ from pathlib import Path
 DATA_DIR       = Path(__file__).parent / "youtube_tips_data"
 TRANSCRIPT_DIR = DATA_DIR / "transcripts"
 MANUAL_DIR     = DATA_DIR / "manual"        # 手動で置いた文字起こし
-SUB_LANGS      = "ja,ja-JP,ja-orig,en,en-US"   # 優先順 (前から順に採用)
+# 優先順 (前から順に採用)。**多くの言語を一度に要求すると 429 になりやすい**ので絞る。
+SUB_LANGS      = "ja,ja-orig,en"
+SUB_SLEEP      = 1                              # 字幕ダウンロード間のスリープ秒
 YTDLP_TIMEOUT  = 180                            # 1 動画あたりの上限秒
 DEFAULT_PROVIDERS   = "manual"                  # 既定は公式に近い手動経路のみ
 UNOFFICIAL_PROVIDERS = "manual,ytdlp,api"       # --allow-unofficial 時の順序
@@ -254,6 +256,39 @@ def _pick_sub_file(work: Path, video_id: str) -> tuple[Path | None, str]:
     return f, f.name.split(".")[-2] if len(f.name.split(".")) >= 3 else "unknown"
 
 
+def _collect_ytdlp_output(work: Path, video_id: str,
+                          p: subprocess.CompletedProcess) -> dict:
+    """
+    yt-dlp の作業ディレクトリから字幕とメタを回収する。
+
+    **一部の言語だけ失敗しても、落ちた字幕は使う。**
+    複数言語を要求すると 429 (Too Many Requests) で最後の言語だけ失敗することがあり、
+    そこで全部捨てると日本語字幕まで失われる。
+    info.json が書かれなかった場合も、字幕があれば最低限のメタで続行する。
+    """
+    info: dict = {}
+    info_f = work / f"{video_id}.info.json"
+    if info_f.exists():
+        try:
+            info = json.loads(info_f.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            info = {}
+
+    sub_f, lang = _pick_sub_file(work, video_id)
+    meta = _meta(info) if info else {
+        "video_id": video_id, "title": "", "channel": "", "channel_id": "",
+        "upload_date": "", "published_at": "", "duration": 0, "view_count": 0,
+        "url": f"https://www.youtube.com/watch?v={video_id}", "description": ""}
+
+    if sub_f is None:
+        raise RuntimeError(f"yt-dlp 取得失敗 ({video_id}): {_ytdlp_error(p)}")
+
+    segs = parse_vtt(sub_f.read_text(encoding="utf-8", errors="replace"))
+    warn = "" if p.returncode == 0 else f"一部の言語で失敗 ({_ytdlp_error(p)[:200]})"
+    return {"meta": meta, "segments": segs, "lang": lang,
+            "source": "yt-dlp", "error": "" if segs else (warn or "字幕が空")}
+
+
 def _fetch_via_ytdlp(video_id: str) -> dict | None:
     url = f"https://www.youtube.com/watch?v={video_id}"
     with tempfile.TemporaryDirectory() as td:
@@ -265,21 +300,13 @@ def _fetch_via_ytdlp(video_id: str) -> dict | None:
             "--sub-format", "vtt/srt/best",
             "--write-info-json",
             "--no-warnings",
+            "--no-abort-on-error",              # 1 言語の失敗で全部を捨てない
+            "--sleep-subtitles", str(SUB_SLEEP),  # 429 対策
+            "--retries", "3", "--extractor-retries", "3",
             "-o", str(work / "%(id)s.%(ext)s"),
         ] + ytdlp_extra() + [url]
         p = _run(cmd)
-        info_f = work / f"{video_id}.info.json"
-        if not info_f.exists():
-            raise RuntimeError(f"yt-dlp 取得失敗 ({video_id}): {_ytdlp_error(p)}")
-        info = json.loads(info_f.read_text(encoding="utf-8"))
-
-        sub_f, lang = _pick_sub_file(work, video_id)
-        if sub_f is None:
-            return {"meta": _meta(info), "segments": [], "lang": "",
-                    "source": "yt-dlp", "error": "字幕なし"}
-        segs = parse_vtt(sub_f.read_text(encoding="utf-8", errors="replace"))
-        return {"meta": _meta(info), "segments": segs, "lang": lang,
-                "source": "yt-dlp", "error": ""}
+        return _collect_ytdlp_output(work, video_id, p)
 
 
 def _fetch_via_api(video_id: str) -> dict | None:
