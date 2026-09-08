@@ -883,7 +883,14 @@ def _axis_scan(w: pd.DataFrame, col: str, label: str, nq: int, seeds: int):
     for q, g in sub.groupby("_q"):
         if len(g) < 200:
             continue
-        rows.append((str(q), len(g), _bp(g), _cluster_t(g)))
+        # ★ **分位の境界(軸そのものの値)を持つ** (2026-09-08)。
+        #   「Q3」だけでは何を指しているか読めない。res60_bp なら
+        #   「高値の何bp 下か」が分からないと、機構の説明も運用も無理。
+        try:
+            _lo, _hi = float(g[col].min()), float(g[col].max())
+        except Exception:
+            _lo = _hi = float("nan")
+        rows.append((str(q), len(g), _bp(g), _cluster_t(g), _lo, _hi))
     if len(rows) < 2:
         return None
     rows.sort(key=lambda x: x[0])
@@ -4294,9 +4301,12 @@ if a.explore:
         print(f"\n  候補の中身:")
         for _r in _hits:
             print(f"    ▶ {_r['label']} ({_r['col']})")
-            for _q, _n, _bpv, _tv in _r["rows"]:
+            print(f"       {'分位':<5}{'件数':>9}{'bp/件':>9}{'日t':>8}"
+                  f"{'軸の範囲':>26}")
+            for _q, _n, _bpv, _tv, _lo, _hi in _r["rows"]:
                 _m = " ★最良" if _q == _r["best"][0] else ""
-                print(f"       {_q:<5}{_n:>9,}{_bpv:>+9.1f}bp{_tv:>+8.2f}{_m}")
+                print(f"       {_q:<5}{_n:>9,}{_bpv:>+9.1f}bp{_tv:>+8.2f}"
+                      f"{_lo:>+12,.1f} 〜{_hi:>+11,.1f}{_m}")
         print(f"\n  ⛔ **ここで採用しないこと。** TRAIN で最良を選んだだけです。")
         print(f"     TEST で検証するには 1候補につき1回だけ:")
         for _r in _hits:
