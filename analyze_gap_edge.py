@@ -317,6 +317,14 @@ ap.add_argument("--watch-nulls", type=int, default=12,
 ap.add_argument("--confirm-watch", type=str, default="",
                 help="⛔ **TEST を1回消費する。** --sweep-watch で残った軸を"
                      "1つだけ渡す。1候補につき1回きり")
+ap.add_argument("--sweep-wall", action="store_true",
+                help="★★ **50件の壁を壊す価値があるか。** watch(何件読むか) x "
+                     "発注順 を交差させる。⛔ --sweep-watch(どの50件を読むか)"
+                     "とは別問題。TRAIN のみ")
+ap.add_argument("--wall-watches", type=str, default="50,100,150,0",
+                help="--sweep-wall で掃く watch 件数(0=無制限)")
+ap.add_argument("--wall-nulls", type=int, default=12,
+                help="--sweep-wall のランダム順の帯の本数(§18.24)")
 ap.add_argument("--relax-axis", type=str, default="up_streak",
                 help="--sweep-relax で使う軸(--list-axes で一覧)")
 ap.add_argument("--relax-axis-list", type=str, default="0,1,2,3,4,5,6",
@@ -491,7 +499,7 @@ _NEEDS_TRAIN = bool(a.explore or a.confirm or a.confirm_both or a.sweep_regime
                     or a.search_switch or a.sweep_size or a.sweep_market
                     or a.sweep_cands or a.beta_scan or a.sweep_grid
                     or a.sweep_ops or a.sweep_barrier or a.sweep_relax
-                    or a.sweep_watch or bool(a.confirm_watch)
+                    or a.sweep_watch or bool(a.confirm_watch) or a.sweep_wall
                     or a.tail_diag or a.hedge or bool(a.dump_picks)
                     or a.sector_scan)
 if _NEEDS_TRAIN and not a.split:
@@ -1695,6 +1703,149 @@ if a.sweep_watch or a.confirm_watch:
         print(f"        ⛔ 1候補につき1回きり。落ちたら基準を緩めないこと")
     if a.confirm_watch:
         print(f"\n  ⛔ いま TEST を1回消費しました。この軸は二度と測り直せません")
+    print(f"  {'=' * 68}")
+    sys.exit(0)
+
+if a.sweep_wall:
+    # ══════════════════════════════════════════════════════════════════
+    # ★★ 50件の壁を壊す価値があるか — watch(何件読むか) × 発注順
+    #
+    #   PUSH配信のローテーションで **技術的には50件を超えられる**ことが
+    #   2026-09-08 に実測できた(登録→初回受信 0.3s / コールドのバッチ2も同じ)。
+    #   問いは「できるか」から「やるべきか」に移った。
+    #
+    #   ⛔ 期待させている数字と、ライブに近い測定が **逆を向いている**:
+    #     §18.55 ③ watch 50→無制限 で 月 +49,587 → +87,267 (+76%)
+    #     §18.70 ⑥ 8月の歩み値の帯別 1〜50位 +5.4bp/件 /
+    #                51〜100位 **-133.5** / 101〜150位 **-159.3**
+    #     §18.70 ④ watch150 は レポート(ギャップ降順)と ライブ(寄った順)が
+    #                **t=-2.24 で systematic にズレる**
+    #
+    #   ★ ここで解くのは「+76% は発注順のせいで出ているのか」。
+    #     ライブの順序は日足では再現できない(寄り時刻を持たない)ので、
+    #     **上下から挟む**:
+    #
+    #       gap(降順)    レポートの順序。**楽観**。大きいギャップから建てる
+    #       gapasc(昇順) **悲観**。§18.70 ⑤ で「遅く寄る銘柄ほどギャップが
+    #                    大きい」(日ごとの相関 +0.651 / 19営業日すべてプラス /
+    #                    t=+14.37)と確定しているので、寄った順 ≒ ギャップ昇順
+    #       liq          売買代金降順(現行のライブの並べ替え軸)
+    #       rand x N     帯。§18.24: 帯を作ってから判定する
+    #
+    #     ライブの実態はこの間にある。**両端で勝てば本物、片方だけなら
+    #     §18.70 ④ の問題**。
+    #
+    #   ⛔ TEST は使わない。TRAIN で落ちればそこで終わり。
+    # ══════════════════════════════════════════════════════════════════
+    _wt = _pool_of(_train)
+    if _wt.empty:
+        sys.exit("[error] TRAIN が空です")
+    _wnd = max(1, _wt["date"].nunique())
+    _WBUD = a.budget_man or 400.0
+    print(f"\n{'=' * 78}\n■ 50件の壁 — watch x 発注順  **TRAIN({_train_n}) だけ**\n{'=' * 78}")
+    print(f"  ⛔ TEST は1回も使いません")
+    print(f"  対象 {len(_wt):,}銘柄日 / {_wnd:,}営業日 / "
+          f"ret1 >= {_RET1_MIN:.3f}% x gap >= {a.min_gap_bp:.0f}bp / "
+          f"予算 {_WBUD:.0f}万 / 100株固定")
+    print(f"  ライブの順序は日足では再現できない(寄り時刻が無い)ので "
+          f"**gap(楽観) と gapasc(悲観) で挟みます**")
+
+    _wsim2, _WALL_D, _WALL_H = _make_ops_sim(_train, _wt, _wnd)
+
+    def _wdays(half: int) -> list:
+        if half == 1:
+            return [d for d in _WALL_D if d < _WALL_H]
+        if half == 2:
+            return [d for d in _WALL_D if d >= _WALL_H]
+        return list(_WALL_D)
+
+    def _mstat(picks: list, half: int) -> dict:
+        """月次に畳んで 月平均 / σ / ÷σ を出す。
+
+        ⛔ **取引が1件も無い月を落とさない。** 落とすと σ が過小になり
+           ÷σ が実態より良く出る。その半期の営業日から月の一覧を作る。
+        """
+        _ms = {str(d)[:7] for d in _wdays(half)}
+        _acc = {m: 0.0 for m in _ms}
+        for p in picks:
+            _m = str(p["date"])[:7]
+            if _m in _acc:
+                _acc[_m] += float(p["pnl"])
+        _v = [_acc[m] for m in sorted(_acc)]
+        if not _v:
+            return {"月平均": 0.0, "σ": 0.0, "÷σ": 0.0, "月数": 0}
+        _mu = sum(_v) / len(_v)
+        _sd = ((sum((x - _mu) ** 2 for x in _v) / (len(_v) - 1)) ** 0.5
+               if len(_v) >= 2 else 0.0)
+        return {"月平均": _mu, "σ": _sd,
+                "÷σ": (_mu / _sd if _sd > 0 else 0.0), "月数": len(_v)}
+
+    _WORD = [("gap", "gap(報告/楽観)"), ("gapasc", "gapasc(悲観)"),
+             ("liq", "liq(売買代金)")]
+    _WW = [int(x) for x in str(a.wall_watches).split(",") if x.strip()]
+    _cell: dict = {}          # (half, watch, order) -> dict
+    _band: dict = {}          # (half, watch) -> [pnl, ...]
+    for _hf, _hn in ((0, "全期間"), (1, "前半"), (2, "後半")):
+        for _w in _WW:
+            for _o, _ in _WORD:
+                _r = _wsim2(_w, _WBUD, 0, False, order=_o, half=_hf)
+                _cell[(_hf, _w, _o)] = {**_r, **_mstat(_r["picks"], _hf)}
+            _bp = []
+            for _s in range(max(1, a.wall_nulls)):
+                _rr = _wsim2(_w, _WBUD, 0, False, order="rand",
+                             seed=1000 + _s, half=_hf)
+                _bp.append(_rr["pnl"])
+            _band[(_hf, _w)] = _bp
+
+    for _hf, _hn in ((0, "全期間"), (1, "前半"), (2, "後半")):
+        print(f"\n  ── {_hn} ({len(_wdays(_hf)):,}営業日) "
+              f"{'─' * 46}")
+        print(f"     {'watch':>6}{'発注順':<16}{'件数':>7}{'円/件':>9}"
+              f"{'月平均':>11}{'月次σ':>10}{'÷σ':>7}{'z(帯)':>8}")
+        for _w in _WW:
+            _bp = _band[(_hf, _w)]
+            _bm = sum(_bp) / len(_bp)
+            _bs = ((sum((x - _bm) ** 2 for x in _bp) / (len(_bp) - 1)) ** 0.5
+                   if len(_bp) >= 2 else 0.0)
+            for _o, _ol in _WORD:
+                _c = _cell[(_hf, _w, _o)]
+                _z = ((_c["pnl"] - _bm) / _bs) if _bs > 0 else float("nan")
+                print(f"     {(_w or '無制限'):>6}{_ol:<16}{_c['n']:>7,}"
+                      f"{_c['per']:>+9,.0f}{_c['月平均']:>+11,.0f}"
+                      f"{_c['σ']:>10,.0f}{_c['÷σ']:>7.2f}{_z:>+8.2f}")
+            _nm = max(1, len({str(d)[:7] for d in _wdays(_hf)}))
+            print(f"     {'':>6}{'ランダム' + str(len(_bp)) + '本':<16}{'':>7}"
+                  f"{'':>9}{_bm / _nm:>11,.0f}"
+                  f"  ← 帯 合計{_bm:+,.0f} σ{_bs:,.0f}")
+
+    # ── 判定 ────────────────────────────────────────────────────────
+    print(f"\n  {'=' * 68}")
+    print(f"  ■ 判定: watch を広げると良くなるか")
+    print(f"  {'=' * 68}")
+    print(f"     ⛔ **円/件** も見ること。件数が増えて総額が増えただけなら、")
+    print(f"        予算制約下では何も得られない(§18.28)")
+    _base_w = _WW[0]
+    print(f"     基準 = watch {_base_w or '無制限'}(現行)。差はそこからの増分")
+    _ok_all = True
+    for _o, _ol in _WORD:
+        print(f"\n     {_ol}")
+        print(f"       {'watch':>7}{'差(月)':>13}{'円/件':>10}"
+              f"{'前半':>13}{'後半':>13}{'符号':>6}")
+        for _w in _WW[1:]:
+            _d0 = (_cell[(0, _w, _o)]["月平均"] - _cell[(0, _base_w, _o)]["月平均"])
+            _d1 = (_cell[(1, _w, _o)]["月平均"] - _cell[(1, _base_w, _o)]["月平均"])
+            _d2 = (_cell[(2, _w, _o)]["月平均"] - _cell[(2, _base_w, _o)]["月平均"])
+            _pr = (_cell[(0, _w, _o)]["per"] - _cell[(0, _base_w, _o)]["per"])
+            _sg = "✓" if (_d1 > 0) == (_d2 > 0) else "✗"
+            if _sg == "✗" or _d0 <= 0:
+                _ok_all = False
+            print(f"       {(_w or '無制限'):>7}{_d0:>+13,.0f}{_pr:>+10,.0f}"
+                  f"{_d1:>+13,.0f}{_d2:>+13,.0f}{_sg:>6}")
+    print(f"\n     ▶ 3つの順序すべてで 差>0 かつ 前半・後半が同符号(✓) なら、")
+    print(f"       壁を壊す価値がある = **TEST に進んでよい**")
+    print(f"     ▶ gap(楽観)だけ勝って gapasc(悲観)が負けるなら、")
+    print(f"       その +76% は **発注順が作っている**(§18.70 ④ の再現)")
+    print(f"     {'✅ 全セル通過(差>0 かつ 前半後半が同符号)' if _ok_all else '⛔ どこかで落ちた(上の表の ✗ と 差<=0 を見る)'}")
     print(f"  {'=' * 68}")
     sys.exit(0)
 
