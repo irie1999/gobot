@@ -694,7 +694,7 @@ tips_track.py        30日/90日後の騰落率で答え合わせ → 発信者�
 | `tips_extract.py` | LLM 抽出・スキーマ検証・信頼度ルーブリック・相互チェック |
 | `symbol_lookup.py` | 企業名 ⇄ 証券コードの名寄せ (推測でコードを作らせない) |
 | `tips_track.py` | 事後検証・発信者実績 (時点情報) |
-| `test_youtube_tips.py` | 自己テスト 185 チェック (ネットワーク・pandas・LLM 不要、Windows/macOS/Linux 共通)。**改修したら必ず実行** |
+| `test_youtube_tips.py` | 自己テスト 195 チェック (ネットワーク・pandas・LLM 不要、Windows/macOS/Linux 共通)。**改修したら必ず実行** |
 
 データは `youtube_tips_data/` 配下 (gitignore 済み):
 `transcripts/` (字幕キャッシュ)、`manual/` (手動取込)、`youtube_tips.jsonl` (全レコード)、
@@ -921,6 +921,25 @@ call の代表タイムスタンプは「銘柄を紹介した時刻」である
 ```
 python youtube_tips.py --since-days 7 --curate --match-signals
 ```
+
+### 16.6.7 テーマ収集 (手法そのものを集める)
+
+個別銘柄の見解ではなく「手法・考え方」を集めたいとき用。
+`youtube_sources.THEME_SEARCHES` にテーマ名でキーワード群を定義しておき、
+`--theme` で回す。**日本語と英語の両方**を検索する (英語字幕でも抽出結果は日本語)。
+
+```
+python youtube_tips.py --theme gap --allow-unofficial --backend cli   # 収集
+python youtube_tips.py --report --topic "ギャップ|窓|gap"             # テーマで絞って読む
+python youtube_tips.py --report --topic "gap" --digest                # ターミナルで
+```
+
+- `--theme gap` … ギャップアップ/ギャップダウン (日本語5+英語6の検索)
+- `--topic <正規表現>` … 収集済みデータから、その語に触れている tips / calls だけに絞る。
+  動画レコードは残るので出典を追える
+- 検索は yt-dlp を使う。字幕の自動取得まで行うなら `--allow-unofficial`
+- 手法解説の動画は calls が 0 件でも構わない (採用基準 §16.6.5 は銘柄見解を要求するので、
+  テーマ収集では `--curate` を付けない)
 
 ### 16.7 gobot との照合
 

@@ -37,6 +37,8 @@ youtube_tips.py  ―  YouTube 字幕から「株の売買見解 / Tips」を自�
   python youtube_tips.py --match-signals        # gobot の当日シグナルと突き合わせ
   python youtube_tips.py --url https://youtu.be/xxxx   # 単発の動画を処理
   python youtube_tips.py --source "https://www.youtube.com/@ch/videos"
+  python youtube_tips.py --theme gap --allow-unofficial   # テーマ収集 (日英の検索)
+  python youtube_tips.py --report --topic "ギャップ|窓|gap"  # テーマで絞って読む
   python youtube_tips.py --report --days 7      # 収集済みから直近7日のHTML
   python youtube_tips.py --digest --days 7      # ターミナルにテキスト要約
   python youtube_tips.py --failures             # 字幕が取れなかった動画の一覧
@@ -449,6 +451,12 @@ def gather_targets(args, done: set[str]) -> list[dict]:
 
     sources = [{"name": s, "url": s, "limit": args.limit or 5, "feed": ""}
                for s in (args.source or [])]
+    if getattr(args, "theme", ""):
+        found = _src.theme_sources(args.theme, args.limit)
+        if not found:
+            print(f"  ! テーマ '{args.theme}' は未定義です "
+                  f"(利用可能: {', '.join(_src.theme_names())})", file=sys.stderr)
+        sources = sources + found
     if not args.url and not sources:
         sources = _src.active_sources()
         if args.limit:
@@ -531,6 +539,27 @@ def collect(args) -> dict[str, dict]:
 
 
 # ── 集計 ───────────────────────────────────────────────────────────────
+def filter_topic(recs: list[dict], pattern: str) -> list[dict]:
+    """
+    キーワード (正規表現) に触れている tips / calls だけを残す。
+    「ギャップアップの知見だけ見たい」のようなテーマ別の読み方をするため。
+    動画レコード自体は残し、中身を絞る (どの動画由来かを追えるようにする)。
+    """
+    if not pattern:
+        return recs
+    rx  = re.compile(pattern, re.I)
+    out = []
+    for r in recs:
+        tips = [t for t in (r.get("tips") or [])
+                if rx.search(f"{t.get('tip','')} {t.get('detail','')} {t.get('category','')}")]
+        calls = [c for c in (r.get("calls") or [])
+                 if rx.search(f"{c.get('speaker_claim','')} {c.get('ai_note','')} "
+                              f"{c.get('action','')} {c.get('entry_condition','')}")]
+        if tips or calls:
+            out.append({**r, "tips": tips, "calls": calls})
+    return out
+
+
 def flatten(recs: list[dict], key: str) -> list[dict]:
     """全レコードの calls / tips を「動画情報付き」の 1 次元リストにする。"""
     out = []
@@ -1016,6 +1045,12 @@ def main() -> None:
     ap.add_argument("--source", action="append", metavar="URL",
                     help="チャンネル/再生リスト (youtube_sources.py の代わり)")
     ap.add_argument("--limit", type=int, default=0, help="1ソースあたりの取得本数")
+    ap.add_argument("--theme", default="",
+                    help="テーマ別の検索ソースを使う (例: gap = ギャップアップ/ダウン。"
+                         "日本語と英語の両方を検索する)")
+    ap.add_argument("--topic", default="",
+                    help="レポートを keyword(正規表現) に触れている内容だけに絞る "
+                         '(例: --topic "ギャップ|窓|gap")')
     ap.add_argument("--max-videos", type=int, default=30, help="1回で処理する最大本数")
     ap.add_argument("--since-days", type=int, default=0,
                     help="公開からN日以内の動画だけ処理 (0=無制限)")
@@ -1063,6 +1098,10 @@ def main() -> None:
         return
 
     target = [r for r in recs.values() if _in_period(r, args.days)]
+    if args.topic:
+        before = len(target)
+        target = filter_topic(target, args.topic)
+        print(f"■ トピック絞り込み '{args.topic}': {len(target)}/{before} 本に該当")
     target.sort(key=lambda r: (r.get("upload_date") or ""), reverse=True)
 
     if args.curate:

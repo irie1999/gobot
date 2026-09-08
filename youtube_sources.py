@@ -50,10 +50,48 @@ SOURCES: list[dict] = [
 ]
 
 # ── キーワード検索で拾うソース (チャンネル横断) ───────────────────────
+# 検索は yt-dlp を使う (pip install -U yt-dlp)。字幕のダウンロードまで自動化する
+# なら実行時に --allow-unofficial を付ける (§16.2)。
 SEARCHES: list[dict] = [
     # {"name": "デイトレ手法", "url": "ytsearchdate10:デイトレ 手法 コツ",
     #  "limit": 10, "enabled": True},
 ]
+
+# ── テーマ別の学習用ソース (ギャップアップ/ギャップダウン) ────────────
+# 銘柄の売買見解ではなく「手法・考え方」を集めたいとき用。
+# 日本語と英語の両方を回す。英語字幕でも抽出結果は日本語で出る。
+#   python youtube_tips.py --theme gap --allow-unofficial --backend cli
+#   python youtube_tips.py --report --topic "ギャップ|窓|gap"
+THEME_SEARCHES: dict[str, list[dict]] = {
+    "gap": [
+        # 日本語
+        {"name": "ギャップアップ 手法",   "url": "ytsearch12:ギャップアップ 株 手法"},
+        {"name": "窓開け 窓埋め",         "url": "ytsearch12:株 窓開け 窓埋め 攻略"},
+        {"name": "寄り付き 戦略",         "url": "ytsearch10:寄り付き 戦略 デイトレ 寄り天"},
+        {"name": "ギャップダウン 対応",   "url": "ytsearch10:ギャップダウン 株 対応 買い"},
+        {"name": "決算 ギャップ",         "url": "ytsearch10:決算 ギャップアップ 翌日 株価"},
+        # 英語
+        {"name": "gap up strategy",       "url": "ytsearch12:gap up trading strategy stocks"},
+        {"name": "gap and go",            "url": "ytsearch12:gap and go strategy day trading"},
+        {"name": "gap fill",              "url": "ytsearch10:gap fill trading strategy statistics"},
+        {"name": "gap down reversal",     "url": "ytsearch10:gap down reversal trade setup"},
+        {"name": "opening range breakout", "url": "ytsearch10:opening range breakout gap stocks"},
+        {"name": "overnight gap edge",    "url": "ytsearch8:overnight gap edge backtest"},
+    ],
+}
+
+
+def theme_sources(theme: str, limit: int = 0) -> list[dict]:
+    """テーマ名 (例 "gap") のソース一覧を返す。未定義なら空。"""
+    out = []
+    for s in THEME_SEARCHES.get(theme, []):
+        out.append({"name": f"[{theme}] {s['name']}", "url": s["url"], "feed": "",
+                    "limit": int(limit or s.get("limit", 10))})
+    return out
+
+
+def theme_names() -> list[str]:
+    return sorted(THEME_SEARCHES)
 
 
 def active_sources() -> list[dict]:

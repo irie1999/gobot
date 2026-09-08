@@ -24,6 +24,7 @@ Windows / macOS / Linux のいずれでも同じ内容が走る (外部シェル
  15. 結合テスト      … 空でない JSONL を実際に読み書きし、本番経路を通す
  16. 静的チェック    … undefined name (関数の消し忘れ等) が無いか ※pyflakes 任意
  17. 採用基準        … 材料として使える動画だけを通し、除外理由を残せるか
+ 18. テーマ収集      … --theme のソース定義と --topic の絞り込み
 """
 
 from __future__ import annotations
@@ -951,6 +952,44 @@ def test_curation() -> None:
     check("タイムスタンプが無くても比率を出す", pa["time_ratio"] > 0 and not pa["timed"], pa)
 
 
+# ── 18. テーマ収集 / トピック絞り込み ────────────────────────────────
+def test_theme_topic() -> None:
+    print("18. テーマ収集 (--theme) と絞り込み (--topic)")
+    import youtube_sources as src
+    import youtube_tips as ytips
+
+    check("テーマが定義されている", "gap" in src.theme_names(), src.theme_names())
+    gap = src.theme_sources("gap", 5)
+    check("テーマのソースが返る", len(gap) >= 8, len(gap))
+    check("日本語と英語の両方を検索する",
+          any("ギャップ" in g["url"] for g in gap) and any("gap" in g["url"] for g in gap))
+    check("limit を上書きできる", all(g["limit"] == 5 for g in gap))
+    check("未定義テーマは空", src.theme_sources("nosuch") == [])
+
+    recs = [
+        {"video_id": "A" * 11, "title": "窓開けの攻略",
+         "tips": [{"category": "エントリー", "tip": "ギャップアップは寄り天に注意", "detail": ""},
+                  {"category": "損切り", "tip": "建値に戻したら撤退", "detail": ""}],
+         "calls": []},
+        {"video_id": "B" * 11, "title": "決算プレイ",
+         "tips": [{"category": "銘柄", "tip": "決算跨ぎはロットを落とす", "detail": ""}],
+         "calls": []},
+    ]
+    out = ytips.filter_topic(recs, "ギャップ|窓|gap")
+    check("該当する動画だけ残す", len(out) == 1 and out[0]["video_id"] == "A" * 11, out)
+    check("該当する tips だけ残す", len(out[0]["tips"]) == 1, out[0]["tips"])
+    check("英語表記でも拾う",
+          len(ytips.filter_topic(
+              [{"video_id": "C" * 11, "tips": [{"tip": "gap and go setup", "detail": ""}],
+                "calls": []}], "ギャップ|gap")) == 1)
+    check("パターン未指定なら素通し", ytips.filter_topic(recs, "") == recs)
+    check("call の本文でも絞れる",
+          len(ytips.filter_topic(
+              [{"video_id": "D" * 11, "tips": [],
+                "calls": [{"speaker_claim": "窓を埋めたら買い", "ai_note": "",
+                           "action": "", "entry_condition": ""}]}], "窓")) == 1)
+
+
 def main() -> int:
     for stream in (sys.stdout, sys.stderr):     # Windows cp932 対策
         try:
@@ -962,7 +1001,7 @@ def main() -> int:
                test_entry_reference, test_point_in_time, test_symbol_lookup,
                test_providers, test_isolation, test_fallback_marking,
                test_stats_exclusion, test_windows_console, test_integration_jsonl,
-               test_static_check, test_curation):
+               test_static_check, test_curation, test_theme_topic):
         fn()
     print()
     if _fails:
