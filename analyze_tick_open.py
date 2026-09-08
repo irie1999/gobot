@@ -39,6 +39,10 @@
 """
 from __future__ import annotations
 
+# ⛔ Windows で `> out.txt` にリダイレクトすると stdout が cp932 になり、
+#   ⛔ ⚠ ✅ のような cp932 に無い記号で UnicodeEncodeError を出して落ちる。
+import console_safe  # noqa: F401
+
 import argparse
 import csv
 import glob
