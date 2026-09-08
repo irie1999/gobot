@@ -96,6 +96,8 @@ cd /d "%~dp0"
 set "NGO="
 set "NARGS="
 set "NBUD=--budget 200"
+REM --ws is ON by default. .\nexec --go --no-ws turns it off for one run.
+set "NWS=--ws"
 
 :parse
 if "%~1"=="" goto :parsed
@@ -104,6 +106,7 @@ if /i "%~1"=="--help" goto :help
 if /i "%~1"=="/?"     goto :help
 if /i "%~1"=="--go"       set "NGO=--execute"      & shift & goto :parse
 if /i "%~1"=="--budget"   set "NBUD=--budget %~2"  & shift & shift & goto :parse
+if /i "%~1"=="--no-ws"    set "NWS="               & shift & goto :parse
 set "NARGS=%NARGS% %~1"
 shift
 goto :parse
@@ -178,9 +181,16 @@ REM   connection and a second one drops the first. kabu_ws now refuses to
 REM   start on a weekday between 08:30 and 15:40 for this reason.
 REM
 REM   To turn it off for a day: .\nexec --go --no-ws
-set "NWS=--ws"
-if /i "%NARGS: --no-ws=%" NEQ "%NARGS%" set "NWS="
-set "NARGS=%NARGS: --no-ws=%"
+REM   NWS is set in the parse loop above, the same way NGO and NBUD are.
+REM   *** DO NOT use string substitution to detect --no-ws here. ***
+REM   The first version tested NARGS with a substring replacement, but NARGS
+REM   is DELETED by the empty set at the top, and a plain run
+REM   (--go --budget 400) never adds to it because both are eaten by the
+REM   parse loop. Replacement on an undefined variable broke the line and cmd
+REM   printed a set-syntax error on the morning of a live run, 2026-09-09,
+REM   minutes before the 09:00 orders. A flag in the parse loop cannot fail
+REM   this way. Do not write percent signs in these REM lines either - cmd
+REM   expands variables on REM lines too.
 python k_open_confirm.py --n-mode --prod --poll %NWS% %NGO% %NBUD%%NARGS%
 REM Exit 2 means the script stopped BEFORE connecting to kabu (outside the
 REM order window, or last run left an unsettled order). Nothing was sent, so
