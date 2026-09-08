@@ -147,7 +147,41 @@ if errorlevel 1 (
 )
 echo.
 echo [2/3] warm read at 08:55, then [3/3] poll from 09:00 to 09:10
-python k_open_confirm.py --n-mode --prod --poll %NGO% %NBUD%%NARGS%
+REM --ws : take the board over PUSH (WebSocket) instead of polling REST.
+REM   WHY. Reading 50 names over REST measured 36.5 SECONDS at the open
+REM   (0.73s per name, 18.44). The first name is fast, the last waits 36s,
+REM   so the AVERAGE wait is about 18 seconds. The 1-minute-bar study in
+REM   18.44 puts that at roughly -6bp, against a gross edge of +15.7bp per
+REM   trade. That is nearly 40 pct of the edge lost to waiting in line.
+REM   PUSH delivers the board when it changes, so the queue disappears.
+REM   Measured 2026-09-08 after the close: register to first message 0.3s,
+REM   90 pct of a 50-name batch inside 1.0-1.5s, nothing missing.
+REM
+REM   THIS DOES NOT CHANGE WHICH NAMES WE BUILD. Still the top 50 by
+REM   turnover, still +100bp, still 100 shares, still MOC only. The only
+REM   thing that changes is HOW FAST the open price reaches us. It moves
+REM   live TOWARD the backtest, which assumes the open price itself.
+REM
+REM   FAIL-SAFE. If the socket will not connect, or a name never ticks, or
+REM   PUSH hands back YESTERDAY's open, that name falls back to REST and
+REM   the run behaves exactly as it does today. The downside is bounded to
+REM   the current behaviour - see k_open_confirm.py around _read_all.
+REM
+REM   NOT MEASURED YET: the 09:00 auction itself. The 2026-09-08 numbers
+REM   were taken at 09:08 with every name already printed. At the auction
+REM   the push queue may back up. Watch the "PUSH n / HTTP n" counter in
+REM   the read line - if PUSH is 0 every poll, the socket is not helping
+REM   and it is falling back to REST anyway.
+REM
+REM   DO NOT run kabu_ws.py at the same time. kabu accepts ONE websocket
+REM   connection and a second one drops the first. kabu_ws now refuses to
+REM   start on a weekday between 08:30 and 15:40 for this reason.
+REM
+REM   To turn it off for a day: .\nexec --go --no-ws
+set "NWS=--ws"
+if /i "%NARGS: --no-ws=%" NEQ "%NARGS%" set "NWS="
+set "NARGS=%NARGS: --no-ws=%"
+python k_open_confirm.py --n-mode --prod --poll %NWS% %NGO% %NBUD%%NARGS%
 REM Exit 2 means the script stopped BEFORE connecting to kabu (outside the
 REM order window, or last run left an unsettled order). Nothing was sent, so
 REM do not send the operator hunting for naked shorts.
