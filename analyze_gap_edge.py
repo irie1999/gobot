@@ -688,6 +688,11 @@ def _scan(sym: str) -> list[dict]:
     #     sliding_window_view で一度に作る(コピーは (n-120) x 120 の1枚だけ)。
     _TW, _TB = 120, 0.015
     _touch = pd.Series(float("nan"), index=df.index)
+    # ★★ **前夜版**(2026-09-08)。上の res*/touch120 は始値との距離なので
+    #   値が決まるのは 09:00 で、「前夜にどの50件を登録するか」には使えない。
+    #   基準を **前日終値**にすれば前夜に確定するので watch の並べ替えに使える。
+    #   watch の選び方は **予算が効かない日にも毎日効く**(§18.54)。
+    _touch_pc = pd.Series(float("nan"), index=df.index)
     try:
         _cv = _c.to_numpy(dtype=float)
         _ov = df["open"].to_numpy(dtype=float)
@@ -696,10 +701,15 @@ def _scan(sym: str) -> list[dict]:
             # 行 pos は close[pos-119 : pos+1] = _win[pos-119] を見て、
             # 帯の中心は o1 = open[pos+1]
             _pp = np.arange(_TW - 1, len(_cv) - 1)
-            _o1a = _ov[_pp + 1]
+            _wv = _win[_pp - (_TW - 1)]
             with np.errstate(invalid="ignore", divide="ignore"):
-                _hit = np.abs(_win[_pp - (_TW - 1)] / _o1a[:, None] - 1.0) <= _TB
-            _touch.iloc[_pp] = _hit.sum(axis=1).astype(float)
+                _touch.iloc[_pp] = (
+                    np.abs(_wv / _ov[_pp + 1][:, None] - 1.0) <= _TB
+                ).sum(axis=1).astype(float)
+                # 前夜版: 帯の中心は **その日の終値**(= 窓の終端)
+                _touch_pc.iloc[_pp] = (
+                    np.abs(_wv / _cv[_pp][:, None] - 1.0) <= _TB
+                ).sum(axis=1).astype(float)
     except Exception:
         pass                              # 作れなければ列は NaN = その軸は使わない
     # ★★ β = 日経が日中 +1% のとき この銘柄が日中 何% 動くか(2026-09-06)。
@@ -814,6 +824,20 @@ def _scan(sym: str) -> list[dict]:
             "res120_bp": (lambda _r: None if _r is None or _r <= 0 else
                           (_r - o1) / o1 * 10_000.0 * _SIDE)(_fv(_bar120, pos)),
             "touch120": _fv(_touch, pos),
+            # ── 抵抗線の **前夜版**(基準が前日終値 pc なので前夜に確定) ──
+            #   watch の並べ替え(どの50件を登録するか)に使えるのはこちらだけ。
+            "res60_pc_bp": (lambda _r: None if _r is None or _r <= 0 else
+                            (_r - pc) / pc * 10_000.0 * _SIDE)(_fv(_bar60, pos)),
+            "res120_pc_bp": (lambda _r: None if _r is None or _r <= 0 else
+                             (_r - pc) / pc * 10_000.0 * _SIDE)(_fv(_bar120, pos)),
+            # ★ 抵抗線への **近さ**。大きいほど線に近い(= 0 に近い)。
+            #   ⛔ 目標は「線そのもの(res=0)」と **先に決めている**。
+            #     TRAIN の最良分位に合わせて中心を動かすと、それは当てはめ。
+            "nearhi60_bp": (lambda _r: None if _r is None or _r <= 0 else
+                            -abs((_r - pc) / pc * 10_000.0))(_fv(_bar60, pos)),
+            "nearhi120_bp": (lambda _r: None if _r is None or _r <= 0 else
+                             -abs((_r - pc) / pc * 10_000.0))(_fv(_bar120, pos)),
+            "touch120_pc": _fv(_touch_pc, pos),
             "up_streak": _fv(_streak, pos),
             "vol_ratio": _fv(_volr, pos),
             "dow": float(d1.dayofweek),
@@ -835,6 +859,11 @@ AXES = {
     "res60_bp":  "60日高値までの余地bp(正=まだ高値の下=上に抵抗)",
     "res120_bp": "120日高値までの余地bp(同上の長い窓)",
     "touch120":  "同じ価格帯を通った日数(120日/±1.5%)",
+    "res60_pc_bp":  "★前夜版 60日高値までの余地bp(基準=前日終値)",
+    "res120_pc_bp": "★前夜版 120日高値までの余地bp(基準=前日終値)",
+    "nearhi60_bp":  "★前夜版 60日高値への近さ(大きいほど線に近い)",
+    "nearhi120_bp": "★前夜版 120日高値への近さ(同上)",
+    "touch120_pc":  "★前夜版 同じ価格帯を通った日数(基準=前日終値)",
     "up_streak": "連続上昇日数",
     "vol_ratio": "出来高比(D/20日平均)",
     "entry_p":   "建値",
@@ -1229,8 +1258,11 @@ if _NEEDS_TRAIN:
 #     過去の終値)は D で確定しているが、どれも **始値との距離**なので値が
 #     決まるのは 09:00。選別軸(--explore/--confirm)には使えるが、
 #     「前夜にどの50件を登録するか」には使えない。
+#   ★ 前夜版(基準が前日終値)は **入れてよい**。素材も基準も D の引けで確定する。
 _WATCH_OK = ("liq", "ret1", "ret2", "ret3", "ret5", "ret20",
-             "atr_pct", "range_pos")
+             "atr_pct", "range_pos",
+             "res60_pc_bp", "res120_pc_bp",
+             "nearhi60_bp", "nearhi120_bp", "touch120_pc")
 
 
 def _check_worder(worder: str) -> None:
