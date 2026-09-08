@@ -726,7 +726,16 @@ if not args.out:
 _mode_note = (
     (f"🚀 **実発注します**（{'本番口座 18080' if args.prod else 'デモ口座 18081'}"
      f" / 総額上限 {(args.max_notional or args.budget):.0f}万"
-     f" / 保護指値 始値-{args.limit_slip_bp:.0f}bp）"
+     # ⛔ N と J で **指値の決め方が違う**。ここに J の文言を出していたので、
+     #   2026-09-08 の実発注で「保護指値 始値-50bp(=5,167)」と表示しながら
+     #   実際は 5,193(始値ちょうど)で出していた。バナーだけの誤りで発注は
+     #   正しかったが、`.\fills` の注文値と突き合わせるまで気づけなかった。
+     #   N は --n-limit-ticks(既定0)ティック下 = 始値ちょうど(:1385 のループが0回)。
+     + (f" / 指値 始値"
+        + (f"-{args.n_limit_ticks}tick(上限{args.n_limit_max_bp:.1f}bp)"
+           if args.n_limit_ticks > 0 else "ちょうど")
+        + "）" if args.n_mode else
+        f" / 保護指値 始値-{args.limit_slip_bp:.0f}bp）")
      + ("" if args.prod else "  ※ --prod が無いのでデモです"))
     if args.execute else
     "⛔ **発注しません**（記録のみ。出すなら --execute）")
