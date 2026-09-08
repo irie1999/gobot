@@ -919,7 +919,95 @@ _SLIP_COLS = ["date", "方式", "突合", "実損益", "テスト損益", "差",
               "差/株", "エントリー滑り/株", "決済滑り/株",
               "エントリー滑り", "決済滑り", "平均エントリー滑り%",
               "実件数", "実損益_全", "テスト件数", "テスト損益_全", "差_全",
-              "発注件数", "約定率%"]
+              "発注件数", "約定率%",
+              # ★★ エントリー滑りの3段分解 (2026-09-08)
+              #   これまで「実約定 − 始値」を1つの数字で見ていたので、
+              #   悪かった日に **待ち行列のせいなのか、注文のせいなのか**が
+              #   分からなかった。板は n_quotes_<日付>.csv に既に取れている
+              #   (検知時の bid と 10段の板)ので、読むだけで分けられる。
+              #
+              #     段1 = 検知時の板(bid) − 始値       … 待ち行列のコスト
+              #     段2 = 実約定 − 検知時の板(bid)     … 注文〜約定のコスト
+              #     段1 + 段2 = エントリー滑り/株      … 恒等式(検算する)
+              #
+              #   ⛔ 段3(不約定の機会損失)はここに入れない。突合できるのは
+              #      **約定した銘柄**だけで、不約定は n_paper --close の側。
+              "段1_始値→検知板/株", "段2_検知板→実約定/株", "段1+2_検算差",
+              # PUSH(WebSocket) を使った日か。PUSH前/後を混ぜないための列。
+              # 待ち行列そのものを消す変更なので、**測っている量が変わる**。
+              "PUSH件数", "HTTP件数"]
+
+
+def _entry_stages(both: set, real_done: dict, by_sym: dict) -> dict:
+    """エントリー滑りを 段1(待ち行列) と 段2(注文〜約定) に割る。
+
+    材料は `n_quotes_<日付>.csv`(k_open_confirm が銘柄ごとに書いている)。
+    無ければ空を返すだけで、既存の列には一切影響しない。
+
+    ★ 符号の向きは既存の「エントリー滑り」と同じ = **高く売れていればプラス**。
+      ショートなので、寄ってから下がるほど段1がマイナスになる。
+    """
+    _out = {"段1_始値→検知板/株": "", "段2_検知板→実約定/株": "",
+            "段1+2_検算差": "", "PUSH件数": "", "HTTP件数": ""}
+    _p = Path(f"n_quotes_{_DATE_DIG}.csv")
+    if not _p.exists() or not both:
+        return _out
+    # 銘柄ごとに **最初に寄りを検知した行**を採る(以降の行は値が動いている)
+    _first: dict = {}
+    _push = _http = 0
+    try:
+        with open(_p, encoding="utf-8-sig", newline="") as f:
+            for r0 in _csv.DictReader(f):
+                _s = str(r0.get("symbol") or "").strip()
+                if not _s or _s in _first:
+                    continue
+                try:
+                    if float(r0.get("open_p") or 0) <= 0:
+                        continue
+                except ValueError:
+                    continue
+                _first[_s] = r0
+                if str(r0.get("req_ts") or "").strip() == "push":
+                    _push += 1
+                else:
+                    _http += 1
+    except Exception:
+        return _out
+    _out["PUSH件数"], _out["HTTP件数"] = _push, _http
+
+    def _num(v) -> float:
+        try:
+            return float(str(v).replace(",", "").strip() or 0)
+        except ValueError:
+            return 0.0
+
+    _s1: list[float] = []
+    _s2: list[float] = []
+    _chk: list[float] = []
+    for s in both:
+        _q = _first.get(s) or _first.get(str(s).replace(".T", ""))
+        if not _q:
+            continue
+        _op = _num(_q.get("open_p"))
+        # ⛔ 売る側が当たる先は **最良買い気配(bid)**。無いときだけ現在値。
+        _bd = _num(_q.get("bid")) or _num(_q.get("current_price"))
+        _real = _num((real_done.get(s) or {}).get("entry(売)"))
+        _test = _num((by_sym.get(s) or {}).get("entry_p"))
+        if _op <= 0 or _bd <= 0 or _real <= 0 or _test <= 0:
+            continue
+        _s1.append(_bd - _op)
+        _s2.append(_real - _bd)
+        # ★ 恒等式の検算: 段1 + 段2 == 実約定 − 始値。
+        #   テストの建値が始値でない日(方式が違う)は 0 にならないので、
+        #   **0 から外れたら混ざっている**という警報になる。
+        _chk.append((_bd - _op) + (_real - _bd) - (_real - _test))
+    if not _s1:
+        return _out
+    _n = len(_s1)
+    _out["段1_始値→検知板/株"] = round(sum(_s1) / _n, 2)
+    _out["段2_検知板→実約定/株"] = round(sum(_s2) / _n, 2)
+    _out["段1+2_検算差"] = round(sum(_chk) / _n, 3)
+    return _out
 
 
 def _append_slip_log(both, real_done, by_sym, ordered, r_tot, bt_tot) -> None:
@@ -972,6 +1060,24 @@ def _append_slip_log(both, real_done, by_sym, ordered, r_tot, bt_tot) -> None:
         "発注件数": len(ordered),
         "約定率%": round(len(real_done) / len(ordered) * 100, 1) if ordered else 0.0,
     }
+    # ★ エントリー滑りの3段分解。材料が無ければ列が空になるだけ。
+    _st = _entry_stages(both, real_done, by_sym)
+    row.update(_st)
+    if _st.get("段1_始値→検知板/株") != "":
+        _c = float(_st["段1+2_検算差"])
+        print(f"\n  ── エントリー滑りの内訳 (1株あたり) ──")
+        print(f"     段1 始値 → 検知時の板   {float(_st['段1_始値→検知板/株']):+8.2f}円"
+              f"   (待ち行列のコスト。PUSH で消したいのはここ)")
+        print(f"     段2 検知時の板 → 実約定  {float(_st['段2_検知板→実約定/株']):+8.2f}円"
+              f"   (注文を出してから約定するまで)")
+        print(f"     PUSH {_st['PUSH件数']}件 / HTTP {_st['HTTP件数']}件")
+        if abs(_c) > 0.01:
+            print(f"     ⛔ 検算が合いません(段1+段2 − エントリー滑り = {_c:+.3f}円)。"
+                  f"\n        テストの建値が始値でない = **方式が混ざっています**。"
+                  f"この日の分解は読まないこと")
+        # ⛔ 段3(不約定の機会損失)はここでは出せない。突合できるのは約定した
+        #    銘柄だけなので、不約定は n_paper --close の側で見る。
+        print(f"     ▶ 段3(不約定の機会損失)は python n_paper.py --close で")
 
     p = Path(args.slip_log)
     hist: dict = {}
