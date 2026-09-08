@@ -193,11 +193,48 @@ for r in sorted(_recs, key=lambda x: (x["date"], x["code"])):
 print()
 print("■ ★ 指値幅ごと（始値を基準に、下が有利・上が不利）")
 print(f"{'幅':>9}{'約定':>5}{'約定率':>7}{'約定bp':>8}"
-      f"{'実装差bp':>9}{'★実損益/日':>11}{'★合計':>11}")
-print("-" * 62)
+      f"{'実装差bp':>9}{'★実損益/日':>11}{'★合計':>11}"
+      f"{'約定bp 95%CI':>16}")
+# ⛔ CI は **日クラスタ**(1日=1観測)。件数で出すと実効サンプルを誤認する
+print("-" * 78)
 
 
-def _line(lbl: str, hits: list, miss: list, yen: list) -> None:
+_T95 = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447,
+        7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228, 11: 2.201, 12: 2.179,
+        13: 2.160, 14: 2.145, 15: 2.131, 16: 2.120, 17: 2.110, 18: 2.101,
+        19: 2.093, 20: 2.086, 25: 2.060, 30: 2.042}
+
+
+def _daily_mean(pairs: list) -> list:
+    """(日付, 値) を **日ごとの平均** に畳む。
+
+    ⛔ 同日決済は日内で強く相関する(その日の寄り後の方向を全銘柄が共有する)ので、
+       実効サンプルは件数ではなく **営業日数**(§18.13)。46件を独立46件と
+       数えると実効サンプルを数倍に誤認する。
+    """
+    _acc: dict = {}
+    for _d, _x in pairs:
+        if _x is None:
+            continue
+        _acc.setdefault(_d, []).append(float(_x))
+    return [sum(v) / len(v) for _, v in sorted(_acc.items())]
+
+
+def _ci95(v: list):
+    """日ごとの平均から 平均 と 95%CI半幅 を返す。t は自由度で引く(1.96 は使わない)。"""
+    _n = len(v)
+    if _n < 2:
+        return (v[0] if _n else None), None
+    _mu = sum(v) / _n
+    _sd = (sum((x - _mu) ** 2 for x in v) / (_n - 1)) ** 0.5
+    _se = _sd / (_n ** 0.5)
+    _t = _T95.get(_n - 1, min((_T95[k] for k in _T95 if k >= _n - 1),
+                              default=1.96))
+    return _mu, _t * _se
+
+
+def _line(lbl: str, hits: list, miss: list, yen: list,
+          dpairs: list | None = None, same_as_mkt: bool = False) -> None:
     """約定したぶんの滑り・実装差・**実際に取れた損益**を出す。
 
     ⛔ 実装差だけで選ぶと『1件も建てない幅』が最良になる。
@@ -210,10 +247,23 @@ def _line(lbl: str, hits: list, miss: list, yen: list) -> None:
     _impl = ((sum(hits) - sum(miss)) / _n) if _n else None
     _tot = sum(yen)
     _ROWS.append((lbl, _tot))
+    # ★ 約定bp の 95%CI は **日クラスタ**で出す(件数ではなく営業日数)。
+    _ci = "—"
+    if dpairs:
+        _dm = _daily_mean(dpairs)
+        _mu, _hw = _ci95(_dm)
+        if _mu is not None and _hw is not None:
+            _ci = f"{_mu - _hw:+.0f}〜{_mu + _hw:+.0f}"
+        elif _mu is not None:
+            _ci = "1日のみ"
+    # ⛔ 現在値より十分下の売り指値は **市場性がある**ので成行と同じ値段で
+    #   約定する。別の候補として並べると『-300 が優秀』と読んでしまう。
+    _mk = " ≡成行" if same_as_mkt else ""
     print(f"{lbl:>9}{len(hits):>5}{len(hits) / _n * 100 if _n else 0:>6.0f}%"
           f"{(f'{_hb:+.1f}' if _hb is not None else '—'):>8}"
           f"{(f'{_impl:+.1f}' if _impl is not None else '—'):>9}"
-          f"{_tot / max(len(_days), 1):>+11,.0f}{_tot:>+11,.0f}")
+          f"{_tot / max(len(_days), 1):>+11,.0f}{_tot:>+11,.0f}"
+          f"{_ci:>16}{_mk}")
 
 
 # ★★ 幅ごとの合計を貯めて、最後に **分解能** を出す (2026-09-08)。
@@ -281,7 +331,12 @@ _h = [r["mkt_bp"] for r in _recs if r["mkt_bp"] is not None]
 _m = [((r["open_p"] - r["close_p"]) / r["open_p"] * 1e4)
       for r in _recs if r["mkt_bp"] is None and r["close_p"] > 0]
 _y = [_yen_of(r["mkt_px"], r["close_p"]) for r in _recs]
-_line("成行", _h, _m, _y)
+_line("成行", _h, _m, _y,
+      dpairs=[(r["date"], r["mkt_bp"]) for r in _recs])
+# ⛔ 成行と **同じ値段で同じだけ約定した幅** に印を付ける。
+#   売り指値を現在値より十分下に置けば市場性があるので成行と一致する。
+#   別の候補として並べると『-300 が優秀』という読み違いが起きる。
+_MKT = {r["code"] + r["date"]: (r["mkt_px"] or 0) for r in _recs}
 for _bp in _BPS:
     _k = int(_bp)
     _h = [r[f"lim{_k}_bp"] for r in _recs if r.get(f"lim{_k}_hit")]
@@ -289,9 +344,21 @@ for _bp in _BPS:
           for r in _recs if not r.get(f"lim{_k}_hit") and r["close_p"] > 0]
     # 始値を基準に、下に置いたら「始値-Nbp」、上なら「始値+Nbp」
     _y = [_yen_of(r.get(f"lim{_k}_px"), r["close_p"]) for r in _recs]
+    _same = all(
+        (r.get(f"lim{_k}_px") or 0) == _MKT.get(r["code"] + r["date"], 0)
+        for r in _recs) and _k != 0
     _line(("始値" if _k == 0 else
-           (f"始値-{_k}" if _k > 0 else f"始値+{-_k}")), _h, _m, _y)
+           (f"始値-{_k}" if _k > 0 else f"始値+{-_k}")), _h, _m, _y,
+          dpairs=[(r["date"],
+                   (r.get(f"lim{_k}_bp") if r.get(f"lim{_k}_hit") else None))
+                  for r in _recs],
+          same_as_mkt=_same)
 
+print()
+print("  ⛔ **≡成行 の行は別の候補ではありません。** 売り指値を現在値より十分")
+print("     下に置けば市場性があるので、成行と同じ値段で約定します。")
+print("     『深いほど良い』ではなく『十分深い指値は成行と同じ』の確認です。")
+print("     読む価値があるのは **触るか触らないかの境目にある幅**(始値 / 始値-50)だけ。")
 print()
 _resolution()
 
