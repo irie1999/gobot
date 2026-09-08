@@ -53,6 +53,12 @@ poll ループ・遅寄り検知・OpeningPriceTime の日付チェック(§18.4
 """
 from __future__ import annotations
 
+# ⛔ Windows で `> out.txt` にリダイレクトすると stdout が cp932 になり、
+#   ⛔ ⚠ ✅ のような cp932 に無い記号で UnicodeEncodeError を出して
+#   **スクリプトごと落ちる**(2026-09-08 に kabu_ws で実際に発生)。
+#   import しただけで効く。出力の中身は変わらない。
+import console_safe  # noqa: F401
+
 import argparse
 import csv as _csv
 import datetime as _dt
