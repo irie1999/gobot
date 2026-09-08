@@ -209,10 +209,66 @@ def _line(lbl: str, hits: list, miss: list, yen: list) -> None:
     _hb = sum(hits) / len(hits) if hits else None
     _impl = ((sum(hits) - sum(miss)) / _n) if _n else None
     _tot = sum(yen)
+    _ROWS.append((lbl, _tot))
     print(f"{lbl:>9}{len(hits):>5}{len(hits) / _n * 100 if _n else 0:>6.0f}%"
           f"{(f'{_hb:+.1f}' if _hb is not None else '—'):>8}"
           f"{(f'{_impl:+.1f}' if _impl is not None else '—'):>9}"
           f"{_tot / max(len(_days), 1):>+11,.0f}{_tot:>+11,.0f}")
+
+
+# ★★ 幅ごとの合計を貯めて、最後に **分解能** を出す (2026-09-08)。
+#   これが無いと、ノイズの中の並び順を『最良の幅』として読んでしまう。
+#   実際 46件/5営業日 で -50 が 0 と -100 の間で最悪という非単調が出た。
+_ROWS: list = []
+
+
+def _resolution() -> None:
+    """この日数で **どれだけの差なら見えるか** を出す。
+
+    日ごとの損益を並べて σ を取り、営業日数で割って標準誤差にする。
+    ⛔ 件数ではなく **営業日数** で割る。同日決済は日内で強く相関するので、
+       46件を独立46件と数えると実効サンプルを数倍に誤認する(§18.13)。
+    """
+    if len(_ROWS) < 2:
+        return
+    _base = "始値"
+    _bd: dict = {}
+    for r in _recs:
+        _bd[r["date"]] = _bd.get(r["date"], 0.0) + _yen_of(
+            r.get("lim0_px"), r["close_p"])
+    _v = [_bd.get(d, 0.0) for d in _days]
+    _nd = len(_v)
+    if _nd < 2:
+        return
+    _mu = sum(_v) / _nd
+    _sd = (sum((x - _mu) ** 2 for x in _v) / (_nd - 1)) ** 0.5
+    _se = _sd / (_nd ** 0.5)
+    _mdd = 2.0 * _se * _nd            # 合計で見たときの「2SE」
+    _hi = max(_ROWS, key=lambda x: x[1])
+    _lo = min(_ROWS, key=lambda x: x[1])
+    _spread = _hi[1] - _lo[1]
+    print()
+    print(f"  ── 分解能 ({_nd}営業日 / 1日=1観測) ──")
+    print(f"     日次σ {_sd:>10,.0f}円   合計で見た 2SE ≈ {_mdd:>10,.0f}円")
+    print(f"     幅の差(最良-最悪) {_spread:>+10,.0f}円"
+          f"   ({_hi[0]} {_hi[1]:+,.0f} vs {_lo[0]} {_lo[1]:+,.0f})")
+    if _spread < _mdd:
+        print(f"     ⛔ **差は分解能より小さい。どの幅が良いかは決められません。**")
+        print(f"        並び順を『最良の幅』として読まないこと。"
+              f"見えるようになるには営業日数を増やすしかありません")
+    else:
+        print(f"     ✅ 差が 2SE を超えています。ただし **単調か**"
+              f"(深くするほど良い/悪い)を必ず確認すること。"
+              f"\n        非単調なら少数の銘柄で作られている疑いがあります")
+    # ⛔ 予算制約が入っていないことを明示する。全件建てる行は実行不可能。
+    _mx = max((sum(1 for r in _recs if r["date"] == d) for d in _days),
+              default=0)
+    _need = sum(r["open_p"] * a.qty for r in _recs
+                if r["date"] == max(_days, key=lambda d: sum(
+                    1 for r2 in _recs if r2["date"] == d))) if _days else 0
+    print(f"     ⚠ **予算制約が入っていません。** 最も多い日は {_mx}銘柄 = "
+          f"約 {_need / 1e4:,.0f}万円 必要で、実際の予算 400万では建てられません。"
+          f"\n        『約定率100%』の行は実行不可能な想定です")
 
 
 def _yen_of(px, close_p) -> float:
@@ -235,6 +291,9 @@ for _bp in _BPS:
     _y = [_yen_of(r.get(f"lim{_k}_px"), r["close_p"]) for r in _recs]
     _line(("始値" if _k == 0 else
            (f"始値-{_k}" if _k > 0 else f"始値+{-_k}")), _h, _m, _y)
+
+print()
+_resolution()
 
 print()
 print("  ⛔ **判定は『★実損益/日』で行うこと。実装差bp では選ばない。**")
