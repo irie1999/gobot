@@ -1010,6 +1010,84 @@ def _entry_stages(both: set, real_done: dict, by_sym: dict) -> dict:
     return _out
 
 
+# 両側95%の t 値。**1.96 を使わない**(営業日が10日そこそこでは広すぎる区間になる)
+_TCRIT = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447,
+          7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228, 11: 2.201, 12: 2.179,
+          13: 2.160, 14: 2.145, 15: 2.131, 16: 2.120, 17: 2.110, 18: 2.101,
+          19: 2.093, 20: 2.086, 25: 2.060, 30: 2.042}
+
+
+def _t95(df: int) -> float:
+    if df <= 0:
+        return float("nan")
+    if df in _TCRIT:
+        return _TCRIT[df]
+    return min((_TCRIT[k] for k in _TCRIT if k >= df), default=1.960)
+
+
+def _gate_block(cv: list, _f) -> None:
+    """エントリー滑りを §18.66 のゲートの形で出す。
+
+    ★ **同じ日の10件を独立10件と数えない。** lss/N は同日決済で、その日の
+      寄り後の方向を全銘柄が共有するので、実効サンプルは取引件数ではなく
+      **営業日数**(§18.13 の同日相関)。1日を1観測として平均と標準誤差を出す。
+
+    ★ **PUSH前後を混ぜない。** PUSH は待ち行列を消す = 測っている量(遅延)
+      そのものを変える。予算を 300→400万 にしたときは bp がサイズ非依存
+      なので合算できたが、今回は違う(2026-09-08)。
+    """
+    def _grp(h) -> str:
+        try:
+            return "PUSH後" if float(_f(h.get("PUSH件数"))) > 0 else "PUSH前"
+        except Exception:
+            return "PUSH前"
+
+    _rows = [(_grp(h), _f(h.get("平均エントリー滑り%")) * 100.0,
+              int(_f(h.get("突合"))))
+             for h in cv if int(_f(h.get("突合"))) > 0]
+    if not _rows:
+        return
+    print("  ★ エントリー滑り — §18.66 のゲート (日クラスタ / 1日=1観測)")
+    print(f"     {'区分':<8}{'営業日':>7}{'件数':>6}{'日次平均':>10}"
+          f"{'SE':>8}{'95%CI':>22}{'件数加重':>10}")
+    for _g in ("PUSH前", "PUSH後"):
+        _d = [(b, n) for g, b, n in _rows if g == _g]
+        if not _d:
+            print(f"     {_g:<8}{0:>7}{0:>6}{'—':>10}")
+            continue
+        _n = len(_d)
+        _m = sum(b for b, _ in _d) / _n                    # 日ごとの平均(等重み)
+        _wm = (sum(b * n for b, n in _d) / sum(n for _, n in _d))
+        if _n >= 2:
+            _var = sum((b - _m) ** 2 for b, _ in _d) / (_n - 1)
+            _se = (_var / _n) ** 0.5
+            _t = _t95(_n - 1)
+            _ci = f"{_m - _t * _se:+.1f} 〜 {_m + _t * _se:+.1f}"
+        else:
+            _se, _ci = float("nan"), "—(1日では出せない)"
+        print(f"     {_g:<8}{_n:>7}{sum(n for _, n in _d):>6}{_m:>+9.1f}bp"
+              f"{_se:>8.1f}{_ci:>22}{_wm:>+9.1f}bp")
+    # ── 判定 ────────────────────────────────────────────────────────
+    _a = [(b, n) for g, b, n in _rows if g == "PUSH後"]
+    print("     判定は **PUSH後** の行で行う"
+          "(グロス +15.7bp/件 − 呼値片道4.4bp = 遅延に使える予算 11.3bp)")
+    print("       ≥ -6bp ✅続行 / -6〜-11bp ⚠30件まで続行 / ≤ -11bp ⛔棄却")
+    if not _a:
+        print("     ▶ PUSH後 まだ0日。ここが 20件 かつ 8営業日 に達したら判定")
+    else:
+        _nd, _nb = len(_a), sum(n for _, n in _a)
+        _m = sum(b for b, _ in _a) / _nd
+        if _nd < 8 or _nb < 20:
+            print(f"     ▶ PUSH後 {_nb}件 / {_nd}営業日。"
+                  f"**20件 かつ 8営業日** まであと "
+                  f"{max(0, 20 - _nb)}件 / {max(0, 8 - _nd)}営業日")
+        else:
+            _v = ("✅ 続行" if _m >= -6 else
+                  "⚠ 30件まで続行" if _m > -11 else "⛔ 棄却")
+            print(f"     ▶ 判定点に到達。日次平均 {_m:+.1f}bp → **{_v}**")
+    print()
+
+
 def _append_slip_log(both, real_done, by_sym, ordered, r_tot, bt_tot) -> None:
     """当日の乖離を1行にして累積ログへ upsert し、2日以上あれば累計を表示する。
 
@@ -1167,6 +1245,7 @@ def _append_slip_log(both, real_done, by_sym, ordered, r_tot, bt_tot) -> None:
         print(f"  1件あたりの乖離   {d_tot / n_b:>+12,.0f}円   (突合 {n_b}件)")
     print(f"  内訳: エントリー {e_tot / n_d:>+10,.0f}円/日   決済 {x_tot / n_d:>+10,.0f}円/日")
     print()
+    _gate_block(_cv, _f)
     if n_d < 10:
         print(f"  ※ まだ {n_d}営業日。10営業日ぶん貯まるまでは判断材料になりません"
               f"(1件の外れ値で符号が反転します)")
