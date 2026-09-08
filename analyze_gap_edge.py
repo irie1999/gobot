@@ -670,6 +670,38 @@ def _scan(sym: str) -> list[dict]:
     # 過熱の窓は1日が最適か? 2日・3日も並べる(ret1 と同じく _SIDE を掛ける)
     _ret2, _ret3 = _c.pct_change(2) * 100.0, _c.pct_change(3) * 100.0
     _volr = _v / _v.rolling(20).mean().replace(0.0, float("nan"))
+    # ★★ 抵抗線 (2026-09-08 ユーザー仮説)
+    #   「過去に同じくらいの株価で同様のギャップアップがあった場合、突き抜けないで
+    #     また下がるのでは。抵抗線ができていて上がりにくい」
+    #
+    #   ⛔ **D までの日足だけ**で作る。D+1 の高安を使うと先読み。
+    #     rolling(60).max() の位置 pos は [pos-59, pos] = D を含む直近60日で、
+    #     D の引けで確定している(前夜に分かる)。shift は要らない。
+    #   ★ ショートは **上の抵抗**(60日高値)、ロング(鏡像)は **下の支持**
+    #     (60日安値)を見る。gap_hi_bp と同じ扱い。
+    _bar60 = (_h.rolling(60).max() if _SIDE > 0 else _l.rolling(60).min())
+    _bar120 = (_h.rolling(120).max() if _SIDE > 0 else _l.rolling(120).min())
+    # touch120 = 直近120日で **終値が始値±1.5% の帯に入った日数**。
+    #   よく通る価格 = 出来高が溜まっている = 戻り売りが待っている、という仮説。
+    #   ⚠ 帯の中心は **その行の始値(D+1)** なので銘柄ごとの1本の系列にできない。
+    #     行ごとに120日を数えると 2.4M行 x 120 で遅すぎるので、
+    #     sliding_window_view で一度に作る(コピーは (n-120) x 120 の1枚だけ)。
+    _TW, _TB = 120, 0.015
+    _touch = pd.Series(float("nan"), index=df.index)
+    try:
+        _cv = _c.to_numpy(dtype=float)
+        _ov = df["open"].to_numpy(dtype=float)
+        if len(_cv) >= _TW + 1:
+            _win = np.lib.stride_tricks.sliding_window_view(_cv, _TW)
+            # 行 pos は close[pos-119 : pos+1] = _win[pos-119] を見て、
+            # 帯の中心は o1 = open[pos+1]
+            _pp = np.arange(_TW - 1, len(_cv) - 1)
+            _o1a = _ov[_pp + 1]
+            with np.errstate(invalid="ignore", divide="ignore"):
+                _hit = np.abs(_win[_pp - (_TW - 1)] / _o1a[:, None] - 1.0) <= _TB
+            _touch.iloc[_pp] = _hit.sum(axis=1).astype(float)
+    except Exception:
+        pass                              # 作れなければ列は NaN = その軸は使わない
     # ★★ β = 日経が日中 +1% のとき この銘柄が日中 何% 動くか(2026-09-06)。
     #   N は **日中しか持たない**ので、終値どうしではなく **始値→終値** で測る。
     #   ⛔ 先読みではない: D の日中リターンは D の引けで確定 = 前夜に分かる。
@@ -774,6 +806,14 @@ def _scan(sym: str) -> list[dict]:
             "gap_hi_bp": (lambda _r: None if _r is None or _r <= 0 else
                           (o1 - _r) / _r * 10_000.0 * _SIDE)(
                 _fv(df["high"] if _SIDE > 0 else df["low"], pos)),
+            # ── 抵抗線(D時点で確定) ──
+            #   **正 = まだ抵抗の手前**(ショートなら60日高値の下)。
+            #   負 = 抜けた = ブレイクアウト。
+            "res60_bp": (lambda _r: None if _r is None or _r <= 0 else
+                         (_r - o1) / o1 * 10_000.0 * _SIDE)(_fv(_bar60, pos)),
+            "res120_bp": (lambda _r: None if _r is None or _r <= 0 else
+                          (_r - o1) / o1 * 10_000.0 * _SIDE)(_fv(_bar120, pos)),
+            "touch120": _fv(_touch, pos),
             "up_streak": _fv(_streak, pos),
             "vol_ratio": _fv(_volr, pos),
             "dow": float(d1.dayofweek),
@@ -792,6 +832,9 @@ AXES = {
     "ret5":      "5日リターン%",
     "ret20":     "20日リターン%",
     "gap_hi_bp": "前日**高値**からのギャップbp(前日終値だけでなく高値も抜けたか)",
+    "res60_bp":  "60日高値までの余地bp(正=まだ高値の下=上に抵抗)",
+    "res120_bp": "120日高値までの余地bp(同上の長い窓)",
+    "touch120":  "同じ価格帯を通った日数(120日/±1.5%)",
     "up_streak": "連続上昇日数",
     "vol_ratio": "出来高比(D/20日平均)",
     "entry_p":   "建値",
@@ -1175,6 +1218,10 @@ if _NEEDS_TRAIN:
 
 # ⛔ watch の並べ替えに使えるのは **D 時点で確定する列だけ**。
 #   D+1 の始値から作る列(gap_bp / entry_p / gap_hi_bp / pnl)は先読み。
+#   ⚠ res60_bp / res120_bp / touch120 も **ここには入れない**。素材(60日高値・
+#     過去の終値)は D で確定しているが、どれも **始値との距離**なので値が
+#     決まるのは 09:00。選別軸(--explore/--confirm)には使えるが、
+#     「前夜にどの50件を登録するか」には使えない。
 _WATCH_OK = ("liq", "ret1", "ret2", "ret3", "ret5", "ret20",
              "atr_pct", "range_pos")
 
