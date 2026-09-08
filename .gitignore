@@ -7,3 +7,7 @@ watchlist_*.html
 candidates_*.csv
 report_combined_*.html
 result_summary_*.txt
+youtube_tips_data/
+youtube_tips_*.html
+youtube_tips.log
+.youtube_tips_price_cache/
