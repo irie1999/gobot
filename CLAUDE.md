@@ -694,7 +694,7 @@ tips_track.py        30日/90日後の騰落率で答え合わせ → 発信者�
 | `tips_extract.py` | LLM 抽出・スキーマ検証・信頼度ルーブリック・相互チェック |
 | `symbol_lookup.py` | 企業名 ⇄ 証券コードの名寄せ (推測でコードを作らせない) |
 | `tips_track.py` | 事後検証・発信者実績 (時点情報) |
-| `test_youtube_tips.py` | 自己テスト 195 チェック (ネットワーク・pandas・LLM 不要、Windows/macOS/Linux 共通)。**改修したら必ず実行** |
+| `test_youtube_tips.py` | 自己テスト 200 チェック (ネットワーク・pandas・LLM 不要、Windows/macOS/Linux 共通)。**改修したら必ず実行** |
 
 データは `youtube_tips_data/` 配下 (gitignore 済み):
 `transcripts/` (字幕キャッシュ)、`manual/` (手動取込)、`youtube_tips.jsonl` (全レコード)、
@@ -718,7 +718,10 @@ YouTube 公式 Data API の `captions.download` は **自分が編集権限を�
   `youtube_tips_data/manual/<video_id>.txt` に置く経路。**第三者動画では第一候補。**
   取込は `python yt_transcript.py --import <video_id> --from copied.txt`
   (`<video_id>.json` を置けばタイトル等のメタも補える)
-- `ytdlp` / `api` — オプトイン時のみ
+- `ytdlp` / `api` — オプトイン時のみ。YouTube の仕様変更で字幕が落とせないときは
+  `--ytdlp-args` / 環境変数 `YT_DLP_ARGS` で yt-dlp に引数を足せる
+  (例: `--cookies-from-browser edge` / `--extractor-args youtube:player_client=web_safari,default`)。
+  失敗理由は stderr の ERROR 行を拾って表示し、bot 判定や 403 には対処のヒントを添える
 
 **新着検知だけは公式 RSS (`feeds/videos.xml?channel_id=UC...`) が使える**ので、
 `youtube_sources.py` では `feed` キー (チャンネルID) を推奨。公開時刻まで取れるため

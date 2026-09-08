@@ -1071,6 +1071,9 @@ def main() -> None:
                     help="採用基準 (具体的な売買条件がある動画) を満たすものだけ表に出す")
     ap.add_argument("--match-signals", action="store_true",
                     help="gobot の当日シグナルと照合する (株価取得あり)")
+    ap.add_argument("--ytdlp-args", default="",
+                    help='yt-dlp への追加引数。字幕が落とせないときの逃げ道 '
+                         '(例: "--cookies-from-browser edge")')
     ap.add_argument("--allow-unofficial", action="store_true",
                     help="yt-dlp / youtube-transcript-api を有効化 (既定は手動取込のみ)")
     ap.add_argument("--force", action="store_true", help="処理済み動画も再抽出")
@@ -1086,6 +1089,8 @@ def main() -> None:
 
     if args.llm_cmd:
         os.environ["TIPS_LLM_CMD"] = args.llm_cmd
+    if args.ytdlp_args:
+        os.environ["YT_DLP_ARGS"] = args.ytdlp_args
     if args.allow_unofficial:
         _yt.allow_unofficial()
 

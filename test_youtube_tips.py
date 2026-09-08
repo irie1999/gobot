@@ -25,6 +25,7 @@ Windows / macOS / Linux のいずれでも同じ内容が走る (外部シェル
  16. 静的チェック    … undefined name (関数の消し忘れ等) が無いか ※pyflakes 任意
  17. 採用基準        … 材料として使える動画だけを通し、除外理由を残せるか
  18. テーマ収集      … --theme のソース定義と --topic の絞り込み
+ 19. yt-dlp 引数     … 追加引数の受け渡しとエラー表示
 """
 
 from __future__ import annotations
@@ -953,6 +954,29 @@ def test_curation() -> None:
 
 
 # ── 18. テーマ収集 / トピック絞り込み ────────────────────────────────
+def test_ytdlp_options() -> None:
+    print("19. yt-dlp の追加引数とエラー表示")
+    import subprocess
+
+    os.environ["YT_DLP_ARGS"] = '--cookies-from-browser edge --sleep-requests 1'
+    check("追加引数を配列で渡す",
+          yt.ytdlp_extra() == ["--cookies-from-browser", "edge", "--sleep-requests", "1"],
+          yt.ytdlp_extra())
+    os.environ.pop("YT_DLP_ARGS", None)
+    check("未設定なら空", yt.ytdlp_extra() == [])
+
+    p = subprocess.CompletedProcess([], 1, "", "WARNING: noise\n"
+                                    "ERROR: unable to download webpage: HTTP Error 403")
+    msg = yt._ytdlp_error(p)
+    check("ERROR 行を拾う", "HTTP Error 403" in msg, msg)
+    check("対処のヒントを添える", "yt-dlp" in msg or "player_client" in msg, msg)
+
+    p2 = subprocess.CompletedProcess([], 1, "", "ERROR: Sign in to confirm you're not a bot")
+    check("bot 判定にはクッキーを案内",
+          "cookies-from-browser" in yt._ytdlp_error(p2), yt._ytdlp_error(p2))
+    check("切り詰めても原因が読める長さ", len(yt._ytdlp_error(p)) > 40)
+
+
 def test_theme_topic() -> None:
     print("18. テーマ収集 (--theme) と絞り込み (--topic)")
     import youtube_sources as src
@@ -1001,7 +1025,8 @@ def main() -> int:
                test_entry_reference, test_point_in_time, test_symbol_lookup,
                test_providers, test_isolation, test_fallback_marking,
                test_stats_exclusion, test_windows_console, test_integration_jsonl,
-               test_static_check, test_curation, test_theme_topic):
+               test_static_check, test_curation, test_theme_topic,
+               test_ytdlp_options):
         fn()
     print()
     if _fails:

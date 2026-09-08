@@ -53,6 +53,7 @@ import argparse
 import json
 import re
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -84,6 +85,34 @@ def ytdlp_cmd() -> list[str]:
             "yt-dlp が見つかりません。`pip install -U yt-dlp` を実行してください。")
 
 
+def ytdlp_extra() -> list[str]:
+    """
+    yt-dlp へ渡す追加引数 (環境変数 YT_DLP_ARGS / --ytdlp-args)。
+
+    YouTube 側の仕様変更で字幕が落とせないときの逃げ道。よく使うもの:
+      --cookies-from-browser edge      … ログイン状態を使う (bot 判定回避)
+      --extractor-args "youtube:player_client=web_safari,default"
+      --sleep-requests 1               … 連続アクセスを緩める
+    """
+    raw = os.environ.get("YT_DLP_ARGS", "").strip()
+    return shlex.split(raw) if raw else []
+
+
+def _ytdlp_error(p: subprocess.CompletedProcess) -> str:
+    """yt-dlp の stderr から ERROR 行を優先して取り出す (原因が分かる長さで返す)。"""
+    lines = [ln.strip() for ln in (p.stderr or "").splitlines() if ln.strip()]
+    errs  = [ln for ln in lines if ln.startswith("ERROR:")] or lines[-2:]
+    msg   = " / ".join(errs[-2:])[:500]
+    low   = msg.lower()
+    if "sign in" in low or "bot" in low or "cookies" in low:
+        msg += ("  → ブラウザのログイン情報が要る可能性: "
+                'YT_DLP_ARGS="--cookies-from-browser edge" を設定して再実行')
+    elif "unable to download" in low or "403" in low or "precondition" in low:
+        msg += ("  → yt-dlp の更新を試す (pip install -U --pre yt-dlp) / "
+                'YT_DLP_ARGS="--extractor-args youtube:player_client=web_safari,default"')
+    return msg
+
+
 def _run(cmd: list[str], timeout: int = YTDLP_TIMEOUT) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True,
                           timeout=timeout, encoding="utf-8", errors="replace")
@@ -103,11 +132,11 @@ def list_videos(source_url: str, limit: int = 10) -> list[dict]:
     cmd = ytdlp_cmd() + [
         "--flat-playlist", "--dump-single-json",
         "--playlist-end", str(limit),
-        "--no-warnings", source_url,
-    ]
+        "--no-warnings",
+    ] + ytdlp_extra() + [source_url]
     p = _run(cmd)
     if p.returncode != 0:
-        raise RuntimeError(f"yt-dlp 一覧取得に失敗: {p.stderr.strip()[:300]}")
+        raise RuntimeError(f"yt-dlp 一覧取得に失敗: {_ytdlp_error(p)}")
 
     data    = json.loads(p.stdout)
     entries = data.get("entries") or ([data] if data.get("id") else [])
@@ -237,12 +266,11 @@ def _fetch_via_ytdlp(video_id: str) -> dict | None:
             "--write-info-json",
             "--no-warnings",
             "-o", str(work / "%(id)s.%(ext)s"),
-            url,
-        ]
+        ] + ytdlp_extra() + [url]
         p = _run(cmd)
         info_f = work / f"{video_id}.info.json"
         if not info_f.exists():
-            raise RuntimeError(f"yt-dlp 取得失敗 ({video_id}): {p.stderr.strip()[:300]}")
+            raise RuntimeError(f"yt-dlp 取得失敗 ({video_id}): {_ytdlp_error(p)}")
         info = json.loads(info_f.read_text(encoding="utf-8"))
 
         sub_f, lang = _pick_sub_file(work, video_id)
@@ -527,9 +555,13 @@ def main() -> None:
     ap.add_argument("--parse-vtt", metavar="FILE", help="ローカル VTT をパースして表示")
     ap.add_argument("--limit", type=int, default=10)
     ap.add_argument("--no-cache", action="store_true")
+    ap.add_argument("--ytdlp-args", default="",
+                    help='yt-dlp への追加引数 (例: "--cookies-from-browser edge")')
     ap.add_argument("--allow-unofficial", action="store_true",
                     help="yt-dlp / youtube-transcript-api を有効化 (既定は manual のみ)")
     a = ap.parse_args()
+    if a.ytdlp_args:
+        os.environ["YT_DLP_ARGS"] = a.ytdlp_args
     if a.allow_unofficial:
         allow_unofficial()
 
