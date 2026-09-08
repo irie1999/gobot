@@ -1826,7 +1826,10 @@ if a.sweep_wall:
     print(f"        予算制約下では何も得られない(§18.28)")
     _base_w = _WW[0]
     print(f"     基準 = watch {_base_w or '無制限'}(現行)。差はそこからの増分")
-    _ok_all = True
+    # ⛔ **watch ごとに判定する。** 初版は全セルをまとめて1つの旗にしていたが、
+    #   選ぶのは watch の水準なので、100 が落ちたことを理由に 150 を落とすのは
+    #   誤り(2026-09-08 に実際に誤表示した)。
+    _ok_w: dict = {}
     for _o, _ol in _WORD:
         print(f"\n     {_ol}")
         print(f"       {'watch':>7}{'差(月)':>13}{'円/件':>10}"
@@ -1837,15 +1840,32 @@ if a.sweep_wall:
             _d2 = (_cell[(2, _w, _o)]["月平均"] - _cell[(2, _base_w, _o)]["月平均"])
             _pr = (_cell[(0, _w, _o)]["per"] - _cell[(0, _base_w, _o)]["per"])
             _sg = "✓" if (_d1 > 0) == (_d2 > 0) else "✗"
-            if _sg == "✗" or _d0 <= 0:
-                _ok_all = False
+            _ok_w.setdefault(_w, []).append(
+                (_sg == "✓" and _d0 > 0, _d0, _d1, _d2))
             print(f"       {(_w or '無制限'):>7}{_d0:>+13,.0f}{_pr:>+10,.0f}"
                   f"{_d1:>+13,.0f}{_d2:>+13,.0f}{_sg:>6}")
-    print(f"\n     ▶ 3つの順序すべてで 差>0 かつ 前半・後半が同符号(✓) なら、")
-    print(f"       壁を壊す価値がある = **TEST に進んでよい**")
+    print(f"\n     ▶ **watch ごとに**、3つの順序すべてで 差>0 かつ 前半・後半が")
+    print(f"       同符号(✓) なら、その水準は TEST に進んでよい")
     print(f"     ▶ gap(楽観)だけ勝って gapasc(悲観)が負けるなら、")
-    print(f"       その +76% は **発注順が作っている**(§18.70 ④ の再現)")
-    print(f"     {'✅ 全セル通過(差>0 かつ 前半後半が同符号)' if _ok_all else '⛔ どこかで落ちた(上の表の ✗ と 差<=0 を見る)'}")
+    print(f"       その差は **発注順が作っている**(§18.70 ④ の再現)")
+    print()
+    for _w in _WW[1:]:
+        _r = _ok_w.get(_w, [])
+        _pass = bool(_r) and all(x[0] for x in _r)
+        _mn = min((x[1] for x in _r), default=0.0)
+        _h1 = min((x[2] for x in _r), default=0.0)
+        print(f"     watch {(_w or '無制限'):>6}: "
+              + ("✅ 3順序すべて通過" if _pass else "⛔ 落ちた")
+              + f"  最小の差 {_mn:+,.0f}円/月")
+        if _pass:
+            # ⚠ 通っても **前半が小さすぎる**なら、実質「後半だけ」で
+            #   効いている。符号は揃うので ✓ になるが、それは期間依存の
+            #   弱い形。§18.36 判定ルール2 の趣旨はここまで見て初めて満たす。
+            _wk = [x for x in _r if abs(x[3]) > 0 and abs(x[2]) < abs(x[3]) / 5]
+            if _wk:
+                print(f"       ⚠ ただし **前半の増分が後半の1/5未満**"
+                      f"(前半 最小 {_h1:+,.0f}円/月)。符号は揃うが、"
+                      f"実質 後半だけで効いている")
     print(f"  {'=' * 68}")
     sys.exit(0)
 
