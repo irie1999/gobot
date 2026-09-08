@@ -1,20 +1,23 @@
 """fetch_jquants_extra.py — lss対策に効く J-Quants 追加データを一括取得して CSV 保存。
 
+⛔⛔ **この一覧は DATASETS からコピーしないこと。** 2026-09-08 まで
+   ここに書いてある名前(short_positions / daily_margin / announcement /
+   listed_info / trades_spec …)が **DATASETS に1つも存在せず**、
+   使用例のとおりに打つと「未知の対象」で黙ってスキップされていた。
+   名前は下の `--list` で **実装から**出す。ここには書かない。
+
 取得対象(プランで可否):
-  short_positions : 空売り残高報告(銘柄別)   … 踏み上げ/squeeze 回避の主役
-  daily_margin    : 信用残高 日次(銘柄別)     … 売残過多=踏み上げ/逆日歩リスク
-  weekly_margin   : 信用残高 週次(銘柄別)
-  short_selling   : 業種別 空売り比率         … ショート過熱=レジーム検知
-  announcement    : 決算発表予定日            … 決算またぎ空売り回避(イベントリスク)
-  listed_info     : 銘柄マスタ(貸借区分/業種) … 空売り可否・業種分散
-  calendar        : 営業日カレンダー          … 祝日考慮
-  trades_spec     : 投資部門別売買            … 外国人/個人フロー
-  breakdown       : 売買内訳
+  python fetch_jquants_extra.py --list      ← **正しい名前はこれで出す**
+
+  ざっくり: 空売り残高 / 信用残高(日次・週次) / 業種別空売り比率 /
+            決算発表予定日 / 決算短信 / 銘柄マスタ / 業種 / 営業日カレンダー /
+            投資部門別売買 / 売買内訳
 
 使い方(あなたの機械・.env 設定済み):
+  python fetch_jquants_extra.py --list                # 使える名前を出す
   python fetch_jquants_extra.py                       # 全部・約2年
   python fetch_jquants_extra.py --days 760
-  python fetch_jquants_extra.py --only short_positions,daily_margin,announcement
+  python fetch_jquants_extra.py --only statements,earnings_cal,master
   python fetch_jquants_extra.py --out-dir jquants_extra
 
 各データは <out-dir>/<name>.csv に保存。エラー(プラン未契約/引数違い)は個別にスキップして続行。
@@ -80,6 +83,9 @@ ap = argparse.ArgumentParser(description="lss対策用 J-Quants 追加データ�
 ap.add_argument("--days", type=int, default=760, help="遡及日数(既定760≒2年)")
 ap.add_argument("--only", type=str, default="", help="取得対象をカンマ区切りで限定(既定=全部)")
 ap.add_argument("--out-dir", type=str, default="jquants_extra", help="CSV出力フォルダ")
+ap.add_argument("--list", action="store_true",
+                help="★ --only に渡せる **対象の名前を実装から** 出して終了。"
+                     "docstring と食い違っても、こちらが正")
 ap.add_argument("--list-methods", action="store_true",
                 help="★ クライアントの **実在メソッドを全部** 出して終了。\n                     版によって名前が変わるので、詰まったらまずこれ")
 # ── どの項目がどのプランか (2026-08-28 時点) ────────────────────────
@@ -149,6 +155,14 @@ def main():
     start = now - timedelta(days=args.days)
     targets = ([x.strip() for x in args.only.split(",") if x.strip()]
                if args.only else list(DATASETS))
+    if args.list:
+        # ⛔ **実装から出す。** docstring に書くと必ず食い違う(2026-09-08)。
+        print(f"[--only に渡せる名前] {len(DATASETS)}個\n")
+        for _k in sorted(DATASETS):
+            print(f"    {_k:<20} 先に試すメソッド: {DATASETS[_k][0]}")
+        print("\n  例: python fetch_jquants_extra.py "
+              "--only statements,earnings_cal,master")
+        return
     cli = get_client()
     if args.list_methods:
         # ★ 版で名前が変わるので、実在するものを丸ごと出す。
@@ -167,7 +181,16 @@ def main():
     for name in targets:
         cands = DATASETS.get(name)
         if not cands:
-            print(f"  [skip] {name}: 未知の対象", flush=True)
+            # ⛔ 名前を出さないと「打ったのに何も起きない」で終わる。
+            #   2026-09-08 に docstring の古い名前(announcement / listed_info)を
+            #   そのまま打って2つとも黙ってスキップされた。
+            print(f"  [skip] {name}: **そんな対象はありません**", flush=True)
+            print(f"         使えるのは: {', '.join(sorted(DATASETS))}",
+                  flush=True)
+            import difflib as _dl
+            _near = _dl.get_close_matches(name, list(DATASETS), n=2, cutoff=0.4)
+            if _near:
+                print(f"         もしかして: {' / '.join(_near)}", flush=True)
             continue
         if isinstance(cands, str):
             cands = [cands]
