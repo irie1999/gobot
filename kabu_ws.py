@@ -78,6 +78,9 @@ class BoardStream:
         #   その間のメッセージを取りこぼす。**落ちていること自体が設計上の
         #   問題**なので必ず数える(実測で毎バッチ落ちていた)。
         self.n_reconnect = 0
+        # ⛔ 切れた理由を残す。2026-09-09 は6回切れたのに手掛かりが無かった。
+        self.n_err = 0
+        self.last_close: tuple = (None, None)
         # 銘柄ごとに「始値が初めて 0 でなくなった時刻」。REST の到着時刻と
         # 突き合わせて、PUSH が何秒速かったかを実測するために使う。
         self.open_seen: dict[str, str] = {}
@@ -135,11 +138,26 @@ class BoardStream:
                         pass
 
         def _on_err(_w, _e):
-            self.err = str(_e)
+            # ⛔ 理由を捨てない。2026-09-09 に 09:00〜09:03 で 6回 切れたのに、
+            #   なぜ切れたのかが1行も残っていなかった。
+            self.err = f"{type(_e).__name__}: {_e}"
+            self.n_err += 1
             self.connected = False
+            if self.verbose:
+                print(f"  [ws] ⚠ エラー: {self.err}", flush=True)
 
         def _on_close(_w, *_a):
+            # websocket-client の版で引数が (status, msg) だったり無かったりする
+            _st = _a[0] if len(_a) >= 1 else None
+            _msg = _a[1] if len(_a) >= 2 else None
+            self.last_close = (_st, _msg)
             self.connected = False
+            if self.verbose:
+                _up = (f"{_time.time() - self.t_connect:.0f}秒後"
+                       if self.t_connect > 0 else "")
+                print(f"  [ws] ⚠ 切断 {_up} (code={_st} msg={_msg}"
+                      + (f" / 直前のエラー {self.err}" if self.err else "")
+                      + ")", flush=True)
 
         self._ws = _wsmod.WebSocketApp(
             self.url, on_open=_on_open, on_message=_on_msg,

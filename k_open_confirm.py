@@ -1637,7 +1637,13 @@ def _read_all(tag: str) -> dict:
         #   ⚠ 「届いている」の判定は _open_today なので、前日の始値を掴んだ
         #      銘柄は **省かれない**(REST で読み直す)。
         _rest = list(_b)
-        if _WS is not None and _WS.ok:
+        # ⛔ **接続が切れていてもキャッシュは使う**(2026-09-09 に修正)。
+        #   始値は一度ついたら動かないので、受け取り済みの値は切断しても有効。
+        #   `_WS.ok`(接続中)を条件にしていたため、再接続のたびに 40銘柄の
+        #   REST 全件読み(4.6秒)と 429 のバーストが走っていた。実測で
+        #   09:00〜09:03 に 6回。日付は下の `_open_today` が見るので、
+        #   前日の値が紛れ込むことはない。
+        if _WS is not None:
             _snap = _WS.snapshot()
             _rest = []
             for _s in _b:
@@ -1674,7 +1680,8 @@ def _read_all(tag: str) -> dict:
     print(f"  [{tag}] {len(_out):,}/{len(_syms):,}銘柄 を {_el:.1f}秒 で取得"
           f" ({len(_out) / max(0.1, _el):.1f}件/秒 / 登録 {_n_reg}回"
           + (f" / **PUSH {_n_ws}件** HTTP {len(_syms) - _n_ws}件"
-             if _WS is not None and _WS.ok else "") + ")",
+             + ("" if _WS.ok else " ⚠切断中(キャッシュ使用)")
+             if _WS is not None else "") + ")",
           flush=True)
     return _out
 
@@ -2254,7 +2261,12 @@ if args.execute:
                   flush=True)
     # ★ 損切りの武装の起点(.lss_watcher_seen.json)は、発注が通るたびに
     #   _seed_arm() が書いている。ここでは書けているかを確認するだけ。
-    if _EX["n"]:
+    # ⛔ N はバリアを持たない(§18.55: 損切りも利確も置かない / 決済は引けMOCだけ)。
+    #   武装時刻は watcher の損切りの起点なので、N では意味を持たない。
+    #   2026-09-09 に「無保護窓が最大10分伸びます」と出したが、N には
+    #   そもそも保護が無いので誤解を招くだけだった。J のときだけ出す。
+    #   (バナーの +300bp ガード・保護指値に続く、J の文言が N に漏れた3件目)
+    if _EX["n"] and not args.n_mode:
         try:
             import json as _json
             _sp = Path(__file__).resolve().parent / ".lss_watcher_seen.json"
