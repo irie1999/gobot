@@ -32,6 +32,7 @@ import console_safe  # noqa: F401
 import argparse
 import csv as _csv
 import os
+import re
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -457,9 +458,203 @@ def main():
             w.writerows(rows)
         print(f"\n[出力] {args.csv}")
 
+    # ── ③' N のエントリー計測 (突合とは無関係に必ず走る) ───────────────────
+    #   ⛔ 2026-09-09 に発覚: 3段分解もゲートも `_compare_with_backtest` の中に
+    #     置いていたので、毎日の `.\fills --no-compare` では **一度も走って
+    #     いなかった**。N の測定にテスト側の母集団は要らない(「テストの建値」=
+    #     その日の始値で、n_quotes に入っている)。J の経路にぶら下げたのが誤り。
+    _n_entry_report(rows, order_rows)
+
     # ── ③ バックテスト(レポート)の同日取引と突合 ───────────────────────────
     if not args.no_compare:
         _compare_with_backtest(rows, order_rows)
+
+
+def _n_entry_report(rows: list, order_rows: list) -> None:
+    """N のエントリーを `n_quotes_<日付>.csv` だけで測り、日次ログに貯める。
+
+    測るもの(すべて突合なしで出せる):
+      検知遅れ  = 板を見た時刻 − 寄り時刻      … **PUSH の効果はここに出る**
+      段1       = 検知時の板(bid) − 始値        … 待ち行列のコスト
+      段2       = 実約定 − 検知時の板(bid)      … 注文〜約定のコスト
+      合計      = 実約定 − 始値 = エントリー滑り … 段1 + 段2(恒等式・検算する)
+
+    ⛔ 滑りは **PUSH の効果ではない**。遅れが有利に出るか不利に出るかは
+       銘柄の動き次第(§18.44 の実測で 60〜71%が不利側)。PUSH を測るのは
+       **検知遅れ**のほう。混同しないこと。
+    """
+    _p = Path(f"n_quotes_{_DATE_DIG}.csv")
+    if not _p.exists():
+        return
+
+    def _num(v) -> float:
+        try:
+            return float(str(v).replace(",", "").strip() or 0)
+        except ValueError:
+            return 0.0
+
+    def _sec(hms: str):
+        """'09:03:00.123' / '2026-09-09T09:03:00+09:00' → 秒。取れなければ None。"""
+        _m = re.search(r"(\d{2}):(\d{2}):(\d{2})(\.\d+)?", str(hms or ""))
+        if not _m:
+            return None
+        return (int(_m.group(1)) * 3600 + int(_m.group(2)) * 60
+                + int(_m.group(3)) + float(_m.group(4) or 0))
+
+    # 銘柄ごとに **最初に寄りを検知した行**(以降の行は値が動いている)
+    _first: dict = {}
+    _push = _http = 0
+    try:
+        with open(_p, encoding="utf-8-sig", newline="") as f:
+            for r0 in _csv.DictReader(f):
+                _s = str(r0.get("symbol") or "").strip()
+                if not _s or _s in _first or _num(r0.get("open_p")) <= 0:
+                    continue
+                _first[_s] = r0
+                if str(r0.get("req_ts") or "").strip() == "push":
+                    _push += 1
+                else:
+                    _http += 1
+    except Exception as e:                                       # noqa: BLE001
+        print(f"\n[!] {_p.name} を読めませんでした: {e}")
+        return
+    if not _first:
+        return
+
+    # ── 検知遅れ。**発注の有無に関係なく、寄った全銘柄で測れる** ──────────
+    _lags = []
+    for _s, _q in _first.items():
+        _o, _d = _sec(_q.get("open_time")), _sec(_q.get("resp_ts"))
+        if _o is not None and _d is not None and 0 <= _d - _o < 3600:
+            _lags.append((_d - _o, str(_q.get("req_ts") or "").strip() == "push"))
+    print()
+    print("=" * 78)
+    print(f"=== N のエントリー計測 ({_p.name} / {len(_first)}銘柄が寄った) ===")
+    if _lags:
+        _v = sorted(x[0] for x in _lags)
+        _pv = sorted(x[0] for x in _lags if x[1])
+        _hv = sorted(x[0] for x in _lags if not x[1])
+
+        def _q50(a):
+            return a[len(a) // 2] if a else float("nan")
+        print(f"  ★ 検知遅れ (寄り → 板を見た) — **PUSH の効果はここに出る**")
+        print(f"     全体   {len(_v):>3}件  中央 {_q50(_v):>6.1f}秒  "
+              f"最大 {_v[-1]:>6.1f}秒")
+        if _pv:
+            print(f"     PUSH   {len(_pv):>3}件  中央 {_q50(_pv):>6.1f}秒  "
+                  f"最大 {_pv[-1]:>6.1f}秒")
+        if _hv:
+            print(f"     HTTP   {len(_hv):>3}件  中央 {_q50(_hv):>6.1f}秒  "
+                  f"最大 {_hv[-1]:>6.1f}秒")
+    else:
+        print("  ⚠ 寄り時刻か検知時刻が読めず、検知遅れを出せません")
+    print(f"     PUSH {_push}件 / HTTP {_http}件")
+
+    # ── 段1 / 段2。**約定した銘柄だけ**(段2に実約定価格が要る) ────────────
+    _s1, _s2, _tot, _chk, _det = [], [], [], [], []
+    for r in rows:
+        _s = str(r.get("symbol") or "").strip()
+        _q = _first.get(_s) or _first.get(_s.replace(".T", ""))
+        if not _q:
+            continue
+        _op = _num(_q.get("open_p"))
+        # ⛔ 売る側が当たるのは **最良買い気配(bid)**。無いときだけ現在値
+        _bd = _num(_q.get("bid")) or _num(_q.get("current_price"))
+        _real = _num(r.get("entry(売)"))
+        if _op <= 0 or _bd <= 0 or _real <= 0:
+            continue
+        _a = (_bd - _op) / _op * 1e4
+        _b = (_real - _bd) / _op * 1e4
+        _t = (_real - _op) / _op * 1e4
+        _s1.append(_a); _s2.append(_b); _tot.append(_t)
+        _chk.append(_a + _b - _t)
+        _det.append((_s, _a, _b, _t))
+    if _s1:
+        _n = len(_s1)
+        print()
+        print(f"  ── エントリー滑りの内訳 ({_n}件 / 約定したぶんだけ) ──")
+        print(f"     {'銘柄':<8}{'段1 待ち行列':>14}{'段2 注文〜約定':>16}{'合計':>10}")
+        for _s, _a, _b, _t in _det:
+            print(f"     {_s:<8}{_a:>+13.1f}bp{_b:>+15.1f}bp{_t:>+9.1f}bp")
+        print(f"     {'平均':<8}{sum(_s1)/_n:>+13.1f}bp"
+              f"{sum(_s2)/_n:>+15.1f}bp{sum(_tot)/_n:>+9.1f}bp")
+        _c = sum(_chk) / _n
+        if abs(_c) > 0.01:
+            print(f"     ⛔ 検算が合いません(段1+段2 − 合計 = {_c:+.3f}bp)")
+        print(f"     ⚠ 合計(=エントリー滑り)は **PUSH の効果ではない**。"
+              f"遅れが有利に出たか不利に出たかで、60〜71%は不利側(§18.44)")
+    else:
+        print("\n  (約定が無いので段1/段2は出ません。検知遅れは上のとおり)")
+
+    # ── 日次ログ。ゲート(§18.66)はここから読む ────────────────────────────
+    _ymd = (f"{_DATE_DIG[:4]}-{_DATE_DIG[4:6]}-{_DATE_DIG[6:8]}"
+            if len(_DATE_DIG) == 8 else str(_DATE))
+    _row = {
+        "date": _ymd,
+        "寄った銘柄": len(_first),
+        "PUSH件数": _push, "HTTP件数": _http,
+        "検知遅れ中央秒": (round(sorted(x[0] for x in _lags)[len(_lags) // 2], 2)
+                           if _lags else ""),
+        "約定": len(_s1),
+        "発注": sum(1 for o in order_rows if str(o.get("side") or "") == "売"),
+        "段1bp": round(sum(_s1) / len(_s1), 1) if _s1 else "",
+        "段2bp": round(sum(_s2) / len(_s2), 1) if _s2 else "",
+        "エントリー滑りbp": round(sum(_tot) / len(_tot), 1) if _tot else "",
+    }
+    _lp = Path("n_entry_log.csv")
+    _hist: dict = {}
+    if _lp.exists():
+        try:
+            with open(_lp, encoding="utf-8-sig", newline="") as f:
+                for r0 in _csv.DictReader(f):
+                    if r0.get("date"):
+                        _hist[r0["date"]] = r0
+        except Exception:
+            _hist = {}
+    _hist[_ymd] = _row            # 同じ日を再実行したら上書き(重複しない)
+    try:
+        with open(_lp, "w", encoding="utf-8-sig", newline="") as f:
+            w = _csv.DictWriter(f, fieldnames=list(_row), extrasaction="ignore")
+            w.writeheader()
+            for d in sorted(_hist):
+                w.writerow(_hist[d])
+        print(f"\n  → {_lp.name} ({len(_hist)}営業日)")
+    except Exception as e:                                       # noqa: BLE001
+        print(f"\n[!] {_lp.name} を書けませんでした: {e}")
+        return
+
+    # ── ゲート (§18.66)。**1日=1観測**で数える ────────────────────────────
+    _ok = [(d, h) for d, h in sorted(_hist.items())
+           if str(h.get("エントリー滑りbp") or "") != ""
+           and int(_f0(h.get("PUSH件数"))) > 0]
+    _nb = sum(int(_f0(h.get("約定"))) for _, h in _ok)
+    _nd = len(_ok)
+    print(f"  ★ §18.66 ゲート(PUSH後) — **{_nb}件 / {_nd}営業日**"
+          f"(目標 20件 かつ 8営業日)")
+    if _nd >= 2:
+        _dv = [_f0(h.get("エントリー滑りbp")) for _, h in _ok]
+        _mu = sum(_dv) / _nd
+        _sd = (sum((x - _mu) ** 2 for x in _dv) / (_nd - 1)) ** 0.5
+        _se = _sd / (_nd ** 0.5)
+        _t = _t95(_nd - 1)
+        print(f"     日次平均 {_mu:+.1f}bp / 95%CI "
+              f"{_mu - _t * _se:+.1f} 〜 {_mu + _t * _se:+.1f}")
+        if _nb >= 20 and _nd >= 8:
+            _v = ("✅ 続行" if _mu >= -6 else
+                  "⚠ 30件まで続行" if _mu > -11 else "⛔ 棄却")
+            print(f"     ▶ 判定点に到達 → **{_v}**"
+                  f"  (≥-6 ✅ / -6〜-11 ⚠ / ≤-11 ⛔)")
+        else:
+            print(f"     ▶ あと {max(0, 20 - _nb)}件 / "
+                  f"{max(0, 8 - _nd)}営業日")
+    print("=" * 78)
+
+
+def _f0(v) -> float:
+    try:
+        return float(str(v).replace(",", "").strip() or 0)
+    except ValueError:
+        return 0.0
 
 
 def _j_missing_reason(p: Path, ymd: str) -> list[str]:
