@@ -170,6 +170,9 @@ ap.add_argument("--ws", action="store_true",
                      "従来どおり REST で読む(既定OFF)")
 ap.add_argument("--ws-only", action="store_true",
                 help="⛔ 検証用。PUSH で届かない銘柄を REST で補わない")
+ap.add_argument("--no-ws-wake", action="store_true",
+                help="PUSH が『新しく寄った』と教えてきても待ち時間を切り上げず、"
+                     "従来どおり --every 秒きっちり眠る(比較用)")
 # ★★ ポーリング (2026-08-16 ユーザー提案)
 ap.add_argument("--poll", action="store_true",
                 help="09:00 以降も回し続け、**寄った銘柄から順に**拾う")
@@ -2072,9 +2075,16 @@ if args.poll:
     print(f"\n▶ ポーリング開始（{args.every}秒ごと / {args.poll_until} まで）",
           flush=True)
     _n_poll = 0
+    _n_wake = 0
+    # ⛔ 合図を消すのは **読む前**。読んだ後に消すと、読み取りと clear の
+    #   すきまに寄った銘柄の合図を捨ててしまい、次の時間切れまで気づけない。
+    _WAKE = (getattr(_WS, "opened", None)
+             if (_WS is not None and not args.no_ws_wake) else None)
     while True:
         _t0 = time.time()
         _n_poll += 1
+        if _WAKE is not None:
+            _WAKE.clear()
         _bd_all = _read_all(f"poll{_n_poll}")
         _now_s = f"{_dt.datetime.now():%H:%M:%S}"
         _new = []
@@ -2119,7 +2129,17 @@ if args.poll:
             break
         _sl = max(0.0, args.every - (time.time() - _t0))
         if _sl > 0:
-            time.sleep(_sl)
+            # ★★ PUSH が「新しく寄った」と教えてきたら **待たずに起きる**
+            #   (2026-09-09)。届くのは 0.3秒 なのに、見に行くのが 2秒おきだった
+            #   ので平均1秒・最悪2秒 遅れていた。
+            #   ⛔ 発注は今までどおり **このループ**で行う。受信スレッドから
+            #     発注すると、例外1つで配信が黙って止まる。
+            #   イベントが来なければ従来どおり時間切れで起きる(fail-safe)。
+            if _WAKE is not None:
+                if _WAKE.wait(timeout=_sl):
+                    _n_wake += 1        # ← 待たずに起きた回数
+            else:
+                time.sleep(_sl)
     _read_ts = f"{_dt.datetime.now():%H:%M:%S}"
 else:
     # ── 従来: 09:00 に1回だけ読む ──────────────────────────────────
@@ -2159,6 +2179,15 @@ print(f"""
   09:00に未寄  {_late_n:,}銘柄 ({_late_n / max(1, len(_rows)) * 100:.1f}%)
                ⚠ バックテストの実測は15.7%。大きく違うなら要調査
   グループ     {len(_groups)}回""")
+# ★ PUSH の合図で待ちを切り上げた回数。0 のままなら合図が来ていない
+#   (WS が切れている / --no-ws-wake / そもそも --ws を付けていない)。
+try:
+    if args.poll and _WAKE is not None:
+        print(f"  PUSH合図     {_n_wake}回 待たずに起床 / 全{_n_poll}周"
+              + ("   ⚠ 0回 = 合図が来ていません(WS の接続を確認)"
+                 if _n_wake == 0 else ""))
+except NameError:
+    pass
 # ⛔ 前日の OpeningPrice を掴んだ銘柄。1〜2件なら「まだ寄っていないだけ」で正常。
 #   大半がこれなら kabu の書式が変わった等で **全件が黙ってスキップ**されている。
 _stale_n = sum(1 for r in _rows if r.get("stale_open"))

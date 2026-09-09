@@ -84,6 +84,9 @@ class BoardStream:
         # 銘柄ごとに「始値が初めて 0 でなくなった時刻」。REST の到着時刻と
         # 突き合わせて、PUSH が何秒速かったかを実測するために使う。
         self.open_seen: dict[str, str] = {}
+        # ★ 「新しく寄った銘柄が出た」ことを呼び出し側に知らせる合図。
+        #   呼び出し側は sleep の代わりに wait(timeout) するだけでよい。
+        self.opened = _th.Event()
 
     # ── 接続 ────────────────────────────────────────────────
     def start(self, wait_s: float = 5.0) -> bool:
@@ -129,13 +132,24 @@ class BoardStream:
                     self.first_msg_ts = f"{_dt.datetime.now(JST):%H:%M:%S.%f}"[:-3]
                 cur = self._board.setdefault(sym, {})
                 cur.update(d)
+                _woke = False
                 if sym not in self.open_seen:
                     try:
                         if float(cur.get("OpeningPrice") or 0) > 0:
                             self.open_seen[sym] = (
                                 f"{_dt.datetime.now(JST):%H:%M:%S.%f}"[:-3])
+                            _woke = True
                     except Exception:
                         pass
+            # ★★ **寄った瞬間に呼び出し側を起こす**(2026-09-09)。
+            #   呼び出し側は 2秒おきに辞書を見に来ていたので、PUSH が 0.3秒で
+            #   届いても気づくのは平均1秒・最悪2秒 後だった。
+            #   ⛔ ここで発注はしない。受信スレッドで例外が出ると配信そのものが
+            #     黙って止まる。**起こすだけ**にして、判定も発注も本体のループの
+            #     ままにする。イベントが来なければ本体は従来どおり時間切れで
+            #     起きるので、壊れても今日と同じ動きになる(fail-safe)。
+            if _woke:
+                self.opened.set()
 
         def _on_err(_w, _e):
             # ⛔ 理由を捨てない。2026-09-09 に 09:00〜09:03 で 6回 切れたのに、
