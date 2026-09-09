@@ -485,6 +485,19 @@ def _n_entry_report(rows: list, order_rows: list) -> None:
     """
     _p = Path(f"n_quotes_{_DATE_DIG}.csv")
     if not _p.exists():
+        # ⛔ **黙って消えないこと**(2026-09-10)。対象日が既定(今日)のまま
+        #   日付をまたぐと、前日の分を見たいのに何も出ずに終わる。実際
+        #   9/10 の朝に 9/9 の内訳を見ようとして「出ない」と迷った。
+        #   材料が無いことと、どの日なら在ることを言う。
+        _have = sorted(x.name[9:17] for x in Path(".").glob("n_quotes_*.csv")
+                       if len(x.name) == 21)
+        print(f"\n[エントリー計測] {_p.name} が無いので測れません。")
+        if _have:
+            print(f"  在るのは {', '.join(_have[-5:])}"
+                  f"{' ほか' if len(_have) > 5 else ''}"
+                  f" → .\\fills --no-compare --date {_have[-1]}")
+        else:
+            print("  n_quotes_<日付>.csv は k_open_confirm(.\\nexec)が書きます。")
         return
 
     def _num(v) -> float:
