@@ -258,15 +258,16 @@ ap.add_argument("--n-mode", action="store_true",
                      " watcher 不要")
 args = ap.parse_args()
 
-# ── --ws のときは周回を速くする (2026-09-07) ──────────────────────────
-# ⛔ **PUSH にしただけでは利得を取りきれない。** データは 09:00:00 に手元へ
-#   届いているのに、ループが10秒おきだと平均5秒 気づくのが遅れる。
-#   PUSH で読むぶんには HTTP が1回も出ないので、速く回してもコストが無い。
-#   ⚠ 明示指定(--every)はそのまま尊重する。
-if args.ws and args.every == 10:
-    args.every = 2
-    print("[ws] --every 10 → **2** に下げました"
-          "(PUSH は HTTP を出さないので速く回してもコストが無い)")
+# ── ⛔ **--ws でも --every は 10秒のまま**(2026-09-09 に撤回) ──────────
+#   2026-09-07 にここで `--every 10 → 2` に下げていた。理由は「PUSH なら
+#   HTTP が出ないので速く回してもコストが無い」だったが、**前提が誤り**:
+#     ・PUSH で始値が届いていない銘柄は **REST に落ちる**(それが fail-safe)。
+#       つまり WS が不調な朝ほど 2秒おきに REST を叩き、429 を再発させる。
+#       2026-09-09 は実際に 6回切れて 429 が出ていた。
+#     ・そして待ち時間の短縮は **イベント駆動が既に担っている**。寄った瞬間に
+#       BoardStream.opened が立ち、下の wait() が即座に起きる。10秒は
+#       「PUSH が無音のときの保険」であって、待たされる時間ではない。
+#   → PUSH 正常時は到着直後に起床 / PUSH 無音時は従来どおり10秒 REST。
 
 # ── N の既定値 ────────────────────────────────────────────────────────
 #   ⛔ J の既定と違う値だけを差し替える。**明示指定はそのまま尊重する**ため、
@@ -2072,7 +2073,10 @@ if args.poll:
                                         second=0, microsecond=0)
     if not args.now:
         _wait(args.open_at, "★ここから本番。寄った銘柄から順に拾う")
-    print(f"\n▶ ポーリング開始（{args.every}秒ごと / {args.poll_until} まで）",
+    _wake_note = ("寄った瞬間に起きる / 無音なら最長 "
+                  f"{args.every}秒" if (_WS is not None and not args.no_ws_wake)
+                  else f"{args.every}秒ごと")
+    print(f"\n▶ ポーリング開始（{_wake_note} / {args.poll_until} まで）",
           flush=True)
     _n_poll = 0
     _n_wake = 0

@@ -45,18 +45,46 @@ import console_safe  # noqa: F401
 
 import datetime as _dt
 import json as _json
+import re as _re
 import threading as _th
 import time as _time
 
 JST = _dt.timezone(_dt.timedelta(hours=9))
 
 
+def _is_today_open(_bd: dict) -> bool:
+    """板が **当日の** 始値を持っているか。
+
+    ⛔⛔ **`OpeningPrice > 0` だけを見てはいけない**(2026-09-09 Codex 指摘)。
+      /board は引け後も当日の OpeningPrice を返し続けるので、まだ寄って
+      いない銘柄は **前日の** 始値を返す。08:55 のウォームアップで PUSH が
+      それを配ると、全銘柄が「寄った」と記録され `opened` が立ってしまい、
+      **本当の寄りでは一度も合図が出ない**(イベント駆動が丸ごと無効化)。
+
+      板の消費側(k_open_confirm._open_today)は日付を見て弾いていたので
+      誤発注にはならないが、起床側は素通りだった。判定を揃える。
+    """
+    try:
+        if float(_bd.get("OpeningPrice") or 0) <= 0:
+            return False
+    except Exception:
+        return False
+    _md = _re.search(r"(\d{4})-(\d{2})-(\d{2})",
+                     str(_bd.get("OpeningPriceTime") or ""))
+    return bool(_md) and _md.group(0) == f"{_dt.date.today()}"
+
+
 class BoardStream:
     """PUSH配信を裏で受け続け、最新の板を辞書に溜めるだけの入れ物。
 
-    ★ 設計方針: **このクラスは判断をしない。** 始値が有効かどうか、
-      日付が今日かどうかの判定は呼び出し側(k_open_confirm._mk_row)が既に
-      持っているので、ここでは触らない。受けたものをそのまま渡す。
+    ★ 設計方針: **溜める板には手を入れない。** 受けたものをそのまま渡し、
+      使ってよいかどうかの判定は呼び出し側(k_open_confirm._open_today)に
+      任せる。
+
+      ⚠ 例外は `open_seen` / `opened` の2つだけ。「寄った瞬間に呼び出し側を
+        起こす」ためには、ここで **当日の始値かどうか**を見るしかない
+        (_is_today_open)。板そのものは加工しないので、消費側の判定は
+        従来どおり効いている。
     """
 
     def __init__(self, base_url: str, verbose: bool = True):
@@ -133,14 +161,13 @@ class BoardStream:
                 cur = self._board.setdefault(sym, {})
                 cur.update(d)
                 _woke = False
-                if sym not in self.open_seen:
-                    try:
-                        if float(cur.get("OpeningPrice") or 0) > 0:
-                            self.open_seen[sym] = (
-                                f"{_dt.datetime.now(JST):%H:%M:%S.%f}"[:-3])
-                            _woke = True
-                    except Exception:
-                        pass
+                if sym not in self.open_seen and _is_today_open(cur):
+                    # ⛔ **当日の**始値だけを寄りとみなす。前日ぶんで埋めると
+                    #   ウォームアップの時点で全銘柄が済みになり、本番の
+                    #   09:00 で合図が1回も出なくなる(_is_today_open 参照)。
+                    self.open_seen[sym] = (
+                        f"{_dt.datetime.now(JST):%H:%M:%S.%f}"[:-3])
+                    _woke = True
             # ★★ **寄った瞬間に呼び出し側を起こす**(2026-09-09)。
             #   呼び出し側は 2秒おきに辞書を見に来ていたので、PUSH が 0.3秒で
             #   届いても気づくのは平均1秒・最悪2秒 後だった。
