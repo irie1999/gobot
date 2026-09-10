@@ -514,6 +514,11 @@ def _n_entry_report(rows: list, order_rows: list) -> None:
         return (int(_m.group(1)) * 3600 + int(_m.group(2)) * 60
                 + int(_m.group(3)) + float(_m.group(4) or 0))
 
+    def _has_frac(hms: str) -> bool:
+        """その時刻に **秒未満** が入っているか(丸めの有無の判定に使う)。"""
+        _m = re.search(r"\d{2}:\d{2}:\d{2}(\.\d+)", str(hms or ""))
+        return bool(_m)
+
     # 銘柄ごとに **最初に寄りを検知した行**(以降の行は値が動いている)
     _first: dict = {}
     _push = _http = 0
@@ -535,12 +540,20 @@ def _n_entry_report(rows: list, order_rows: list) -> None:
         return
 
     # ── 検知遅れ。**発注の有無に関係なく、寄った全銘柄で測れる** ──────────
-    # ⛔ **捨てた行を数えること**(2026-09-10)。50銘柄が寄ったのに3件しか
-    #   測れず、なぜ落ちたのかが分からなかった。落ちた理由が分からないと
-    #   「PUSH が速くなった」の分母が信用できない。
+    # ⛔⛔ **測れるのは上界だけ**(2026-09-10 に判明)。kabu の
+    #   `OpeningPriceTime` は **秒未満を切り上げて**記録している。実測:
+    #     5803 検知 09:02:44.263 → 寄り **09:02:45**
+    #     5801 検知 09:02:59.313 → 寄り **09:03:00**
+    #   つまり真の寄りは (open_time − 1秒, open_time] のどこかで、
+    #   遅れは [_d−_o, _d−_o+1) の区間にしかならない。**遅れそのものが
+    #   1秒未満なので、丸め誤差と同じ大きさ**= 精密には測れない。
+    #   素直に引くと負になり、以前はそれを黙って捨てて 50件中47件を
+    #   落としていた(「速すぎて負に出た」を「測れなかった」と誤記録)。
+    #   → 上界 max(0, _d−_o+1) で報告する。**真値はこれ以下**。
     _lags = []
     _skip: dict = {}
     _negs: list = []
+    _rounded = 0
     for _s, _q in _first.items():
         _o, _d = _sec(_q.get("open_time")), _sec(_q.get("resp_ts"))
         _why = ""
@@ -548,16 +561,23 @@ def _n_entry_report(rows: list, order_rows: list) -> None:
             _why = "寄り時刻(open_time)が空か読めない"
         elif _d is None:
             _why = "検知時刻(resp_ts)が空か読めない"
-        elif _d - _o < 0:
-            _why = "検知が寄りより **前**(負)"
-            _negs.append((_d - _o, _s, str(_q.get("open_time") or ""),
-                          str(_q.get("resp_ts") or "")))
-        elif _d - _o >= 3600:
-            _why = "差が1時間以上"
         if _why:
             _skip[_why] = _skip.get(_why, 0) + 1
             continue
-        _lags.append((_d - _o, str(_q.get("req_ts") or "").strip() == "push"))
+        # 秒未満が無い = 切り上げられている → 真の寄りは最大1秒 手前
+        _rnd = 0.0 if _has_frac(_q.get("open_time")) else 1.0
+        _lag = _d - _o
+        if _lag < -_rnd - 0.1 or _lag >= 3600:
+            _why = ("検知が寄りより **前**(丸めでは説明できない)"
+                    if _lag < 0 else "差が1時間以上")
+            _skip[_why] = _skip.get(_why, 0) + 1
+            _negs.append((_lag, _s, str(_q.get("open_time") or ""),
+                          str(_q.get("resp_ts") or "")))
+            continue
+        if _rnd and _lag < 0:
+            _rounded += 1                      # 丸めの範囲内 = ごく速い
+        _lags.append((max(0.0, _lag + _rnd),
+                      str(_q.get("req_ts") or "").strip() == "push"))
     print()
     print("=" * 78)
     print(f"=== N のエントリー計測 ({_p.name} / {len(_first)}銘柄が寄った) ===")
@@ -569,14 +589,19 @@ def _n_entry_report(rows: list, order_rows: list) -> None:
         def _q50(a):
             return a[len(a) // 2] if a else float("nan")
         print(f"  ★ 検知遅れ (寄り → 板を見た) — **PUSH の効果はここに出る**")
-        print(f"     全体   {len(_v):>3}件  中央 {_q50(_v):>6.1f}秒  "
-              f"最大 {_v[-1]:>6.1f}秒")
+        print(f"     ⚠ kabu の寄り時刻は秒未満を切り上げるので、以下は"
+              f" **上界**(真値はこれ以下)")
+        print(f"     全体   {len(_v):>3}件  中央 {_q50(_v):>6.1f}秒以下  "
+              f"最大 {_v[-1]:>6.1f}秒以下")
         if _pv:
-            print(f"     PUSH   {len(_pv):>3}件  中央 {_q50(_pv):>6.1f}秒  "
-                  f"最大 {_pv[-1]:>6.1f}秒")
+            print(f"     PUSH   {len(_pv):>3}件  中央 {_q50(_pv):>6.1f}秒以下  "
+                  f"最大 {_pv[-1]:>6.1f}秒以下")
         if _hv:
-            print(f"     HTTP   {len(_hv):>3}件  中央 {_q50(_hv):>6.1f}秒  "
-                  f"最大 {_hv[-1]:>6.1f}秒")
+            print(f"     HTTP   {len(_hv):>3}件  中央 {_q50(_hv):>6.1f}秒以下  "
+                  f"最大 {_hv[-1]:>6.1f}秒以下")
+        if _rounded:
+            print(f"     うち {_rounded}件 は引くと負(= 丸めより速く届いた)。"
+                  f"**1秒を切っているのは確実**だが、それ以上は測れない")
     else:
         print("  ⚠ 寄り時刻か検知時刻が読めず、検知遅れを出せません")
     print(f"     PUSH {_push}件 / HTTP {_http}件")
