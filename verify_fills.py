@@ -837,6 +837,10 @@ def _n_entry_report(rows: list, order_rows: list) -> None:
     _old = [d for d, h in _has if str(h.get("版") or "") != _GATE_VER]
     _oth = [d for d, h in _has
             if str(h.get("版") or "") == _GATE_VER and not _isgate(h)]
+    # ★ 約定ゼロの日は滑りを観測できないのでゲートに入らない(仕様どおり)。
+    #   ただし **暦日は進む**ので、見えないと「あと何日か」を読み違える。
+    _zero = [d for d, h in sorted(_hist.items())
+             if str(h.get("エントリー滑りbp") or "") == "" and _isgate(h)]
     _nows = sum(1 for _, h in _ok if str(h.get("ws_ok") or "") != "1")
     _nb = sum(int(_f0(h.get("約定"))) for _, h in _ok)
     _nd = len(_ok)
@@ -870,6 +874,24 @@ def _n_entry_report(rows: list, order_rows: list) -> None:
         else:
             print(f"     ▶ あと {max(0, 20 - _nb)}件 / "
                   f"{max(0, 8 - _nd)}営業日")
+            if _nd:
+                # 1日あたりの実績から、**件数が律速なら**あと何営業日かを出す
+                # ⛔ ペースを整数に丸めない。round(0.5)=0 → max(1,0)=1 となり
+                #   0.5件/日 なのに「残16件を16日」と **半分に見積もる**。
+                # ⛔ 浮動小数でも割らない。5件/3日 で 15/(5/3) が 8.999… に
+                #   なり、切り上げが1日ずれる。**整数のまま** 残×日÷件 で出す。
+                _pd = _nb / _nd
+                _rest = max(0, 20 - _nb)
+                _byn = (-(-_rest * _nd // _nb)
+                        if _rest and _nb * 2 >= _nd else 0)   # ペース0.5件/日 未満は不問
+                _need = max(max(0, 8 - _nd), _byn)
+                if _need:
+                    print(f"        1日あたり {_pd:.1f}件 のペースなら"
+                          f" **あと約 {_need}営業日**"
+                          + ("(件数が律速)" if _nb < 20 and _nd >= 8 else ""))
+    if _zero:
+        print(f"     ⚠ 約定ゼロで観測に入らなかった {len(_zero)}営業日がある"
+              f" ({', '.join(_zero[-4:])})。**暦日はそのぶん延びる**")
     print("=" * 78)
 
 
