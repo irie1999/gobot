@@ -106,6 +106,11 @@ def _digits(s) -> str:
 
 _DATE_DIG = _digits(_DATE)
 
+# ★★ §18.66 のゲートが数える **執行の版**。k_open_confirm._EXEC_VER と揃える。
+#   ⛔ 板の取り方・発注タイミングを変えたら向こうを上げ、ここも上げる。
+#     版が違う日は速さが違うので、混ぜて平均してはいけない(Codex 指摘④)。
+_GATE_VER = "N2"
+
 
 def _match_date(t: str) -> bool:
     """約定時刻 t が対象日か。ISO(2026-07-28T..)/yyyyMMddHHMMSS どちらでも桁で判定。
@@ -528,6 +533,7 @@ def _n_entry_report(rows: list, order_rows: list) -> None:
     #   気配フラグ(kabu 公式 5617行): 0101 一般 / 0102 特別 / 0103 注意 /
     #   0107・0116・0117 寄前 / 0108 停止前特別 / 0109 引け後。
     _first: dict = {}
+    _cfg: dict = {}
     _push = _http = 0
     try:
         with open(_p, encoding="utf-8-sig", newline="") as f:
@@ -536,6 +542,12 @@ def _n_entry_report(rows: list, order_rows: list) -> None:
                 if not _s or _s in _first or _num(r0.get("open_p")) <= 0:
                     continue
                 _first[_s] = r0
+                if not _cfg:
+                    # ★ **実行時の設定**。全行 同じ値なので最初の1行から取る
+                    _cfg.update({
+                        "版": str(r0.get("exec_ver") or "").strip(),
+                        "ws_on": str(r0.get("ws_on") or "").strip(),
+                        "wake_on": str(r0.get("wake_on") or "").strip()})
                 if str(r0.get("req_ts") or "").strip() == "push":
                     _push += 1
                 else:
@@ -766,10 +778,13 @@ def _n_entry_report(rows: list, order_rows: list) -> None:
         "内訳件数": len(_s1),
         "段1bp": round(sum(_s1) / len(_s1), 1) if _s1 else "",
         "段2bp": round(sum(_s2) / len(_s2), 1) if _s2 else "",
-        # ★ 対象日は **方式とバージョン**で決める。PUSH の有無で選ぶと
-        #   「新方式で走ったのに PUSH が全滅した日」が消える(Codex 指摘④)
+        # ★ 対象日は **実行時の設定**で決める。PUSH の受信件数で選ぶと
+        #   「新方式で走ったのに PUSH が全滅した日」が消える(Codex 指摘④)。
+        #   ⛔ ws_on は「--ws で接続できたか」= 設定。受信結果ではない。
         "方式": "N",
-        "ws": 1 if _push > 0 else 0,
+        "版": _cfg.get("版", ""),
+        "ws_on": _cfg.get("ws_on", ""),
+        "wake_on": _cfg.get("wake_on", ""),
     }
     _lp = Path("n_entry_log.csv")
     _hist: dict = {}
@@ -794,21 +809,28 @@ def _n_entry_report(rows: list, order_rows: list) -> None:
         return
 
     # ── ゲート (§18.66)。**1日=1観測**で数える ────────────────────────────
-    # ⛔ **PUSH の有無で日を選ばない**(2026-09-10 Codex 指摘④)。
-    #   PUSH件数>0 で絞ると「新方式で発注したのに PUSH が全滅した日」が
-    #   ゲートから消える = 都合の良い日だけを数えることになる。
-    #   対象日は **方式で固定**する(古い行は 方式 列が無いので N 扱い)。
-    _ok = [(d, h) for d, h in sorted(_hist.items())
-           if str(h.get("エントリー滑りbp") or "") != ""
-           and str(h.get("方式") or "N") == "N"]
-    _nows = sum(1 for _, h in _ok if int(_f0(h.get("ws"))) == 0)
+    # ⛔⛔ **対象日は「執行の版」で固定する**(2026-09-10 Codex 指摘④)。
+    #   ・PUSH の受信件数で選ぶと「新方式なのに PUSH が全滅した日」が消える
+    #   ・方式(N)だけで選ぶと、PUSH 導入前や起床が効いていなかった日まで
+    #     「PUSH後」のゲートに混ざる。速さの違う日を平均することになる
+    #   ・版が空の古いログは **自動的に混ぜない**(設定が分からないため)
+    _has = [(d, h) for d, h in sorted(_hist.items())
+            if str(h.get("エントリー滑りbp") or "") != ""]
+    _ok = [(d, h) for d, h in _has if str(h.get("版") or "") == _GATE_VER]
+    _old = [d for d, h in _has if str(h.get("版") or "") != _GATE_VER]
+    _nows = sum(1 for _, h in _ok if str(h.get("ws_on") or "") != "1")
     _nb = sum(int(_f0(h.get("約定"))) for _, h in _ok)
     _nd = len(_ok)
-    print(f"  ★ §18.66 ゲート(PUSH後) — **{_nb}件 / {_nd}営業日**"
+    print(f"  ★ §18.66 ゲート(版 {_GATE_VER}) — **{_nb}件 / {_nd}営業日**"
           f"(目標 20件 かつ 8営業日)")
+    if _old:
+        print(f"     ⚠ 版が違う/不明な {len(_old)}営業日は **入れていません**"
+              f" ({', '.join(_old[-4:])}{' ほか' if len(_old) > 4 else ''})")
+        print(f"        板の取り方が変わると速さが変わるので、混ぜて平均"
+              f"できない。含めるなら n_entry_log.csv の 版 列を手で埋める")
     if _nows:
-        print(f"     ⚠ うち {_nows}営業日は PUSH が1件も無い(= REST だけ)。"
-              f"**除外していない**。方式で日を選ぶのが正しい")
+        print(f"     ⚠ うち {_nows}営業日は --ws を使っていない(= REST だけ)。"
+              f"**除外していない**。受信結果で日を選ばないのが正しい")
     if _nd >= 2:
         _dv = [_f0(h.get("エントリー滑りbp")) for _, h in _ok]
         _mu = sum(_dv) / _nd

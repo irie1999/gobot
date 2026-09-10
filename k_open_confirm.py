@@ -1799,6 +1799,16 @@ def _mk_row(_s: str, _bd: dict, _ts: str, _grp: int) -> dict:
 #   1周ごとに全銘柄を追記する。9,000行/日 程度で軽い。
 #   ⛔ このファイルは **記録専用**。発注には一切使わない。
 _QPATH = Path(__file__).resolve().parent / f"n_quotes_{_dt.date.today():%Y%m%d}.csv"
+
+# ★★ 執行の版 (2026-09-10)。**§18.66 のゲートはこの版で対象日を固定する**。
+#   ⛔ 上げるのは **板の取り方・発注タイミングが変わったときだけ**。
+#     計測やレポートだけの変更で上げると、同じ執行の日を分断してしまう。
+#   ⛔ 逆に上げ忘れると、速さの違う日を混ぜて平均することになる。
+#     N1  … REST のみ。09:00 に 50銘柄で 36.5秒(§18.44)
+#     N1c … PUSH あり。ただし ①前日の始値で起床済みになり合図が出ない
+#           ②ping で73秒ごとに自分で切断(〜2026-09-10)
+#     N2  … PUSH + イベント駆動で起床 + ping 停止 (2026-09-11〜)
+_EXEC_VER = "N2"
 # ⛔ ts(周回の時刻)を秒単位の分析に使わないこと。1周に約6秒かかるので、
 #   1銘柄目と50銘柄目では6秒ずれる。**req_ts / resp_ts を使う**(ミリ秒つき)。
 #
@@ -1814,7 +1824,8 @@ _QPATH = Path(__file__).resolve().parent / f"n_quotes_{_dt.date.today():%Y%m%d}.
 #     そのまま有効な場合がある
 #   ★ buy1_*/sell1_* は Buy1/Sell1 の写し。ask_* と突き合わせれば
 #     **命名の向きをデータ側で検証できる**(コメントが1年間 逆だった前例がある)
-_QCOLS = ["date", "ts", "req_ts", "resp_ts", "open_seen_ts", "poll", "symbol",
+_QCOLS = ["date", "exec_ver", "ws_on", "wake_on",
+          "ts", "req_ts", "resp_ts", "open_seen_ts", "poll", "symbol",
           "prev_close", "open_p", "open_time",
           "current_price", "cur_ts",
           "bid", "bid_qty", "bid_time", "bid_sign",
@@ -1888,6 +1899,14 @@ def _qdump(_bd_all: dict, _ts: str, _poll: int) -> None:
                 _q0, _q1 = _BOARD_TS.get(_s, ("", ""))
                 _r["ts"], _r["poll"] = _ts, _poll
                 _r["req_ts"], _r["resp_ts"] = _q0, _q1
+                # ★ **実行時の設定**を残す(2026-09-10 Codex 指摘④)。
+                #   ws_on は「--ws を指定して接続できたか」= 設定であって、
+                #   PUSH を何件 受信したかという **結果ではない**。
+                #   結果で対象日を選ぶと、PUSH が全滅した日だけが消える。
+                _r["exec_ver"] = _EXEC_VER
+                _r["ws_on"] = 1 if (args.ws and _WS is not None) else 0
+                _r["wake_on"] = 1 if (args.ws and _WS is not None
+                                      and not args.no_ws_wake) else 0
                 # ★ 検知遅れ(寄り → 気づいた)はこちらで測る。resp_ts は
                 #   「その板を受け取った時刻」なので毎周 進む(Codex 指摘②)
                 _r["open_seen_ts"] = _OPEN_TS.get(_s, "")
