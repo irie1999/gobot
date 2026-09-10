@@ -208,7 +208,17 @@ class BoardStream:
             # ⚠ 落ちたら繋ぎ直す。ただし止めると決めたら二度と繋がない。
             while not self._stop:
                 try:
-                    self._ws.run_forever(ping_interval=30, ping_timeout=10)
+                    # ⛔⛔ **ping を送らない**(2026-09-10)。kabu は pong を
+                    #   返さないので、ping_interval=30 / ping_timeout=10 だと
+                    #   **生きている接続を約70秒ごとに自分で切っていた**。
+                    #   実測 2026-09-10: `ping/pong timed out` が5回、毎回
+                    #   きっちり「73秒後」。時刻が揃うのは切断が相手都合では
+                    #   なく **こちらのタイマー** だから。
+                    #   TCP が本当に落ちれば run_forever はそのまま返るので、
+                    #   下の再接続ループは変わらず効く。失うのは「TCPは生きて
+                    #   いるが無応答」の検知だけで、N が繋ぐのは 08:55〜09:10 の
+                    #   localhost・板が動き続ける区間なので実害は小さい。
+                    self._ws.run_forever(ping_interval=0)
                 except Exception as e:                    # noqa: BLE001
                     self.err = str(e)
                 if self._stop:
