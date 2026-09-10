@@ -535,11 +535,29 @@ def _n_entry_report(rows: list, order_rows: list) -> None:
         return
 
     # ── 検知遅れ。**発注の有無に関係なく、寄った全銘柄で測れる** ──────────
+    # ⛔ **捨てた行を数えること**(2026-09-10)。50銘柄が寄ったのに3件しか
+    #   測れず、なぜ落ちたのかが分からなかった。落ちた理由が分からないと
+    #   「PUSH が速くなった」の分母が信用できない。
     _lags = []
+    _skip: dict = {}
+    _negs: list = []
     for _s, _q in _first.items():
         _o, _d = _sec(_q.get("open_time")), _sec(_q.get("resp_ts"))
-        if _o is not None and _d is not None and 0 <= _d - _o < 3600:
-            _lags.append((_d - _o, str(_q.get("req_ts") or "").strip() == "push"))
+        _why = ""
+        if _o is None:
+            _why = "寄り時刻(open_time)が空か読めない"
+        elif _d is None:
+            _why = "検知時刻(resp_ts)が空か読めない"
+        elif _d - _o < 0:
+            _why = "検知が寄りより **前**(負)"
+            _negs.append((_d - _o, _s, str(_q.get("open_time") or ""),
+                          str(_q.get("resp_ts") or "")))
+        elif _d - _o >= 3600:
+            _why = "差が1時間以上"
+        if _why:
+            _skip[_why] = _skip.get(_why, 0) + 1
+            continue
+        _lags.append((_d - _o, str(_q.get("req_ts") or "").strip() == "push"))
     print()
     print("=" * 78)
     print(f"=== N のエントリー計測 ({_p.name} / {len(_first)}銘柄が寄った) ===")
@@ -562,6 +580,13 @@ def _n_entry_report(rows: list, order_rows: list) -> None:
     else:
         print("  ⚠ 寄り時刻か検知時刻が読めず、検知遅れを出せません")
     print(f"     PUSH {_push}件 / HTTP {_http}件")
+    if _skip:
+        # ★ 分母を隠さない。ここが大きいときは PUSH の速さを語れない。
+        print(f"     ⚠ **測れなかった {sum(_skip.values())}件 / {len(_first)}件**")
+        for _w, _n in sorted(_skip.items(), key=lambda x: -x[1]):
+            print(f"        {_n:>3}件  {_w}")
+        for _dv, _s, _ot, _rt in sorted(_negs)[:3]:
+            print(f"        例) {_s}  寄り {_ot} → 検知 {_rt}  ({_dv:+.1f}秒)")
 
     # ── 段1 / 段2。**約定した銘柄だけ**(段2に実約定価格が要る) ────────────
     _s1, _s2, _tot, _chk, _det = [], [], [], [], []
