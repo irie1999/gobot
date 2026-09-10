@@ -109,9 +109,16 @@ class BoardStream:
         # ⛔ 切れた理由を残す。2026-09-09 は6回切れたのに手掛かりが無かった。
         self.n_err = 0
         self.last_close: tuple = (None, None)
-        # 銘柄ごとに「始値が初めて 0 でなくなった時刻」。REST の到着時刻と
+        # 銘柄ごとに「**当日の**始値が初めて届いた時刻」。REST の到着時刻と
         # 突き合わせて、PUSH が何秒速かったかを実測するために使う。
         self.open_seen: dict[str, str] = {}
+        # ⛔ **これとは別に「その板を最後に受け取った時刻」を持つ**
+        #   (2026-09-10 Codex 指摘②)。open_seen を毎周の resp_ts として
+        #   書いていたので、09:00:22 に読んだ板の受信時刻が 08:59:59 に
+        #   なっていた。初回始値の時刻と、いま手元にある板の時刻は別物。
+        self.msg_seen: dict[str, str] = {}
+        # 最後に **何かを** 受信した時刻(無音の検知に使う。Codex 指摘⑤)
+        self.last_msg_t: float = 0.0
         # ★ 「新しく寄った銘柄が出た」ことを呼び出し側に知らせる合図。
         #   呼び出し側は sleep の代わりに wait(timeout) するだけでよい。
         self.opened = _th.Event()
@@ -160,13 +167,15 @@ class BoardStream:
                     self.first_msg_ts = f"{_dt.datetime.now(JST):%H:%M:%S.%f}"[:-3]
                 cur = self._board.setdefault(sym, {})
                 cur.update(d)
+                _now = f"{_dt.datetime.now(JST):%H:%M:%S.%f}"[:-3]
+                self.msg_seen[sym] = _now          # ← その板を受け取った時刻
+                self.last_msg_t = _time.time()
                 _woke = False
                 if sym not in self.open_seen and _is_today_open(cur):
                     # ⛔ **当日の**始値だけを寄りとみなす。前日ぶんで埋めると
                     #   ウォームアップの時点で全銘柄が済みになり、本番の
                     #   09:00 で合図が1回も出なくなる(_is_today_open 参照)。
-                    self.open_seen[sym] = (
-                        f"{_dt.datetime.now(JST):%H:%M:%S.%f}"[:-3])
+                    self.open_seen[sym] = _now
                     _woke = True
             # ★★ **寄った瞬間に呼び出し側を起こす**(2026-09-09)。
             #   呼び出し側は 2秒おきに辞書を見に来ていたので、PUSH が 0.3秒で
@@ -269,8 +278,14 @@ class BoardStream:
     def describe(self) -> str:
         with self._lock:
             _n, _s, _o = self.n_msg, len(self._board), len(self.open_seen)
+            _lt = self.last_msg_t
+        # ★ 無音の秒数を出す(2026-09-10 Codex 指摘⑤)。ping を止めたので
+        #   「TCPは生きているが無応答」はこれでしか気づけない。未取得の
+        #   銘柄は REST に回るので実害は無いが、黙って無音なのは困る。
+        _sil = (f" / 無音 {_time.time() - _lt:.0f}秒" if _lt > 0
+                else " / **まだ1件も受信していません**")
         return (f"受信 {_n:,}件 / 銘柄 {_s:,} / 始値あり {_o:,} / "
-                f"{'接続中' if self.connected else '切断'}"
+                f"{'接続中' if self.connected else '切断'}{_sil}"
                 + (f" / err={self.err}" if self.err else ""))
 
 

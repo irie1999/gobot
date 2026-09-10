@@ -521,18 +521,32 @@ def _n_entry_report(rows: list, order_rows: list) -> None:
 
     # 銘柄ごとに **最初に寄りを検知した行**(以降の行は値が動いている)
     _first: dict = {}
+    # ★ 段1 用は別に取る。寄りを検知した行は **寄前気配のまま**のことがあり、
+    #   その値段で100株売れる根拠が無い(2026-09-10 Codex 指摘②)。
+    #   気配フラグ(kabu 公式): 0101 一般 / 0102 特別 / 0103 注意 /
+    #   0107・0116・0117 寄前 / 0108 停止前特別 / 0109 引け後。
+    #   **0101 になった最初の行**だけを気配として使う。
+    _firstq: dict = {}
+    _lastsg: dict = {}        # 0101 にならなかった銘柄が最後に見せたフラグ
     _push = _http = 0
     try:
         with open(_p, encoding="utf-8-sig", newline="") as f:
             for r0 in _csv.DictReader(f):
                 _s = str(r0.get("symbol") or "").strip()
-                if not _s or _s in _first or _num(r0.get("open_p")) <= 0:
+                if not _s or _num(r0.get("open_p")) <= 0:
                     continue
-                _first[_s] = r0
-                if str(r0.get("req_ts") or "").strip() == "push":
-                    _push += 1
-                else:
-                    _http += 1
+                if _s not in _first:
+                    _first[_s] = r0
+                    if str(r0.get("req_ts") or "").strip() == "push":
+                        _push += 1
+                    else:
+                        _http += 1
+                if _s not in _firstq:
+                    _sg = str(r0.get("ask_sign") or "").strip()
+                    if _sg == "0101":
+                        _firstq[_s] = r0
+                    else:
+                        _lastsg[_s] = _sg or "(空)"
     except Exception as e:                                       # noqa: BLE001
         print(f"\n[!] {_p.name} を読めませんでした: {e}")
         return
@@ -551,11 +565,19 @@ def _n_entry_report(rows: list, order_rows: list) -> None:
     #   落としていた(「速すぎて負に出た」を「測れなかった」と誤記録)。
     #   → 上界 max(0, _d−_o+1) で報告する。**真値はこれ以下**。
     _lags = []
+    _raw: list = []            # ⛔ 生の時刻差。**負も捨てない**(Codex 指摘④)
     _skip: dict = {}
     _negs: list = []
     _rounded = 0
     for _s, _q in _first.items():
-        _o, _d = _sec(_q.get("open_time")), _sec(_q.get("resp_ts"))
+        # ★ 検知時刻は **open_seen_ts**(当日の始値が初めて届いた時刻)。
+        #   resp_ts は「その板を受け取った時刻」で毎周 進むので、検知遅れの
+        #   分子には使えない(2026-09-10 Codex 指摘②)。古い CSV には
+        #   open_seen_ts が無いので、その場合だけ resp_ts に落ちる。
+        _o = _sec(_q.get("open_time"))
+        _d = _sec(_q.get("open_seen_ts"))
+        if _d is None:
+            _d = _sec(_q.get("resp_ts"))
         _why = ""
         if _o is None:
             _why = "寄り時刻(open_time)が空か読めない"
@@ -567,7 +589,9 @@ def _n_entry_report(rows: list, order_rows: list) -> None:
         # 秒未満が無い = 切り上げられている → 真の寄りは最大1秒 手前
         _rnd = 0.0 if _has_frac(_q.get("open_time")) else 1.0
         _lag = _d - _o
+        _raw.append((_lag, str(_q.get("req_ts") or "").strip() == "push"))
         if _lag < -_rnd - 0.1 or _lag >= 3600:
+            # ⛔ 仮定(切り上げ・時計一致)で説明できない外れ。**潰さず数える**
             _why = ("検知が寄りより **前**(丸めでは説明できない)"
                     if _lag < 0 else "差が1時間以上")
             _skip[_why] = _skip.get(_why, 0) + 1
@@ -589,8 +613,13 @@ def _n_entry_report(rows: list, order_rows: list) -> None:
         def _q50(a):
             return a[len(a) // 2] if a else float("nan")
         print(f"  ★ 検知遅れ (寄り → 板を見た) — **PUSH の効果はここに出る**")
-        print(f"     ⚠ kabu の寄り時刻は秒未満を切り上げるので、以下は"
-              f" **上界**(真値はこれ以下)")
+        # ⛔ まず **生の差**。仮定を1つも置いていない唯一の数字(Codex 指摘④)
+        _rv = sorted(x[0] for x in _raw)
+        print(f"     生の差   {len(_rv):>3}件  中央 {_rv[len(_rv)//2]:>+6.2f}秒  "
+              f"最小 {_rv[0]:>+6.2f}秒  最大 {_rv[-1]:>+6.2f}秒")
+        print(f"     ⚠ 以下は **『kabu が秒を切り上げ、PC と配信元の時計が"
+              f"合っている』と仮定したときの参考上界**。時計のズレでも")
+        print(f"       負は出るので、この3例だけでは切り上げと区別できない")
         print(f"     全体   {len(_v):>3}件  中央 {_q50(_v):>6.1f}秒以下  "
               f"最大 {_v[-1]:>6.1f}秒以下")
         if _pv:
@@ -614,17 +643,41 @@ def _n_entry_report(rows: list, order_rows: list) -> None:
             print(f"        例) {_s}  寄り {_ot} → 検知 {_rt}  ({_dv:+.1f}秒)")
 
     # ── 段1 / 段2。**約定した銘柄だけ**(段2に実約定価格が要る) ────────────
+    # ⛔⛔ **kabu の Bid/Ask は名前が逆**(2026-09-10 Codex 指摘①・公式仕様で確認)。
+    #   「下記にあるBIDとASKとは、トレーダー目線から見た場合の値であるため、
+    #     BidPrice=Sell1のPrice、AskPrice=Buy1のPriceという数値となります」
+    #   → **売る側が当たるのは AskPrice(= Buy1 = 最良買い気配)**。
+    #   ここは `bid`(= BidPrice = 売り気配)を使っており、段1が売り気配ぶん
+    #   高く出ていた。3日間 気づかなかった。
+    # ⛔ 現在値へのフォールバックもやめる。気配が無い行を黙って別の量で
+    #   埋めると、何を測ったのか分からなくなる(Codex 指摘)。
     _s1, _s2, _tot, _chk, _det = [], [], [], [], []
+    _qskip: dict = {}
+    _namechk = [0, 0]                 # [照合できた, AskPrice != Buy1.Price]
     for r in rows:
         _s = str(r.get("symbol") or "").strip()
-        _q = _first.get(_s) or _first.get(_s.replace(".T", ""))
+        _k = _s if _s in _firstq else _s.replace(".T", "")
+        _q = _firstq.get(_k)
+        _real = _num(r.get("entry(売)"))
         if not _q:
+            _sg = _lastsg.get(_k) or _lastsg.get(_s) or "?"
+            _w = f"一般気配(0101)の行が無い(最後に見たフラグ {_sg})"
+            _qskip[_w] = _qskip.get(_w, 0) + 1
             continue
         _op = _num(_q.get("open_p"))
-        # ⛔ 売る側が当たるのは **最良買い気配(bid)**。無いときだけ現在値
-        _bd = _num(_q.get("bid")) or _num(_q.get("current_price"))
-        _real = _num(r.get("entry(売)"))
-        if _op <= 0 or _bd <= 0 or _real <= 0:
+        # AskPrice = Buy1.Price のはず。生データがあれば突き合わせて確かめる
+        _buy1 = _num(_q.get("buy1_price"))
+        _bid1 = _num(_q.get("ask"))               # ← AskPrice。名前に注意
+        if _buy1 > 0 and _bid1 > 0:
+            _namechk[0] += 1
+            if abs(_buy1 - _bid1) > 1e-9:
+                _namechk[1] += 1
+        _bd = _bid1 or _buy1                      # 現在値では埋めない
+        if _op <= 0 or _real <= 0:
+            continue
+        if _bd <= 0:
+            _qskip["買い気配(AskPrice/Buy1)が空"] = (
+                _qskip.get("買い気配(AskPrice/Buy1)が空", 0) + 1)
             continue
         _a = (_bd - _op) / _op * 1e4
         _b = (_real - _bd) / _op * 1e4
@@ -636,18 +689,35 @@ def _n_entry_report(rows: list, order_rows: list) -> None:
         _n = len(_s1)
         print()
         print(f"  ── エントリー滑りの内訳 ({_n}件 / 約定したぶんだけ) ──")
-        print(f"     {'銘柄':<8}{'段1 待ち行列':>14}{'段2 注文〜約定':>16}{'合計':>10}")
+        print(f"     {'銘柄':<8}{'段1 寄り→買気配':>18}{'段2 買気配→実約定':>20}"
+              f"{'合計':>10}")
         for _s, _a, _b, _t in _det:
-            print(f"     {_s:<8}{_a:>+13.1f}bp{_b:>+15.1f}bp{_t:>+9.1f}bp")
-        print(f"     {'平均':<8}{sum(_s1)/_n:>+13.1f}bp"
-              f"{sum(_s2)/_n:>+15.1f}bp{sum(_tot)/_n:>+9.1f}bp")
+            print(f"     {_s:<8}{_a:>+17.1f}bp{_b:>+19.1f}bp{_t:>+9.1f}bp")
+        print(f"     {'平均':<8}{sum(_s1)/_n:>+17.1f}bp"
+              f"{sum(_s2)/_n:>+19.1f}bp{sum(_tot)/_n:>+9.1f}bp")
         _c = sum(_chk) / _n
         if abs(_c) > 0.01:
             print(f"     ⛔ 検算が合いません(段1+段2 − 合計 = {_c:+.3f}bp)")
+        # ⚠ 恒等式は **どんな価格を間に置いても成立する**。一致しても
+        #   気配や時刻が正しい保証にはならない(Codex 指摘③)。
+        print(f"     ⚠ 段2は通信の遅れだけではない。始値ちょうどの売り指値は"
+              f"「買い気配が始値を下回ると即時約定せず、戻って約定する」ので、")
+        print(f"       **戻り待ちの値動きと、約定した銘柄だけを見ている偏り**"
+              f"が混ざる。段1が負・段2が正は構造的に出る")
         print(f"     ⚠ 合計(=エントリー滑り)は **PUSH の効果ではない**。"
               f"遅れが有利に出たか不利に出たかで、60〜71%は不利側(§18.44)")
+        if _namechk[0]:
+            if _namechk[1]:
+                print(f"     ⛔ AskPrice != Buy1.Price が {_namechk[1]}/"
+                      f"{_namechk[0]}件。**板の命名の向きが想定と違う**")
+            else:
+                print(f"     ✅ AskPrice == Buy1.Price を {_namechk[0]}件で確認"
+                      f"(= AskPrice が買い気配で正しい)")
     else:
-        print("\n  (約定が無いので段1/段2は出ません。検知遅れは上のとおり)")
+        print("\n  (段1/段2を出せる約定がありません。検知遅れは上のとおり)")
+    if _qskip:
+        for _w, _n2 in sorted(_qskip.items(), key=lambda x: -x[1]):
+            print(f"     ⚠ 段1/段2 から除外 {_n2}件: {_w}")
 
     # ── 日次ログ。ゲート(§18.66)はここから読む ────────────────────────────
     _ymd = (f"{_DATE_DIG[:4]}-{_DATE_DIG[4:6]}-{_DATE_DIG[6:8]}"

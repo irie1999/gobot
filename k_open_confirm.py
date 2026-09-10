@@ -1584,6 +1584,9 @@ _REGISTERED: list = []
 #   周回の時刻を全銘柄に付けると秒単位の減衰が測れない。
 #   symbol -> (req_ts, resp_ts)。各スレッドが自分のキーだけを書く。
 _BOARD_TS: dict = {}
+# ★ PUSH が **当日の始値を初めて配った時刻**。_BOARD_TS の resp_ts とは別物で、
+#   検知遅れ(寄り → 気づいた)はこちらで測る(2026-09-10 Codex 指摘②)。
+_OPEN_TS: dict = {}
 # ★ PUSH配信(--ws)。**既定は None = 従来どおり REST だけ**(2026-09-07)。
 #   ウォームアップの直後に繋ぐ(登録が済んでいないと何も飛んでこない)。
 _WS = None
@@ -1655,8 +1658,13 @@ def _read_all(tag: str) -> dict:
                 if _bw and _open_today(_bw)[0] > 0:
                     _out[_s] = _bw
                     _n_ws += 1
-                    _BOARD_TS[_s] = ("push", _WS.open_seen.get(
-                        _s, f"{_dt.datetime.now():%H:%M:%S.%f}"[:-3]))
+                    # ⛔ resp_ts は **その板を受け取った時刻**(msg_seen)。
+                    #   以前は初回始値の時刻(open_seen)を毎周書いていたので、
+                    #   09:00:22 に読んだ板の受信時刻が 08:59:59 になっていた
+                    #   (2026-09-10 Codex 指摘②)。初回始値は別列に残す。
+                    _now = f"{_dt.datetime.now():%H:%M:%S.%f}"[:-3]
+                    _BOARD_TS[_s] = ("push", _WS.msg_seen.get(_s, _now))
+                    _OPEN_TS[_s] = _WS.open_seen.get(_s, "")
                 else:
                     _rest.append(_s)
             if args.ws_only:
@@ -1791,7 +1799,7 @@ _QPATH = Path(__file__).resolve().parent / f"n_quotes_{_dt.date.today():%Y%m%d}.
 #     そのまま有効な場合がある
 #   ★ buy1_*/sell1_* は Buy1/Sell1 の写し。ask_* と突き合わせれば
 #     **命名の向きをデータ側で検証できる**(コメントが1年間 逆だった前例がある)
-_QCOLS = ["date", "ts", "req_ts", "resp_ts", "poll", "symbol",
+_QCOLS = ["date", "ts", "req_ts", "resp_ts", "open_seen_ts", "poll", "symbol",
           "prev_close", "open_p", "open_time",
           "current_price", "cur_ts",
           "bid", "bid_qty", "bid_time", "bid_sign",
@@ -1865,6 +1873,9 @@ def _qdump(_bd_all: dict, _ts: str, _poll: int) -> None:
                 _q0, _q1 = _BOARD_TS.get(_s, ("", ""))
                 _r["ts"], _r["poll"] = _ts, _poll
                 _r["req_ts"], _r["resp_ts"] = _q0, _q1
+                # ★ 検知遅れ(寄り → 気づいた)はこちらで測る。resp_ts は
+                #   「その板を受け取った時刻」なので毎周 進む(Codex 指摘②)
+                _r["open_seen_ts"] = _OPEN_TS.get(_s, "")
                 # ⛔ cur_ts は最終**約定**の時刻。鮮度ゲートに使わない(上の注記)
                 _r["cur_ts"] = str(_bd.get("CurrentPriceTime") or "")
                 # ★ 気配自身の時刻とフラグ。特別気配の分離は ask_sign で行う
