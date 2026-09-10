@@ -1824,7 +1824,7 @@ _EXEC_VER = "N2"
 #     そのまま有効な場合がある
 #   ★ buy1_*/sell1_* は Buy1/Sell1 の写し。ask_* と突き合わせれば
 #     **命名の向きをデータ側で検証できる**(コメントが1年間 逆だった前例がある)
-_QCOLS = ["date", "exec_ver", "ws_on", "wake_on",
+_QCOLS = ["date", "exec_ver", "ws_req", "wake_req", "ws_ok",
           "ts", "req_ts", "resp_ts", "open_seen_ts", "poll", "symbol",
           "prev_close", "open_p", "open_time",
           "current_price", "cur_ts",
@@ -1899,14 +1899,20 @@ def _qdump(_bd_all: dict, _ts: str, _poll: int) -> None:
                 _q0, _q1 = _BOARD_TS.get(_s, ("", ""))
                 _r["ts"], _r["poll"] = _ts, _poll
                 _r["req_ts"], _r["resp_ts"] = _q0, _q1
-                # ★ **実行時の設定**を残す(2026-09-10 Codex 指摘④)。
-                #   ws_on は「--ws を指定して接続できたか」= 設定であって、
-                #   PUSH を何件 受信したかという **結果ではない**。
-                #   結果で対象日を選ぶと、PUSH が全滅した日だけが消える。
+                # ★ **指定した設定** と **その結果** を分けて残す
+                #   (2026-09-10 Codex 指摘④の仕上げ)。
+                #   ・ws_req / wake_req … こちらが何を指定して走らせたか。
+                #     ゲートの対象日は **これ**で決める。接続に失敗して REST に
+                #     戻った日も、同じ設定で走らせた以上ゲートに含める。
+                #   ・ws_ok … 実際に繋がったか(結果)。集計から日を落とすのには
+                #     使わない。落とすと「失敗した日だけ消える」ことになる。
+                #   ⛔ 前版は `args.ws and _WS is not None` を1つの列にしていて、
+                #     「最初から --no-ws」と「指定したが繋がらなかった」を
+                #     区別できなかった。
                 _r["exec_ver"] = _EXEC_VER
-                _r["ws_on"] = 1 if (args.ws and _WS is not None) else 0
-                _r["wake_on"] = 1 if (args.ws and _WS is not None
-                                      and not args.no_ws_wake) else 0
+                _r["ws_req"] = 1 if args.ws else 0
+                _r["wake_req"] = 1 if (args.ws and not args.no_ws_wake) else 0
+                _r["ws_ok"] = 1 if _WS is not None else 0
                 # ★ 検知遅れ(寄り → 気づいた)はこちらで測る。resp_ts は
                 #   「その板を受け取った時刻」なので毎周 進む(Codex 指摘②)
                 _r["open_seen_ts"] = _OPEN_TS.get(_s, "")

@@ -110,6 +110,11 @@ _DATE_DIG = _digits(_DATE)
 #   ⛔ 板の取り方・発注タイミングを変えたら向こうを上げ、ここも上げる。
 #     版が違う日は速さが違うので、混ぜて平均してはいけない(Codex 指摘④)。
 _GATE_VER = "N2"
+# ★ ゲートが数える **指定設定**。ここに一致する日だけを集計する。
+#   ⛔ これは「何を指定して走らせたか」であって「繋がったか」ではない。
+#     接続に失敗して REST に戻った日も、指定が同じなら含める(Codex 指摘④)。
+#     --no-ws / --no-ws-wake の比較運転は指定が違うので自動的に別集計になる。
+_GATE_CFG = {"ws_req": "1", "wake_req": "1"}
 
 
 def _match_date(t: str) -> bool:
@@ -543,11 +548,13 @@ def _n_entry_report(rows: list, order_rows: list) -> None:
                     continue
                 _first[_s] = r0
                 if not _cfg:
-                    # ★ **実行時の設定**。全行 同じ値なので最初の1行から取る
+                    # ★ **指定した設定**と**その結果**を分けて拾う。
+                    #   全行 同じ値なので最初の1行から取る
                     _cfg.update({
                         "版": str(r0.get("exec_ver") or "").strip(),
-                        "ws_on": str(r0.get("ws_on") or "").strip(),
-                        "wake_on": str(r0.get("wake_on") or "").strip()})
+                        "ws_req": str(r0.get("ws_req") or "").strip(),
+                        "wake_req": str(r0.get("wake_req") or "").strip(),
+                        "ws_ok": str(r0.get("ws_ok") or "").strip()})
                 if str(r0.get("req_ts") or "").strip() == "push":
                     _push += 1
                 else:
@@ -783,8 +790,9 @@ def _n_entry_report(rows: list, order_rows: list) -> None:
         #   ⛔ ws_on は「--ws で接続できたか」= 設定。受信結果ではない。
         "方式": "N",
         "版": _cfg.get("版", ""),
-        "ws_on": _cfg.get("ws_on", ""),
-        "wake_on": _cfg.get("wake_on", ""),
+        "ws_req": _cfg.get("ws_req", ""),      # 指定(ゲートはこれで選ぶ)
+        "wake_req": _cfg.get("wake_req", ""),
+        "ws_ok": _cfg.get("ws_ok", ""),        # 結果(選択には使わない)
     }
     _lp = Path("n_entry_log.csv")
     _hist: dict = {}
@@ -814,11 +822,22 @@ def _n_entry_report(rows: list, order_rows: list) -> None:
     #   ・方式(N)だけで選ぶと、PUSH 導入前や起床が効いていなかった日まで
     #     「PUSH後」のゲートに混ざる。速さの違う日を平均することになる
     #   ・版が空の古いログは **自動的に混ぜない**(設定が分からないため)
+    #   ・**指定した設定**(ws_req / wake_req)で選ぶ。接続に失敗して REST に
+    #     戻った日(ws_ok=0)も同じ設定で走らせた以上 含める。結果で落とすと
+    #     「失敗した日だけ消える」ことになる
+    #   ・--no-ws のような意図的な比較運転は指定が違うので自動的に別集計
+    def _isgate(h: dict) -> bool:
+        if str(h.get("版") or "") != _GATE_VER:
+            return False
+        return all(str(h.get(_k) or "") == _v for _k, _v in _GATE_CFG.items())
+
     _has = [(d, h) for d, h in sorted(_hist.items())
             if str(h.get("エントリー滑りbp") or "") != ""]
-    _ok = [(d, h) for d, h in _has if str(h.get("版") or "") == _GATE_VER]
+    _ok = [(d, h) for d, h in _has if _isgate(h)]
     _old = [d for d, h in _has if str(h.get("版") or "") != _GATE_VER]
-    _nows = sum(1 for _, h in _ok if str(h.get("ws_on") or "") != "1")
+    _oth = [d for d, h in _has
+            if str(h.get("版") or "") == _GATE_VER and not _isgate(h)]
+    _nows = sum(1 for _, h in _ok if str(h.get("ws_ok") or "") != "1")
     _nb = sum(int(_f0(h.get("約定"))) for _, h in _ok)
     _nd = len(_ok)
     print(f"  ★ §18.66 ゲート(版 {_GATE_VER}) — **{_nb}件 / {_nd}営業日**"
@@ -828,9 +847,13 @@ def _n_entry_report(rows: list, order_rows: list) -> None:
               f" ({', '.join(_old[-4:])}{' ほか' if len(_old) > 4 else ''})")
         print(f"        板の取り方が変わると速さが変わるので、混ぜて平均"
               f"できない。含めるなら n_entry_log.csv の 版 列を手で埋める")
+    if _oth:
+        print(f"     ⚠ 版は {_GATE_VER} だが **指定設定が違う** {len(_oth)}営業日は"
+              f"別集計 ({', '.join(_oth[-4:])})")
+        print(f"        --no-ws / --no-ws-wake の比較運転はここに落ちる")
     if _nows:
-        print(f"     ⚠ うち {_nows}営業日は --ws を使っていない(= REST だけ)。"
-              f"**除外していない**。受信結果で日を選ばないのが正しい")
+        print(f"     ⚠ うち {_nows}営業日は **接続に失敗して REST に戻った**。"
+              f"指定は同じなので **除外していない**(結果で日を選ばない)")
     if _nd >= 2:
         _dv = [_f0(h.get("エントリー滑りbp")) for _, h in _ok]
         _mu = sum(_dv) / _nd
