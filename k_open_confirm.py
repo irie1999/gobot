@@ -1651,10 +1651,13 @@ def _read_all(tag: str) -> dict:
         #   09:00〜09:03 に 6回。日付は下の `_open_today` が見るので、
         #   前日の値が紛れ込むことはない。
         if _WS is not None:
-            _snap = _WS.snapshot()
+            # ⛔ 板と時刻は **同じロックで一度に** 取る。別々に読むと
+            #   「古い板 + 新しい受信時刻」が混ざる(2026-09-10 Codex 指摘③)
+            _snap, _mseen, _oseen = _WS.snapshot_ts()
             _rest = []
             for _s in _b:
-                _bw = _snap.get(_s) or _snap.get(str(_s).replace(".T", "")) or {}
+                _k2 = str(_s).replace(".T", "")
+                _bw = _snap.get(_s) or _snap.get(_k2) or {}
                 if _bw and _open_today(_bw)[0] > 0:
                     _out[_s] = _bw
                     _n_ws += 1
@@ -1663,8 +1666,9 @@ def _read_all(tag: str) -> dict:
                     #   09:00:22 に読んだ板の受信時刻が 08:59:59 になっていた
                     #   (2026-09-10 Codex 指摘②)。初回始値は別列に残す。
                     _now = f"{_dt.datetime.now():%H:%M:%S.%f}"[:-3]
-                    _BOARD_TS[_s] = ("push", _WS.msg_seen.get(_s, _now))
-                    _OPEN_TS[_s] = _WS.open_seen.get(_s, "")
+                    _BOARD_TS[_s] = ("push",
+                                     _mseen.get(_s) or _mseen.get(_k2) or _now)
+                    _OPEN_TS[_s] = _oseen.get(_s) or _oseen.get(_k2) or ""
                 else:
                     _rest.append(_s)
             if args.ws_only:
@@ -1689,10 +1693,21 @@ def _read_all(tag: str) -> dict:
     # ★ 登録が何回走ったかを出す。0 = 登録し直していない(=期待どおり)。
     #   毎周 1以上なら銘柄集合が動いているので、その理由を疑うこと。
     _el = time.time() - _t0
+    # ★ 無音の秒数を **毎周** 出す(2026-09-10 Codex 指摘⑤)。ping を止めた
+    #   ので「TCPは生きているが無応答」はこれでしか気づけない。接続直後の
+    #   describe() 1回では場中の監視にならない。
+    _sil = ""
+    if _WS is not None:
+        _lt = getattr(_WS, "last_msg_t", 0.0)
+        _dt_s = (time.time() - _lt) if _lt > 0 else -1.0
+        if _dt_s < 0:
+            _sil = " ⚠**PUSH未受信**"
+        elif _dt_s >= 30:
+            _sil = f" ⚠**無音 {_dt_s:.0f}秒**"
     print(f"  [{tag}] {len(_out):,}/{len(_syms):,}銘柄 を {_el:.1f}秒 で取得"
           f" ({len(_out) / max(0.1, _el):.1f}件/秒 / 登録 {_n_reg}回"
           + (f" / **PUSH {_n_ws}件** HTTP {len(_syms) - _n_ws}件"
-             + ("" if _WS.ok else " ⚠切断中(キャッシュ使用)")
+             + ("" if _WS.ok else " ⚠切断中(キャッシュ使用)") + _sil
              if _WS is not None else "") + ")",
           flush=True)
     return _out

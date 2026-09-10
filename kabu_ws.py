@@ -262,6 +262,18 @@ class BoardStream:
         with self._lock:
             return {k: dict(v) for k, v in self._board.items()}
 
+    def snapshot_ts(self) -> tuple[dict, dict, dict]:
+        """板・受信時刻・初回始値時刻を **同じロックで一度に** 返す。
+
+        ⛔⛔ 別々に取ってはいけない(2026-09-10 Codex 指摘③)。
+          snapshot() の後で msg_seen を読むと、その隙に PUSH が届いた銘柄が
+          **古い板 + 新しい受信時刻** になる。整合しない組を記録すると、
+          あとから見て気づけない種類のズレになる。
+        """
+        with self._lock:
+            return ({k: dict(v) for k, v in self._board.items()},
+                    dict(self.msg_seen), dict(self.open_seen))
+
     def has_open(self, sym: str) -> bool:
         """その銘柄の始値が PUSH で届いているか。"""
         with self._lock:

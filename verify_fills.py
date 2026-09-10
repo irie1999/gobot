@@ -519,34 +519,27 @@ def _n_entry_report(rows: list, order_rows: list) -> None:
         _m = re.search(r"\d{2}:\d{2}:\d{2}(\.\d+)", str(hms or ""))
         return bool(_m)
 
-    # 銘柄ごとに **最初に寄りを検知した行**(以降の行は値が動いている)
-    _first: dict = {}
-    # ★ 段1 用は別に取る。寄りを検知した行は **寄前気配のまま**のことがあり、
-    #   その値段で100株売れる根拠が無い(2026-09-10 Codex 指摘②)。
-    #   気配フラグ(kabu 公式): 0101 一般 / 0102 特別 / 0103 注意 /
+    # 銘柄ごとに **最初に寄りを検知した行** = その周に発注判定をしている。
+    # ⛔⛔ 気配は **この行のもの以外を使わない**(2026-09-10 Codex 指摘②)。
+    #   f91b75a では「後から 0101(一般気配)になった最初の行」を拾っていたが、
+    #   それは約定より後の板でもよく、発注時に見えていた量ではない。
+    #   後から見つけた板で補うと **また別の量**になる。
+    #   → 発注判定の周が一般気配でなければ、内訳は **欠測**にする。
+    #   気配フラグ(kabu 公式 5617行): 0101 一般 / 0102 特別 / 0103 注意 /
     #   0107・0116・0117 寄前 / 0108 停止前特別 / 0109 引け後。
-    #   **0101 になった最初の行**だけを気配として使う。
-    _firstq: dict = {}
-    _lastsg: dict = {}        # 0101 にならなかった銘柄が最後に見せたフラグ
+    _first: dict = {}
     _push = _http = 0
     try:
         with open(_p, encoding="utf-8-sig", newline="") as f:
             for r0 in _csv.DictReader(f):
                 _s = str(r0.get("symbol") or "").strip()
-                if not _s or _num(r0.get("open_p")) <= 0:
+                if not _s or _s in _first or _num(r0.get("open_p")) <= 0:
                     continue
-                if _s not in _first:
-                    _first[_s] = r0
-                    if str(r0.get("req_ts") or "").strip() == "push":
-                        _push += 1
-                    else:
-                        _http += 1
-                if _s not in _firstq:
-                    _sg = str(r0.get("ask_sign") or "").strip()
-                    if _sg == "0101":
-                        _firstq[_s] = r0
-                    else:
-                        _lastsg[_s] = _sg or "(空)"
+                _first[_s] = r0
+                if str(r0.get("req_ts") or "").strip() == "push":
+                    _push += 1
+                else:
+                    _http += 1
     except Exception as e:                                       # noqa: BLE001
         print(f"\n[!] {_p.name} を読めませんでした: {e}")
         return
@@ -651,20 +644,55 @@ def _n_entry_report(rows: list, order_rows: list) -> None:
     #   高く出ていた。3日間 気づかなかった。
     # ⛔ 現在値へのフォールバックもやめる。気配が無い行を黙って別の量で
     #   埋めると、何を測ったのか分からなくなる(Codex 指摘)。
-    _s1, _s2, _tot, _chk, _det = [], [], [], [], []
-    _qskip: dict = {}
-    _namechk = [0, 0]                 # [照合できた, AskPrice != Buy1.Price]
+    # ⛔⛔ **ゲートの合計滑りは気配に依存させない**(2026-09-10 Codex 指摘①)。
+    #   f91b75a で内訳を気配ベースにしたとき、合計滑りと約定件数まで
+    #   「一般気配の行があった銘柄」だけに絞ってしまっていた。実約定と始値が
+    #   分かっていれば合計滑りは出せるので、**先に別ループで**計算する。
+    _tot, _tdet = [], []
     for r in rows:
         _s = str(r.get("symbol") or "").strip()
-        _k = _s if _s in _firstq else _s.replace(".T", "")
-        _q = _firstq.get(_k)
-        _real = _num(r.get("entry(売)"))
+        _q = _first.get(_s) or _first.get(_s.replace(".T", ""))
         if not _q:
-            _sg = _lastsg.get(_k) or _lastsg.get(_s) or "?"
-            _w = f"一般気配(0101)の行が無い(最後に見たフラグ {_sg})"
+            continue
+        _op, _real = _num(_q.get("open_p")), _num(r.get("entry(売)"))
+        if _op <= 0 or _real <= 0:
+            continue
+        _tot.append((_real - _op) / _op * 1e4)
+        _tdet.append(_s)
+    if _tot:
+        print()
+        print(f"  ★ エントリー滑り (実約定 − 始値) — **ゲートはこれで数える**")
+        for _s, _t in zip(_tdet, _tot):
+            print(f"     {_s:<8}{_t:>+9.1f}bp")
+        print(f"     {'平均':<8}{sum(_tot)/len(_tot):>+9.1f}bp  ({len(_tot)}件)")
+        print(f"     ⚠ **PUSH の効果ではない**。遅れが有利に出たか不利に"
+              f"出たかで、60〜71%は不利側(§18.44)")
+
+    # ── 内訳(段1/段2)。**発注判定に使った周の板が一般気配のときだけ** ──────
+    _s1, _s2, _chk, _det = [], [], [], []
+    _qskip: dict = {}
+    _namechk = [0, 0]                 # [照合できた, AskPrice != Buy1.Price]
+    _late = 0
+    for r in rows:
+        _s = str(r.get("symbol") or "").strip()
+        _q = _first.get(_s) or _first.get(_s.replace(".T", ""))
+        if not _q:
+            continue
+        _op, _real = _num(_q.get("open_p")), _num(r.get("entry(売)"))
+        if _op <= 0 or _real <= 0:
+            continue
+        _sg = str(_q.get("ask_sign") or "").strip()
+        if _sg != "0101":
+            _w = (f"発注判定の周が一般気配でない(フラグ {_sg or '(空)'})")
             _qskip[_w] = _qskip.get(_w, 0) + 1
             continue
-        _op = _num(_q.get("open_p"))
+        # 板を見た時刻が約定より後なら、その気配で段1は語れない
+        _tb, _tf = _sec(_q.get("resp_ts")), _sec(r.get("entry_t_s"))
+        if _tb is not None and _tf is not None and _tb > _tf + 1.0:
+            _late += 1
+            _qskip["板を見た時刻が約定より後"] = (
+                _qskip.get("板を見た時刻が約定より後", 0) + 1)
+            continue
         # AskPrice = Buy1.Price のはず。生データがあれば突き合わせて確かめる
         _buy1 = _num(_q.get("buy1_price"))
         _bid1 = _num(_q.get("ask"))               # ← AskPrice。名前に注意
@@ -673,8 +701,6 @@ def _n_entry_report(rows: list, order_rows: list) -> None:
             if abs(_buy1 - _bid1) > 1e-9:
                 _namechk[1] += 1
         _bd = _bid1 or _buy1                      # 現在値では埋めない
-        if _op <= 0 or _real <= 0:
-            continue
         if _bd <= 0:
             _qskip["買い気配(AskPrice/Buy1)が空"] = (
                 _qskip.get("買い気配(AskPrice/Buy1)が空", 0) + 1)
@@ -682,7 +708,7 @@ def _n_entry_report(rows: list, order_rows: list) -> None:
         _a = (_bd - _op) / _op * 1e4
         _b = (_real - _bd) / _op * 1e4
         _t = (_real - _op) / _op * 1e4
-        _s1.append(_a); _s2.append(_b); _tot.append(_t)
+        _s1.append(_a); _s2.append(_b)
         _chk.append(_a + _b - _t)
         _det.append((_s, _a, _b, _t))
     if _s1:
@@ -694,10 +720,14 @@ def _n_entry_report(rows: list, order_rows: list) -> None:
         for _s, _a, _b, _t in _det:
             print(f"     {_s:<8}{_a:>+17.1f}bp{_b:>+19.1f}bp{_t:>+9.1f}bp")
         print(f"     {'平均':<8}{sum(_s1)/_n:>+17.1f}bp"
-              f"{sum(_s2)/_n:>+19.1f}bp{sum(_tot)/_n:>+9.1f}bp")
+              f"{sum(_s2)/_n:>+19.1f}bp"
+              f"{sum(x[3] for x in _det)/_n:>+9.1f}bp")
         _c = sum(_chk) / _n
         if abs(_c) > 0.01:
             print(f"     ⛔ 検算が合いません(段1+段2 − 合計 = {_c:+.3f}bp)")
+        if _n < len(_tot):
+            print(f"     ⚠ 内訳は {_n}/{len(_tot)}件だけ。**上のゲート用の"
+                  f"合計滑りとは母集団が違う**ので平均を比べないこと")
         # ⚠ 恒等式は **どんな価格を間に置いても成立する**。一致しても
         #   気配や時刻が正しい保証にはならない(Codex 指摘③)。
         print(f"     ⚠ 段2は通信の遅れだけではない。始値ちょうどの売り指値は"
@@ -728,11 +758,18 @@ def _n_entry_report(rows: list, order_rows: list) -> None:
         "PUSH件数": _push, "HTTP件数": _http,
         "検知遅れ中央秒": (round(sorted(x[0] for x in _lags)[len(_lags) // 2], 2)
                            if _lags else ""),
-        "約定": len(_s1),
+        # ⛔ ゲートが数えるのは **気配に依存しない**この2つ(Codex 指摘①)
+        "約定": len(_tot),
         "発注": sum(1 for o in order_rows if str(o.get("side") or "") == "売"),
+        "エントリー滑りbp": round(sum(_tot) / len(_tot), 1) if _tot else "",
+        # ↓ 内訳は母集団が違う(一般気配の周があったものだけ)。参考値
+        "内訳件数": len(_s1),
         "段1bp": round(sum(_s1) / len(_s1), 1) if _s1 else "",
         "段2bp": round(sum(_s2) / len(_s2), 1) if _s2 else "",
-        "エントリー滑りbp": round(sum(_tot) / len(_tot), 1) if _tot else "",
+        # ★ 対象日は **方式とバージョン**で決める。PUSH の有無で選ぶと
+        #   「新方式で走ったのに PUSH が全滅した日」が消える(Codex 指摘④)
+        "方式": "N",
+        "ws": 1 if _push > 0 else 0,
     }
     _lp = Path("n_entry_log.csv")
     _hist: dict = {}
@@ -757,13 +794,21 @@ def _n_entry_report(rows: list, order_rows: list) -> None:
         return
 
     # ── ゲート (§18.66)。**1日=1観測**で数える ────────────────────────────
+    # ⛔ **PUSH の有無で日を選ばない**(2026-09-10 Codex 指摘④)。
+    #   PUSH件数>0 で絞ると「新方式で発注したのに PUSH が全滅した日」が
+    #   ゲートから消える = 都合の良い日だけを数えることになる。
+    #   対象日は **方式で固定**する(古い行は 方式 列が無いので N 扱い)。
     _ok = [(d, h) for d, h in sorted(_hist.items())
            if str(h.get("エントリー滑りbp") or "") != ""
-           and int(_f0(h.get("PUSH件数"))) > 0]
+           and str(h.get("方式") or "N") == "N"]
+    _nows = sum(1 for _, h in _ok if int(_f0(h.get("ws"))) == 0)
     _nb = sum(int(_f0(h.get("約定"))) for _, h in _ok)
     _nd = len(_ok)
     print(f"  ★ §18.66 ゲート(PUSH後) — **{_nb}件 / {_nd}営業日**"
           f"(目標 20件 かつ 8営業日)")
+    if _nows:
+        print(f"     ⚠ うち {_nows}営業日は PUSH が1件も無い(= REST だけ)。"
+              f"**除外していない**。方式で日を選ぶのが正しい")
     if _nd >= 2:
         _dv = [_f0(h.get("エントリー滑りbp")) for _, h in _ok]
         _mu = sum(_dv) / _nd
