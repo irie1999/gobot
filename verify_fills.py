@@ -629,9 +629,11 @@ def _n_entry_report(rows: list, order_rows: list) -> None:
         _rv = sorted(x[0] for x in _raw)
         print(f"     生の差   {len(_rv):>3}件  中央 {_rv[len(_rv)//2]:>+6.2f}秒  "
               f"最小 {_rv[0]:>+6.2f}秒  最大 {_rv[-1]:>+6.2f}秒")
+        _nneg = sum(1 for x in _raw if x[0] < 0)
         print(f"     ⚠ 以下は **『kabu が秒を切り上げ、PC と配信元の時計が"
               f"合っている』と仮定したときの参考上界**。時計のズレでも")
-        print(f"       負は出るので、この3例だけでは切り上げと区別できない")
+        print(f"       負は出るので、負の {_nneg}件 だけでは切り上げと"
+              f"区別できない")
         print(f"     全体   {len(_v):>3}件  中央 {_q50(_v):>6.1f}秒以下  "
               f"最大 {_v[-1]:>6.1f}秒以下")
         if _pv:
@@ -640,6 +642,12 @@ def _n_entry_report(rows: list, order_rows: list) -> None:
         if _hv:
             print(f"     HTTP   {len(_hv):>3}件  中央 {_q50(_hv):>6.1f}秒以下  "
                   f"最大 {_hv[-1]:>6.1f}秒以下")
+        if _pv and _hv:
+            # ⛔ **PUSH と HTTP は別の集団**。PUSH 側は「板が動いて当日の始値が
+            #   届いた銘柄」、HTTP 側はその残り。速く寄った銘柄ほど PUSH に
+            #   入りやすいので、差の全部を PUSH の効果と読んではいけない。
+            print(f"     ⚠ この2行は **別の集団**(PUSH=始値が届いた銘柄 / "
+                  f"HTTP=届かなかった残り)。差の全部が PUSH の効果ではない")
         if _rounded:
             print(f"     うち {_rounded}件 は引くと負(= 丸めより速く届いた)。"
                   f"**1秒を切っているのは確実**だが、それ以上は測れない")
