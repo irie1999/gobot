@@ -2,6 +2,21 @@
 # -*- coding: utf-8 -*-
 """watch を広げたら **その日 何件 増えたか** を事後に数える。
 
+⛔⛔⛔ **まずレポートの「N 50件制限なし」タブを見ること**(2026-09-11)。
+   `.\\dailyfast` のレポートに **同じ測定が既にある**。1.9年・475営業日で
+   watch50(流動性順) +2,576,029円 / 制限なし +3,292,612円 と出ており、
+   日別カードにも「候補127→合格2」の形で毎日 残っている。
+   このスクリプトは **それを知らずに作った重複**。存在意義は下の1点だけ:
+
+     ライブの候補リスト(n_signals / k_paper)と日足が一致するかの **照合**。
+     レポートは「全銘柄日を日足から直接」測るので、その前提が
+     ライブと合っているかは確かめていない。
+     → 実測 12営業日で 板の始値 vs 日足の始値が 100%一致(1bp以内)。
+       **前提は正しい**ことが分かったので、この用途もほぼ役目を終えた。
+
+   ⛔ 件数・損益・watch比較を知りたいだけなら **このスクリプトは要らない**。
+     レポートのタブのほうが期間が長く(1.9年 vs 12日)、日別も残る。
+
 ⛔⛔ **照会だけ。1件も発注しない。** kabu にも繋がない。読むのは
    n_signals_<日付>.csv(前夜の候補・全件) と k_paper_<日付>.csv(当日 読んだ
    50件の板) と、yfinance の日足だけ。
@@ -129,6 +144,25 @@ def _yf_opens(syms: list, ymd: str) -> dict:
     return _out
 
 
+def _jq_to_yf(code: str) -> str:
+    """J-Quants の5桁コード(末尾0)を yfinance の `NNNN.T` に直す。
+
+    ⛔⛔ **n_paper から import しないこと**(2026-09-11 に実機で落ちた)。
+      n_paper はモジュールトップで `parse_args()` を実行するので、import した
+      瞬間に **こちらの sys.argv をパースして** `unrecognized arguments:
+      --glob --rebuild` で止まる。しかも usage に出るのは n_paper の引数
+      なので、原因が分かりにくい。
+      定義が短いので写す。変えるときは n_paper.py:233 と両方。
+      (daytrade_data は `__main__` ガードの中なので import してよい)
+    """
+    c = str(code).strip()
+    if c.endswith(".T"):
+        return c
+    if len(c) == 5 and c.endswith("0"):
+        c = c[:4]
+    return f"{c}.T"
+
+
 def _rebuild(ymd: str, workers: int) -> tuple[list, dict]:
     """その日の **候補を作り直す**。(候補リスト, symbol -> (始値, 終値))
 
@@ -152,11 +186,10 @@ def _rebuild(ymd: str, workers: int) -> tuple[list, dict]:
     import backtest_limit_entry as _BLE
     try:
         from daytrade_data import available_local_symbols
-        import n_paper as _NP
     except Exception as e:                                       # noqa: BLE001
         print(f"[!] 銘柄一覧を読めません: {e}")
         return [], {}
-    _syms = sorted({_NP._jq_to_yf(s) for s in available_local_symbols()})
+    _syms = sorted({_jq_to_yf(s) for s in available_local_symbols()})
     print(f"  [再構成] {len(_syms):,}銘柄を当時の日足で作り直します"
           f"(前営業日までしか見ません)")
 
