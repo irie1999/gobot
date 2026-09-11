@@ -126,6 +126,12 @@ def _one_day(ymd: str, bands: list) -> dict | None:
     if not _rows:
         print(f"[!] {ymd}: 候補が0件")
         return None
+    # ⛔⛔ **銘柄コードの書式を揃える**(2026-09-11)。n_signals は `.T` 付きで、
+    #   k_paper と日足の引き当てキーは `.T` 無し。初版はここを合わせておらず、
+    #   照合①(k_paper のキー)は通るのに集計②(n_signals のキー)が1件も
+    #   引き当てられず、**全部 0件** と出ていた。
+    for _r in _rows:
+        _r["_sym"] = str(_r.get("symbol") or "").strip().removesuffix(".T")
 
     # ── 順位。rank_n が無い古い CSV は流動性降順で振り直す ──────────────
     if any(str(r.get("rank_n") or "").strip() for r in _rows):
@@ -138,11 +144,25 @@ def _one_day(ymd: str, bands: list) -> dict | None:
 
     # ── ① 板の始値と日足の始値を突き合わせる ──────────────────────────
     _kp = Path(f"k_paper_{ymd.replace('-', '')}.csv")
-    _board = {str(r.get("symbol") or "").strip(): _num(r.get("open_p"))
+    _board = {str(r.get("symbol") or "").strip().removesuffix(".T"):
+              _num(r.get("open_p"))
               for r in _read(_kp) if _num(r.get("open_p")) > 0}
-    print(f"\n[{ymd}] 候補 {len(_rows)}件 / 当日 板で読めた {len(_board)}件")
+    # ⛔⛔ **n_signals に51位以下が入っているとは限らない**(2026-09-11)。
+    #   n_paper.py --collect は `watched_n または shadow_n` の行しか書かず、
+    #   --shadow-watch の既定は **0 = 残さない**。つまり既定では上位50件だけ。
+    #   初版はここを確かめずに「候補全件が入っている」と決めつけ、12営業日
+    #   すべて「51位以下 0件」という **無意味な結果**を出した。
+    _nsh = sum(1 for r in _rows if _num(r.get("shadow_n")) > 0)
+    _wmax = max((_num(r.get("rank_n")) for r in _rows
+                 if _num(r.get("watched_n")) > 0), default=0)
+    print(f"\n[{ymd}] n_signals {len(_rows)}件"
+          f"(うち watched {len(_rows) - _nsh}件 / shadow {_nsh}件)"
+          f" / 当日 板で読めた {len(_board)}件")
+    if not _nsh and len(_rows) <= max(50, _wmax):
+        print(f"  ⛔ **51位以下が CSV にありません**(--shadow-watch が 0 の日)。"
+              f"この日は上位 {len(_rows)}件しか測れません")
     print("  日足の始値を取得中…", flush=True)
-    _day = _yf_opens([str(r.get("symbol") or "").strip() for r in _rows], ymd)
+    _day = _yf_opens([r["_sym"] for r in _rows], ymd)
     if not _day:
         print("  ⛔ 日足の始値が取れませんでした")
         return None
@@ -178,8 +198,9 @@ def _one_day(ymd: str, bands: list) -> dict | None:
     #   N の決済は引け成行(MOC)= 引けの板寄せ。日足の終値と一致するはず。
     #   実約定は fills_<日付>.csv に残っている(その日に約定があれば)。
     _fl = Path(f"fills_{ymd.replace('-', '')}.csv")
-    _fd = ([(str(r.get("symbol") or "").strip(), _num(r.get("exit(買戻)")))
-            for r in _read(_fl)] if _fl.exists() else [])
+    _fd = ([(str(r.get("symbol") or "").strip().removesuffix(".T"),
+             _num(r.get("exit(買戻)"))) for r in _read(_fl)]
+           if _fl.exists() else [])
     _fd = [(s, v) for s, v in _fd if s and v > 0]
     if _fd:
         _cd = [(abs(_day[s][1] - v) / v * 1e4, s, v, _day[s][1])
@@ -216,7 +237,7 @@ def _one_day(ymd: str, bands: list) -> dict | None:
         _have = _px = 0
         _ok: list = []
         for _r in _seg:
-            _s = str(_r.get("symbol") or "").strip()
+            _s = _r["_sym"]
             _oc, _pc = _day.get(_s), _num(_r.get("prev_close"))
             if not _oc or _pc <= 0:
                 continue
@@ -277,7 +298,7 @@ def _one_day(ymd: str, bands: list) -> dict | None:
               f"{sum(_got):>+12,.0f}{_drop:>13}")
     return {"date": ymd, "top50": len(_t50), "extra": len(_ext),
             "cand": len(_rows), "pnl50": sum(h[4] for h in _t50),
-            "pnlx": sum(h[4] for h in _ext)}
+            "pnlx": sum(h[4] for h in _ext), "shadow": _nsh}
 
 
 def main() -> None:
@@ -306,20 +327,36 @@ def main() -> None:
     _all = [x for d in _ds if (x := _one_day(d, _bands))]
     if len(_all) > 1:
         print("\n" + "=" * 74)
-        print(f"  {'日付':<12}{'候補':>6}{'上位50':>8}{'51位以下':>10}")
+        print(f"  {'日付':<12}{'n_signals':>10}{'shadow':>8}"
+              f"{'上位50':>8}{'51位以下':>10}{'損益(51位以下)':>16}")
         for _r in _all:
-            print(f"  {_r['date']:<12}{_r['cand']:>6}{_r['top50']:>8}"
-                  f"{_r['extra']:>10}")
+            print(f"  {_r['date']:<12}{_r['cand']:>10}{_r['shadow']:>8}"
+                  f"{_r['top50']:>8}{_r['extra']:>10}{_r['pnlx']:>+16,.0f}")
         _t = sum(r["top50"] for r in _all)
         _e = sum(r["extra"] for r in _all)
-        print(f"  {'合計':<12}{sum(r['cand'] for r in _all):>6}{_t:>8}{_e:>10}")
-        print(f"\n  ★ {len(_all)}営業日で 上位50件が {_t}件、"
-              f"51位以下に {_e}件 いた")
-        if _t:
-            print(f"     watch100 以上にすれば **{_e / _t:.1f}倍** になる計算")
-        print("  ⚠ これは『何件 建てられたか』であって損益ではない。"
-              "51位以下は流動性が低く、§18.70⑥ では")
-        print("     枠が埋まる日に大きく負けている。**件数だけで決めないこと**")
+        _px = sum(r["pnlx"] for r in _all)
+        print(f"  {'合計':<12}{sum(r['cand'] for r in _all):>10}"
+              f"{sum(r['shadow'] for r in _all):>8}{_t:>8}{_e:>10}"
+              f"{_px:>+16,.0f}")
+        # ⛔ shadow が1件も無いなら 51位以下は **測れていない**。
+        #   0件を「いなかった」と読ませないこと。
+        if not any(r["shadow"] for r in _all):
+            print(f"\n  ⛔ **どの日も shadow が 0件**。n_signals に51位以下が"
+                  f"入っていないので、『51位以下 {_e}件』は")
+            print(f"     **測れていないだけ**で『いなかった』ではない。")
+            print(f"     明日から collect に **--shadow-watch 150** を付けると"
+                  f"51〜150位が CSV に残り、測れるようになる")
+            print(f"     (発注対象は1件も変わらない。shadow_n は watched_n の"
+                  f"外側だけに立ち、k_open_confirm は watched_n で絞る)")
+        else:
+            print(f"\n  ★ {len(_all)}営業日で 上位50件が {_t}件、"
+                  f"51位以下に {_e}件 / {_px:+,.0f}円")
+            if _t:
+                print(f"     watch を広げれば件数は **{_e / _t:.1f}倍**")
+            print("  ⚠ 件数だけで決めないこと。51位以下は流動性が低く、"
+                  "§18.70⑥ では枠が埋まる日に大きく負けている。")
+            print("     そして広げるぶん **発注が遅れる**"
+                  "(切替に数秒 = §18.44 で 0.26bp/秒)")
     print("=" * 74)
 
 
