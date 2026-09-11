@@ -1119,7 +1119,49 @@ with ThreadPoolExecutor(max_workers=a.workers) as ex:
 
 if not _rows:
     sys.exit("[error] 1件も集まりませんでした")
-r_all = pd.DataFrame(_rows)
+
+
+def _mk_frame(rows: list) -> "pd.DataFrame":
+    """大きい list of dict を **メモリを抑えて** DataFrame にする。
+
+    ⛔ 一度に `pd.DataFrame(rows)` すると、pandas が全列を float64 で確保した
+      あと consolidate でもう一度 同じだけ確保するので **ピークが2倍**になる。
+      2026-09-11 に --days 4200(267万行 × 28列)で
+      `Unable to allocate 570. MiB` で落ちた。
+
+    ★ 対策: **チャンクに割って作り、float32 に落としてから結合**する。
+      ⚠ ただし **pnl と entry_p は float64 のまま**にする。267万件を足し
+        合わせるので、ここを float32 にすると合計に誤差が乗る。
+    """
+    _KEEP64 = {"pnl", "entry_p", "d1_close", "d1_high", "d1_low", "d2_open"}
+    _CH = 400_000
+    if len(rows) <= _CH:
+        return pd.DataFrame(rows)
+    _parts = []
+    for _i in range(0, len(rows), _CH):
+        _p = pd.DataFrame(rows[_i:_i + _CH])
+        for _c in _p.columns:
+            if _c not in _KEEP64 and str(_p[_c].dtype) == "float64":
+                _p[_c] = _p[_c].astype("float32")
+        _parts.append(_p)
+    # ⚠ copy=False は pandas 3.0 で deprecated(Copy-on-Write が既定)
+    _df = pd.concat(_parts, ignore_index=True)
+    del _parts
+    print(f"  [mem] {len(rows):,}行を {_CH:,}件ずつに割って作り、"
+          f"金額以外を float32 にしました "
+          f"({_df.memory_usage(deep=False).sum() / 1024 ** 2:,.0f}MB)")
+    return _df
+
+
+try:
+    r_all = _mk_frame(_rows)
+except MemoryError:
+    _need = len(_rows) * 28 * 8 / 1024 ** 3
+    _rec = max(200, int(a.days * 1.5e9 / max(1, len(_rows) * 28 * 8)))
+    sys.exit(f"[error] メモリが足りません({len(_rows):,}行 × 約28列 = "
+             f"{_need:.1f}GB 級)。\n"
+             f"        **--days を短くしてください**(目安 --days {_rec})。\n"
+             f"        いまの指定は --days {a.days} です。")
 # ★ 前夜の候補(前日終値ベース)を別に取り分け、r_all は始値ベースに戻す。
 #   ⛔ ここで戻さないと **他の全分析の母集団が変わる**(§18.38「土台を先に決める」)
 r_cand = None
