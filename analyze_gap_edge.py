@@ -547,6 +547,15 @@ _RET1_MIN = 1.753
 #   both は **short 向きでスキャンして、あとから鏡像を複製する**。
 #   2回スキャンすると10分×2かかるうえ、母集団がズレる余地ができる。
 _SIDE = -1.0 if a.side == "long" else 1.0
+# ⛔⛔ **方向ラベルの既定**(2026-09-11 Codex 監査で発覚)。
+#   `side` 列は `--side both` のときだけ作られる(_sides_of)。`--side long`
+#   単体では行に side が無く、`getattr(_r, "side", 1)` が **1(ショート)** を
+#   返していた。損益は _SIDE で正しく反転するので金額は合うが、
+#   **明細・方向別集計・ストップ安診断が全部ショートの前提で走る**。
+#   §18.63 の「鏡像はストップ安で決済できない日が 0件」は、この表記で
+#   作った picks を数えた可能性があり、**要 再確認**。
+#   (実測: 現行 picks.csv は 20,522件すべてショート表記 / Codex 監査)
+_DEF_SIDE = -1 if a.side == "long" else 1
 # ★ --sweep-cands のときだけ、価格帯を **前日終値**でも通した行を残す。
 #   r_all は直後に始値ベースへ絞り直すので、他の分析の母集団は1行も変わらない。
 _KEEP_CAND = bool(a.sweep_cands)
@@ -1251,6 +1260,22 @@ if _NEEDS_TRAIN:
             print(f"       ⛔ TEST が2倍になっていません。複製に失敗しています")
         print(f"       ⚠ **watch も予算も1つを共有**します。kabu の登録上限は"
               f"合計50件なので、両側の候補を混ぜて売買代金順に上位を取ります")
+    else:
+        # ⛔⛔ **single side でも `side` 列を必ず作る**(2026-09-11 Codex 監査)。
+        #   both のときしか付けていなかったので、`--side long` では列が無く、
+        #   下流の `getattr(_r, "side", 1)` や `df["side"] == 1` が
+        #   **ショートの前提で走っていた**。損益は _SIDE で反転するので
+        #   金額は合い、方向だけが黙って逆になる = 気づけない形。
+        #   実害: analyze_limit_up は side>0 で **ストップ高**、side<0 で
+        #   ストップ安 を見る。ロングは本来ストップ安が問題なのに、
+        #   ストップ高で判定され **該当0件** になっていた。
+        #   §18.63 の「鏡像は決済できない日が 0件」はこれで説明がつく。
+        for _df in (_train, _test):
+            if _df is not None and len(_df):
+                _df["side"] = _DEF_SIDE
+        if a.side == "long":
+            print(f"\n[long] 鏡像として走ります。明細の side は **-1**"
+                  f"(以前は列が無く、全部ショート表記になっていました)")
 
 # ⛔ watch の並べ替えに使えるのは **D 時点で確定する列だけ**。
 #   D+1 の始値から作る列(gap_bp / entry_p / gap_hi_bp / pnl)は先読み。
@@ -1376,7 +1401,7 @@ def _make_ops_sim(_src_all, _pool_df, _ond):
                 _hit = _hit.sort_values("gap_bp", ascending=False)
             # ── 予算配分 ──────────────────────────────────────────
             #   merge 以外は側ごとに財布を分ける。alt は1つの財布で交互に取る。
-            _sd_of = (lambda _r: int(getattr(_r, "side", 1)))
+            _sd_of = (lambda _r: int(getattr(_r, "side", _DEF_SIDE)))
             _pool = {1: _cap, -1: _cap}
             if alloc == "split50":
                 _pool = {1: _cap / 2, -1: _cap / 2}
@@ -1443,8 +1468,8 @@ def _make_ops_sim(_src_all, _pool_df, _ond):
                     _pool[_sd0] -= _cost
                     _cash -= _cost
                 elif _cost > _cash:
-                    _pushed[int(getattr(_r, "side", 1))] = \
-                        _pushed.get(int(getattr(_r, "side", 1)), 0) + 1
+                    _pushed[int(getattr(_r, "side", _DEF_SIDE))] = \
+                        _pushed.get(int(getattr(_r, "side", _DEF_SIDE)), 0) + 1
                     continue
                 else:
                     _cash -= _cost
@@ -1455,7 +1480,7 @@ def _make_ops_sim(_src_all, _pool_df, _ond):
                 #   (どの銘柄を何株建てたかは _ops_sim の中でしか分からない)
                 _picks.append({
                     "date": _d, "symbol": _r.symbol,
-                    "side": int(getattr(_r, "side", 1)),
+                    "side": int(getattr(_r, "side", _DEF_SIDE)),
                     "entry_p": float(_px), "qty": int(_lot),
                     "gap_bp": float(getattr(_r, "gap_bp", 0.0) or 0.0),
                     "d1_close": float(getattr(_r, "d1_close", 0.0) or 0.0),
@@ -1466,7 +1491,7 @@ def _make_ops_sim(_src_all, _pool_df, _ond):
                     "pnl": _pp,
                 })
                 _seen_sym[_r.symbol] = _d
-                _sd = int(getattr(_r, "side", 1))
+                _sd = int(getattr(_r, "side", _DEF_SIDE))
                 _v = _byside.setdefault(_sd, [0.0, 0])
                 _v[0] += _pp; _v[1] += 1
                 _dv = _daily.setdefault(_d, [0.0, 0.0])
