@@ -44,6 +44,8 @@ from pathlib import Path
 _GAP_BP = 100.0          # 始値が前日終値 +100bp 以上
 _MIN_PX = 1000.0         # 始値も 1,000〜6,000円
 _MAX_PX = 6000.0
+_QTY = 100               # 100株固定
+_BUDGET = 4_000_000.0    # 予算400万
 
 
 def _num(v) -> float:
@@ -63,7 +65,10 @@ def _read(p: Path) -> list:
 
 
 def _yf_opens(syms: list, ymd: str) -> dict:
-    """その日の **日足の始値** を symbol -> open で返す。
+    """その日の **日足の始値と終値** を symbol -> (open, close) で返す。
+
+    ★ N は「寄りで売って引けで買い戻す」だけ(損切りも利確も無い / §18.55)。
+      だから **この2つだけで損益が出る**。5分足も板も要らない。
 
     ⚠ yfinance は 1日ぶんを取りに行くと前後がずれることがあるので、
       前後2日を取って **日付で厳密に選ぶ**。
@@ -92,18 +97,20 @@ def _yf_opens(syms: list, ymd: str) -> dict:
             continue
         for _t in _b:
             try:
-                _s = _df[_t]["Open"] if len(_b) > 1 else _df["Open"]
+                _sub = _df[_t] if len(_b) > 1 else _df
+                _so, _sc = _sub["Open"], _sub["Close"]
             except Exception:                                    # noqa: BLE001
                 continue
-            for _ix, _v in _s.items():
-                if str(getattr(_ix, "date", lambda: _ix)())[:10] == ymd:
-                    try:
-                        _fv = float(_v)
-                    except (TypeError, ValueError):
-                        continue
-                    if _fv > 0:
-                        _out[_t.removesuffix(".T")] = _fv
+            for _ix, _v in _so.items():
+                if str(getattr(_ix, "date", lambda: _ix)())[:10] != ymd:
+                    continue
+                try:
+                    _o, _c = float(_v), float(_sc.loc[_ix])
+                except (TypeError, ValueError, KeyError):
                     break
+                if _o > 0 and _c > 0:
+                    _out[_t.removesuffix(".T")] = (_o, _c)
+                break
         print(f"  … {min(_i + _B, len(_tk))}/{len(_tk)}銘柄", flush=True)
     return _out
 
@@ -146,14 +153,14 @@ def _one_day(ymd: str, bands: list) -> dict | None:
         if not _dp:
             _miss += 1
             continue
-        _diff.append((abs(_dp - _bp) / _bp * 1e4, _s, _bp, _dp))
+        _diff.append((abs(_dp[0] - _bp) / _bp * 1e4, _s, _bp, _dp[0]))
     if not _diff:
         print("  ⛔ 突き合わせられる銘柄がありません")
         return None
     _diff.sort()
     _n1 = sum(1 for d, *_ in _diff if d <= 1.0)
     _n5 = sum(1 for d, *_ in _diff if d <= 5.0)
-    print(f"  [照合] 板 vs 日足 {len(_diff)}件: "
+    print(f"  [照合①始値] 板 vs 日足 {len(_diff)}件: "
           f"1bp以内 {_n1}件 ({_n1 / len(_diff) * 100:.0f}%) / "
           f"5bp以内 {_n5}件 ({_n5 / len(_diff) * 100:.0f}%)"
           + (f" / 日足が無い {_miss}件" if _miss else ""))
@@ -167,44 +174,110 @@ def _one_day(ymd: str, bands: list) -> dict | None:
         return None
     print("  ✅ 日足の始値を代用できます(51位以下もこれで数えます)")
 
+    # ── ①' 終値も照合する。**損益の買い戻し側**はこれで代用するので ──────
+    #   N の決済は引け成行(MOC)= 引けの板寄せ。日足の終値と一致するはず。
+    #   実約定は fills_<日付>.csv に残っている(その日に約定があれば)。
+    _fl = Path(f"fills_{ymd.replace('-', '')}.csv")
+    _fd = ([(str(r.get("symbol") or "").strip(), _num(r.get("exit(買戻)")))
+            for r in _read(_fl)] if _fl.exists() else [])
+    _fd = [(s, v) for s, v in _fd if s and v > 0]
+    if _fd:
+        _cd = [(abs(_day[s][1] - v) / v * 1e4, s, v, _day[s][1])
+               for s, v in _fd if s in _day]
+        if _cd:
+            _cd.sort()
+            _c5 = sum(1 for d, *_ in _cd if d <= 5.0)
+            print(f"  [照合②終値] 実買戻 vs 日足 {len(_cd)}件: "
+                  f"5bp以内 {_c5}件 ({_c5 / len(_cd) * 100:.0f}%)"
+                  f" / 最大 {_cd[-1][0]:.1f}bp")
+            if _c5 < len(_cd):
+                _d, _s, _r, _y = _cd[-1]
+                print(f"     ⚠ {_s} 実買戻 {_r:,.1f} vs 日足終値 {_y:,.1f}"
+                      f" ({_d:+.1f}bp)")
+    else:
+        print("  ⚠ 終値の照合はできません(その日の約定が無い)。"
+              "**損益は日足の終値で代用した値**")
+
     # ── ② 帯別に「N の条件を満たした件数」を数える ───────────────────
     #   条件は k_open_confirm._mk_row と同じ:
     #     gap = (始値 − 前日終値)/前日終値×1e4 ≥ 100bp  かつ
     #     1,000 ≤ 始値 ≤ 6,000
+    #   ★ 損益は **(始値 − 終値) × 100株**。N は途中で何もしないので
+    #     これがそのまま1件の損益になる(滑りは無視)。
+    _hit = []          # 合格した銘柄 (順位, 銘柄, 始値, 終値, 損益)
     _edges = [0] + sorted(bands) + [len(_rows)]
-    _tab, _extra = [], 0
+    _tab = []
     for _a, _b in zip(_edges, _edges[1:]):
         if _a >= len(_rows):
             break
         _seg = [r for r in _rows if _a < r["_rank"] <= min(_b, len(_rows))]
         if not _seg:
             continue
-        _have = _px = _ok = 0
+        _have = _px = 0
+        _ok: list = []
         for _r in _seg:
             _s = str(_r.get("symbol") or "").strip()
-            _op, _pc = _day.get(_s, 0.0), _num(_r.get("prev_close"))
-            if _op <= 0 or _pc <= 0:
+            _oc, _pc = _day.get(_s), _num(_r.get("prev_close"))
+            if not _oc or _pc <= 0:
                 continue
+            _op, _cl = _oc
             _have += 1
             if not (_MIN_PX <= _op <= _MAX_PX):
                 continue
             _px += 1
-            if (_op - _pc) / _pc * 1e4 >= _GAP_BP:
-                _ok += 1
-        _tab.append((f"{_a + 1}〜{min(_b, len(_rows))}", len(_seg), _have,
-                     _px, _ok))
-        if _a >= 50:
-            _extra += _ok
-    print(f"\n  {'順位帯':<10}{'候補':>6}{'日足あり':>9}{'価格帯内':>9}"
-          f"{'+100bp以上':>11}{'合格率':>8}")
-    for _lb, _n, _hv, _p, _o in _tab:
-        print(f"  {_lb:<10}{_n:>6}{_hv:>9}{_p:>9}{_o:>11}"
-              f"{(_o / _p * 100 if _p else 0):>7.1f}%")
-    _t50 = sum(o for lb, _n, _hv, _p, o in _tab
-               if int(lb.split("〜")[0]) <= 50)
-    print(f"\n  ★ 上位50件(いまの運用) {_t50}件 → "
-          f"51位以下に **あと {_extra}件** いた")
-    return {"date": ymd, "top50": _t50, "extra": _extra, "cand": len(_rows)}
+            if (_op - _pc) / _pc * 1e4 < _GAP_BP:
+                continue
+            _pl = (_op - _cl) * _QTY             # ショート: 始値で売り 終値で買戻
+            _ok.append(_pl)
+            _r["_op"], _r["_hit"] = _op, 1       # 帯ごとの投入額を出すため
+            _hit.append((_r["_rank"], _s, _op, _cl, _pl))
+        # (帯のラベル, 候補, 価格帯内, 合格した銘柄の損益, 同 投入額)
+        _tab.append((f"{_a + 1}〜{min(_b, len(_rows))}", len(_seg), _px,
+                     _ok, [r["_op"] * _QTY for r in _seg
+                           if (r.get("_op") or 0) > 0 and r.get("_hit")]))
+    print(f"\n  {'順位帯':<10}{'候補':>6}{'価格帯内':>9}{'+100bp':>8}"
+          f"{'合格率':>8}{'損益':>12}{'bp/件':>9}")
+    for _lb, _n, _p, _ok, _inv in _tab:
+        _rate = (len(_ok) / _p * 100) if _p else 0.0
+        if not _ok:
+            print(f"  {_lb:<10}{_n:>6}{_p:>9}{0:>8}{_rate:>7.1f}%"
+                  f"{'—':>12}{'—':>9}")
+            continue
+        _sum, _iv = sum(_ok), sum(_inv)
+        _bp = (_sum / _iv * 1e4) if _iv else 0.0
+        print(f"  {_lb:<10}{_n:>6}{_p:>9}{len(_ok):>8}{_rate:>7.1f}%"
+              f"{_sum:>+12,.0f}{_bp:>+8.1f}")
+    _t50 = [h for h in _hit if h[0] <= 50]
+    _ext = [h for h in _hit if h[0] > 50]
+    print(f"\n  ★ 上位50件(いまの運用) {len(_t50)}件 {sum(h[4] for h in _t50):+,.0f}円"
+          f" → 51位以下に **あと {len(_ext)}件 {sum(h[4] for h in _ext):+,.0f}円**")
+
+    # ── ③ 予算400万・流動性降順で埋めたら (実運用に近い形) ────────────
+    #   ⛔ §18.10: 「全部買えるなら得」と「予算内でどれを買うか」は別問題。
+    #     N は100株固定なので 1件あたり 始値×100 を使う。
+    print(f"\n  {'watch':<10}{'建てた':>7}{'投入':>12}{'損益':>12}"
+          f"{'予算で落ちた':>13}")
+    for _w in [50] + [b for b in sorted(bands) if b > 50] + [len(_rows)]:
+        if _w > len(_rows) and _w != len(_rows):
+            continue
+        _use = 0.0
+        _got: list = []
+        _drop = 0
+        for _rk, _s, _op, _cl, _pl in sorted(_hit):
+            if _rk > _w:
+                continue
+            _need = _op * _QTY
+            if _use + _need > _BUDGET:
+                _drop += 1
+                continue
+            _use += _need
+            _got.append(_pl)
+        _lbl = "無制限" if _w >= len(_rows) else str(_w)
+        print(f"  {_lbl:<10}{len(_got):>7}{_use:>12,.0f}"
+              f"{sum(_got):>+12,.0f}{_drop:>13}")
+    return {"date": ymd, "top50": len(_t50), "extra": len(_ext),
+            "cand": len(_rows), "pnl50": sum(h[4] for h in _t50),
+            "pnlx": sum(h[4] for h in _ext)}
 
 
 def main() -> None:
