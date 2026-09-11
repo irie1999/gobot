@@ -21,11 +21,25 @@
   当日 読んだ50件は両方 持っているので突き合わせられる。
   ⛔ 一致率が低いときは帯別の集計を **出さない**。推測で数えない。
 
+★ --rebuild: **過去日も測れる** (2026-09-11)
+  n_signals には既定で上位50件しか残らない(--shadow-watch が 0)。だが
+  **当時の日足があれば候補を作り直せる**ので、過去日でも51位以下を出せる。
+  ⛔ そのとき必ず **再構成した上位50件が保存済みと一致するか**を先に照合し、
+    95%未満なら結果を出さない。「作り直せた」と「当時を再現できた」は別。
+
+  ⚠ 測れる範囲は分かれる (2026-09-11 Codex 指摘):
+      測れる    … 追加の候補・合格件数 / 始値→終値の理論損益 /
+                  指定した順序での予算シミュ
+      測れない  … 寄った順・09:10までに寄ったか / 実際の滑り・不約定 /
+                  ライブで実現できた損益
+    つまり出るのは **上限**であって、その額が取れるという意味ではない。
+
 使い方
     python check_watch_width.py                       # 今日
     python check_watch_width.py --date 2026-09-11
     python check_watch_width.py --glob "n_signals_*.csv"   # 貯まったぶん全部
     python check_watch_width.py --bands 50,100,150    # 帯の区切り
+    python check_watch_width.py --glob "n_signals_*.csv" --rebuild  # 過去日も
 """
 from __future__ import annotations
 
@@ -115,7 +129,93 @@ def _yf_opens(syms: list, ymd: str) -> dict:
     return _out
 
 
-def _one_day(ymd: str, bands: list) -> dict | None:
+def _rebuild(ymd: str, workers: int) -> tuple[list, dict]:
+    """その日の **候補を作り直す**。(候補リスト, symbol -> (始値, 終値))
+
+    ⛔⛔ **当時の情報だけで作ること**。使うのは対象日の **前営業日まで**の
+      日足(前日騰落率・株価・売買代金20日平均)で、当日は始値と終値しか
+      見ない。当日の値で候補を選んだら先読みになる。
+
+    ★ 定義は n_paper.py:270-301 と同じにする(ここがズレたら再構成の意味が無い):
+        pc  = 前営業日の終値
+        ret1= (前営業日 / 前々営業日 − 1) × 100
+        liq = (終値 × 出来高) の20日平均 (前営業日の時点)
+      フィルタ: ret1 >= 1.753 かつ 1,000 <= pc <= 6,000
+      並び    : (-liq, symbol)
+
+    ⚠ 銘柄一覧は **いまの** ローカル5分足から作る(n_paper と同じ経路)。
+      当時の一覧そのものではないので、**上場廃止で消えた銘柄は落ちる**。
+      数日前ならほぼ同じだが、遡るほど偏りが入る(Codex 指摘)。
+    """
+    import pandas as pd
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import backtest_limit_entry as _BLE
+    try:
+        from daytrade_data import available_local_symbols
+        import n_paper as _NP
+    except Exception as e:                                       # noqa: BLE001
+        print(f"[!] 銘柄一覧を読めません: {e}")
+        return [], {}
+    _syms = sorted({_NP._jq_to_yf(s) for s in available_local_symbols()})
+    print(f"  [再構成] {len(_syms):,}銘柄を当時の日足で作り直します"
+          f"(前営業日までしか見ません)")
+
+    def _one(sym: str):
+        try:
+            _df = _BLE.fetch(sym, 400)
+        except Exception:                                        # noqa: BLE001
+            return None
+        if _df is None or len(_df) < 25:
+            return None
+        try:
+            _ix = pd.to_datetime(_df.index).normalize()
+            _hit = [i for i, d in enumerate(_ix) if str(d.date()) == ymd]
+            if not _hit or _hit[0] < 21:
+                return None
+            _t = _hit[0]                     # 当日
+            _p = _t - 1                      # 前営業日
+            _c = _df["close"]
+            _v = (_df["volume"] if "volume" in _df.columns
+                  else pd.Series(0.0, index=_df.index))
+            _pc = float(_c.iloc[_p])
+            _r1 = float(_c.iloc[_p] / _c.iloc[_p - 1] - 1.0) * 100.0
+            _lq = float((_c * _v).rolling(20).mean().iloc[_p])
+            _op = float(_df["open"].iloc[_t])
+            _cl = float(_c.iloc[_t])
+        except Exception:                                        # noqa: BLE001
+            return None
+        if not (_pc > 0 and _r1 == _r1 and _op > 0 and _cl > 0):
+            return None
+        return ({"symbol": sym, "prev_close": round(_pc, 1),
+                 "ret1": round(_r1, 3),
+                 "liq": round(_lq if _lq == _lq else 0.0, 0)}, (_op, _cl))
+
+    _cand, _day = [], {}
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+        _fs = {ex.submit(_one, s): s for s in _syms}
+        _n = 0
+        for _f in as_completed(_fs):
+            _n += 1
+            if _n % 400 == 0:
+                print(f"    … {_n:,}/{len(_syms):,}", flush=True)
+            _r = _f.result()
+            if not _r:
+                continue
+            _row, _oc = _r
+            _day[_row["symbol"].removesuffix(".T")] = _oc
+            _cand.append(_row)
+    # n_paper.py:337-341 と同じフィルタと並び
+    _cand = [r for r in _cand
+             if r["ret1"] >= 1.753 and 1000.0 <= r["prev_close"] <= 6000.0]
+    _cand.sort(key=lambda r: (-r["liq"], r["symbol"]))
+    for _i, _r in enumerate(_cand, 1):
+        _r["rank_n"] = _i
+        _r["_sym"] = _r["symbol"].removesuffix(".T")
+    print(f"  [再構成] 候補 {len(_cand)}件 / 日足が取れた {len(_day):,}銘柄")
+    return _cand, _day
+
+
+def _one_day(ymd: str, bands: list, rebuild: int = 0) -> dict | None:
     _sig = Path(f"n_signals_{ymd.replace('-', '')}.csv")
     if not _sig.exists():
         _sig = Path(f"n_signals_{ymd}.csv")
@@ -158,11 +258,43 @@ def _one_day(ymd: str, bands: list) -> dict | None:
     print(f"\n[{ymd}] n_signals {len(_rows)}件"
           f"(うち watched {len(_rows) - _nsh}件 / shadow {_nsh}件)"
           f" / 当日 板で読めた {len(_board)}件")
-    if not _nsh and len(_rows) <= max(50, _wmax):
+    if not rebuild and not _nsh and len(_rows) <= max(50, _wmax):
         print(f"  ⛔ **51位以下が CSV にありません**(--shadow-watch が 0 の日)。"
               f"この日は上位 {len(_rows)}件しか測れません")
-    print("  日足の始値を取得中…", flush=True)
-    _day = _yf_opens([r["_sym"] for r in _rows], ymd)
+    # ── ★ 再構成 (--rebuild)。当時の日足から候補を作り直して 51位以下を得る ──
+    _saved = _rows                      # 保存済み(照合に使う)
+    if rebuild:
+        _rb, _day = _rebuild(ymd, rebuild)
+        if not _rb:
+            print("  ⛔ 再構成できませんでした")
+            return None
+        # ⛔⛔ **上位50件が保存済みと一致するかを先に確かめる**(Codex 指摘)。
+        #   一致しないなら再構成のどこかが当時と違うので、51位以下の結果は
+        #   採用しない。「作り直せた」と「当時を再現できた」は別。
+        _have = [r for r in _saved if _num(r.get("watched_n")) > 0] or _saved
+        _n50 = min(len(_have), 50)
+        _a = {r["_sym"] for r in sorted(_have, key=lambda x: _num(
+            x.get("rank_n")) or 1e9)[:_n50]}
+        _b = {r["_sym"] for r in _rb[:_n50]}
+        _hit2 = len(_a & _b)
+        print(f"  [照合③候補] 再構成の上位{_n50}件 vs 保存済み: "
+              f"一致 {_hit2}/{_n50}件 ({_hit2 / max(1, _n50) * 100:.0f}%)")
+        if _hit2 < _n50:
+            for _x in sorted(_a - _b)[:3]:
+                print(f"     ⚠ 保存済みにあって再構成に無い: {_x}")
+            for _x in sorted(_b - _a)[:3]:
+                print(f"     ⚠ 再構成にあって保存済みに無い: {_x}")
+        if _hit2 / max(1, _n50) < 0.95:
+            print("  ⛔ **一致率が 95%未満**。当時を再現できていないので、"
+                  "51位以下の結果は採用しません")
+            return None
+        print("  ✅ 当時を再現できています(51位以下もこの候補で数えます)")
+        _rows = _rb
+        for _i, _r in enumerate(_rows, 1):
+            _r["_rank"] = _i
+    else:
+        print("  日足の始値を取得中…", flush=True)
+        _day = _yf_opens([r["_sym"] for r in _rows], ymd)
     if not _day:
         print("  ⛔ 日足の始値が取れませんでした")
         return None
@@ -309,6 +441,11 @@ def main() -> None:
                     help='複数日まとめて。例 "n_signals_*.csv"')
     ap.add_argument("--bands", default="50,100,150",
                     help="順位の区切り(既定 50,100,150)")
+    ap.add_argument("--rebuild", type=int, nargs="?", const=8, default=0,
+                    metavar="WORKERS",
+                    help="当時の日足から **候補を作り直して** 51位以下も測る"
+                         "(並列数・既定8)。上位50件が保存済みと95%%一致しな"
+                         "ければ結果を出さない")
     a = ap.parse_args()
     _bands = [int(x) for x in str(a.bands).split(",") if x.strip().isdigit()]
 
@@ -324,7 +461,7 @@ def main() -> None:
     print(f"  条件: 始値が前日終値 +{_GAP_BP:.0f}bp 以上 / "
           f"始値 {_MIN_PX:,.0f}〜{_MAX_PX:,.0f}円")
     print("=" * 74)
-    _all = [x for d in _ds if (x := _one_day(d, _bands))]
+    _all = [x for d in _ds if (x := _one_day(d, _bands, a.rebuild))]
     if len(_all) > 1:
         print("\n" + "=" * 74)
         print(f"  {'日付':<12}{'n_signals':>10}{'shadow':>8}"
@@ -340,7 +477,7 @@ def main() -> None:
               f"{_px:>+16,.0f}")
         # ⛔ shadow が1件も無いなら 51位以下は **測れていない**。
         #   0件を「いなかった」と読ませないこと。
-        if not any(r["shadow"] for r in _all):
+        if not a.rebuild and not any(r["shadow"] for r in _all):
             print(f"\n  ⛔ **どの日も shadow が 0件**。n_signals に51位以下が"
                   f"入っていないので、『51位以下 {_e}件』は")
             print(f"     **測れていないだけ**で『いなかった』ではない。")
