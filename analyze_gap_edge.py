@@ -561,9 +561,14 @@ _DEF_SIDE = -1 if a.side == "long" else 1
 _KEEP_CAND = bool(a.sweep_cands)
 
 if a.side == "both" and not (a.sweep_ops or a.confirm_both or a.sweep_regime
-                             or a.search_switch or a.sweep_size):
+                             or a.search_switch or a.sweep_size
+                             or bool(a.dump_picks)):
+    # ★ --dump-picks は **判定でも探索でもない**(明細を書き出すだけ)ので
+    #   both を許可する(2026-09-11)。しかも picks には side 列があるので
+    #   後から方向を分離できる。むしろ両建ての明細は both でしか出せない。
+    #   ⛔ それ以外(--confirm / --explore)は従来どおり片側ずつ。
     sys.exit("[error] --side both は --sweep-ops / --confirm-both / "
-             "--sweep-regime 専用です。\n"
+             "--sweep-regime / --dump-picks 専用です。\n"
              "        判定(--confirm)や探索(--explore)は片側ずつ行ってください"
              "(両側を混ぜると『どちらの効果か』が分離できません)")
 
@@ -2003,6 +2008,21 @@ if a.dump_picks:
     pd.DataFrame(_rows_p).to_csv(a.dump_picks, index=False,
                                  encoding="utf-8-sig")
     print(f"[dump] {a.dump_picks} に {len(_rows_p):,}行 書きました")
+    # ★★ **方向の内訳を必ず出す**(2026-09-11)。side 列が全部 +1 になる
+    #   不具合を3ヶ月ぶん気づけなかった。金額は合うので出力を見ても
+    #   分からず、下流(analyze_limit_up)が別方向の板を照合していた。
+    _bs: dict = {}
+    for _p in _rows_p:
+        _k = int(_p.get("side", 1))
+        _bs[_k] = _bs.get(_k, 0) + 1
+    print(f"  [方向] ショート(+1) {_bs.get(1, 0):,}件 / "
+          f"ロング(-1) {_bs.get(-1, 0):,}件")
+    if a.side == "both" and (not _bs.get(1) or not _bs.get(-1)):
+        print("  ⛔ **both なのに片側しかありません**。鏡像の複製か "
+              "side の付与が壊れています")
+    elif a.side == "long" and _bs.get(1):
+        print("  ⛔ **long なのにショートの行があります**。side の付与が"
+              "壊れています")
     print(f"  ★ 次: python analyze_portfolio_stop.py --picks {a.dump_picks}")
     sys.exit(0)
 
