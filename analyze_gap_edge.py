@@ -1380,6 +1380,8 @@ def _make_ops_sim(_src_all, _pool_df, _ond):
                   D+1 の始値を使うので先読みになる。渡しても弾く。
         order … gap(既定|ギャップ|降順) / liq(売買代金降順) / gapasc / price(安い順)
                 / rand(その日ごとにシャッフル。seed で再現)
+                / nfirst(★N を全部先に置き、余った予算だけ鏡像に回す。
+                  各側の中は gap 降順。alloc=merge と組んで使う)
         alloc … merge(既定: 1つの財布) / split50(側ごとに半額) /
                 prop(その日の合格数で按分) / alt(交互に取る)
         half  … 0=全期間 / 1=前半 / 2=後半 (擬似OOS)
@@ -1435,6 +1437,11 @@ def _make_ops_sim(_src_all, _pool_df, _ond):
                 _gc &= _c["gap_bp"] <= a.max_gap_bp
             _hit = _wd[_gm]
             _miss += len(_c[_gc]) - len(_hit)
+            # ★ N単独の基準を **同じ実行の中で** 出せるようにする(2026-09-12)。
+            #   別々の実行で比べてはいけない(§18.24)。配分の比較相手は
+            #   「鏡像を混ぜない場合」なので、それがこの実行に無いと判定できない。
+            if alloc == "nonly" and "side" in _hit.columns:
+                _hit = _hit[_hit["side"] > 0]
             # ── 発注順 ────────────────────────────────────────────
             if order == "liq":
                 _hit = _hit.sort_values("liq", ascending=False, na_position="last")
@@ -1444,6 +1451,17 @@ def _make_ops_sim(_src_all, _pool_df, _ond):
                 _hit = _hit.sort_values("entry_p", ascending=True)
             elif order == "rand":
                 _hit = _hit.iloc[_rng.permutation(len(_hit))] if len(_hit) else _hit
+            elif order == "nfirst":
+                # ★ N優先 + 余りを鏡像 (2026-09-12 ユーザー案)。
+                #   alloc=merge(1つの財布) と組むと「N を全部建ててから、
+                #   残った予算だけ鏡像に回す」になる。N は1件も削られない。
+                #   ⚠ side 降順で +1(N) → -1(鏡像)。gap_bp は **側ごとに符号を
+                #     反転済み**(:794 の * _SIDE / both は :1291 で -_m[_c])なので、
+                #     どちらの側も降順 = ギャップが大きい順で正しい。
+                _hit = (_hit.sort_values(["side", "gap_bp"],
+                                         ascending=[False, False])
+                        if "side" in _hit.columns else
+                        _hit.sort_values("gap_bp", ascending=False))
             else:                                   # gap(既定)
                 _hit = _hit.sort_values("gap_bp", ascending=False)
             # ── 予算配分 ──────────────────────────────────────────
@@ -4252,26 +4270,57 @@ if a.sweep_ops:
           f"符号が揃って ✓ でなければ期間依存")
 
     if a.side == "both":
+        def _dsg(res) -> dict:
+            """月次に畳んで 月平均 / σ / ÷σ を出す。
+
+            ⛔ **取引が1件も無い月を落とさない。** res["daily"] は建てた日しか
+               持たないので、落とすと σ が過小になり ÷σ が実態より良く出る
+               (_mstat と同じ罠)。月の一覧は _ALL_D から作る。
+            """
+            _ms = {str(_d)[:7] for _d in _ALL_D}
+            _acc = {_m: 0.0 for _m in _ms}
+            for _d, _v in res["daily"].items():
+                _k = str(_d)[:7]
+                if _k in _acc:
+                    _acc[_k] += _v[0] + _v[1]
+            _vs = [_acc[_m] for _m in sorted(_acc)]
+            if len(_vs) < 2:
+                return {"mu": 0.0, "sd": 0.0, "r": 0.0}
+            _mu = sum(_vs) / len(_vs)
+            _sd = (sum((_x - _mu) ** 2 for _x in _vs) / (len(_vs) - 1)) ** 0.5
+            return {"mu": _mu, "sd": _sd,
+                    "r": (_mu / _sd if _sd > 0 else 0.0)}
+
         print(f"\n  ── ★ 予算配分 (両建てのときだけ意味がある) ──")
-        print(f"    {'配分':<26}{'損益':>14}{'件数':>9}{'円/件':>10}"
-              f"{'投入/日':>10}{'z':>8}{'判定':>10}")
-        _ALC = [("merge", "1つの財布 ★現行"),
-                ("split50", f"側ごとに半額({400 / 2:,.0f}万ずつ)"),
-                ("prop", "その日の合格数で按分"),
-                ("alt", "交互に取る(S,L,S,L…)")]
-        for _al, _lb in _ALC:
-            _r = _ops_sim(50, 400.0, 0, False, alloc=_al)
-            _z = _zof(_r["pnl"])
-            _zs = "  —  " if _degen else f"{_z:>+8.2f}"
-            print(f"    {_lb:<26}{_r['pnl']:>+14,.0f}{_r['n']:>9,}"
-                  f"{_r['per']:>+10,.0f}{_r['used'] / 1e4:>9,.0f}万"
-                  f"{_zs:>8}{_jd_of(_z):>10}")
+        print(f"    {'配分':<28}{'損益':>14}{'件数':>8}{'円/件':>9}"
+              f"{'月平均':>11}{'月次σ':>11}{'÷σ':>7}{'投入/日':>9}")
+        # ⚠ (alloc, order, ラベル)。N優先は alloc ではなく **order** で作る
+        #   (1つの財布のまま N を全部先に並べる / _ops_sim の order == "nfirst")。
+        _ALC = [("nonly", "gap", "N単独(鏡像を混ぜない) ★基準"),
+                ("merge", "gap", "1つの財布(|ギャップ|降順)"),
+                ("merge", "nfirst", "★N優先 + 余りを鏡像"),
+                ("split50", "gap", f"側ごとに半額({400 / 2:,.0f}万ずつ)"),
+                ("prop", "gap", "その日の合格数で按分"),
+                ("alt", "gap", "交互に取る(S,L,S,L…)")]
+        _base_r = None
+        for _al, _od, _lb in _ALC:
+            _r = _ops_sim(50, 400.0, 0, False, alloc=_al, order=_od)
+            _s = _dsg(_r)
+            if _base_r is None:
+                _base_r = _s["r"]
+            print(f"    {_lb:<28}{_r['pnl']:>+14,.0f}{_r['n']:>8,}"
+                  f"{_r['per']:>+9,.0f}{_s['mu']:>+11,.0f}{_s['sd']:>11,.0f}"
+                  f"{_s['r']:>7.2f}{_r['used'] / 1e4:>8,.0f}万")
+        print(f"    ★ 見るのは **÷σ**(基準 {_base_r:.2f})。損益と月平均は"
+              f"『余った資金を使った』だけで上がるので、\n"
+              f"       そこで判断しない(§18.38 の充填は月平均 +38,757 / t=+3.86"
+              f" なのに ÷σ が 3.51→3.25 に落ちた)")
         print(f"    ⚠ **投入/日を必ず見ること。** 側ごとに財布を分けると、"
               f"片側に候補が無い日に\n       その半分が丸ごと遊びます"
               f"(1つの財布なら もう一方が使えます)")
-        print(f"    ⚠ z は **発注順のランダム帯**を基準にしています"
-              f"(配分の帯は別に作る必要がありますが、\n"
-              f"       まず『帯と同じオーダーか』を見るだけで足ります)")
+        print(f"    ⚠ これは **TRAIN の点推定だけ**。配分のランダム帯も"
+              f"TEST も通していません。\n"
+              f"       ÷σ が基準を上回った行があっても、そこで採用しないこと")
 
     print(f"\n  {'=' * 68}")
     print(f"  ★ 読み方: **★(現行) より明確に良い行があるか**だけを見る。")
