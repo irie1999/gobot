@@ -301,7 +301,18 @@ def main() -> None:
             short_brk_blocks.append(block)
 
     # ── Python コード出力 ──
-    out_path = Path(f"watchlist_proposal{mode_suffix}{holdout_suffix}_{args.date}.py")
+    # 価格レンジをファイル名に含める（同日に複数価格帯を実行しても上書きしない）
+    _mn = int(args.min_price) if args.min_price > 0 else 0
+    _mx = int(effective_max_price) if effective_max_price > 0 else 0
+    if _mn > 0 and _mx > 0:
+        price_suffix = f"_p{_mn}-{_mx}"
+    elif _mx > 0:
+        price_suffix = f"_p0-{_mx}"
+    elif _mn > 0:
+        price_suffix = f"_p{_mn}-"
+    else:
+        price_suffix = ""
+    out_path = Path(f"watchlist_proposal{mode_suffix}{holdout_suffix}{price_suffix}_{args.date}.py")
     with open(out_path, "w", encoding="utf-8") as f:
         f.write('"""\n')
         f.write(f"新 WATCHLIST 提案 (生成日: {args.date})\n")

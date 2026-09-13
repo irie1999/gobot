@@ -41,6 +41,38 @@ from kabu_api import KabuClient, CASH_GENBUTSU  # noqa: E402
 
 JST = timezone(timedelta(hours=9))
 FIXED_QTY = 100   # backtest_limit_entry.FIXED_QTY と同じ前提
+ORDERED_LOG = "ordered_signals.csv"   # 実発注したシグナルの記録(レポートで「発注済」表示に使う)
+
+
+def _log_ordered(sig: dict, prod: bool, qty: int, cash_margin: int) -> None:
+    """実発注に成功したシグナルを ordered_signals.csv に追記する。
+    レポート(nikkei_analysis)側が (銘柄+戦略+日付) で突合して『発注済』印を付ける。"""
+    import csv
+    from pathlib import Path
+    now = datetime.now(JST)
+    row = {
+        "record_date": now.strftime("%Y-%m-%d"),
+        "ordered_at":  now.strftime("%Y-%m-%d %H:%M:%S"),
+        "symbol":      str(sig.get("symbol", "")).upper().removesuffix(".T"),
+        "name":        sig.get("name", ""),
+        "strategy":    sig.get("strategy", ""),
+        "family":      sig.get("family", ""),
+        "order_price": round(float(sig.get("order_price", 0) or 0)),
+        "stop_price":  round(float(sig.get("stop_price", 0) or 0)),
+        "qty":         qty,
+        "prod":        int(bool(prod)),
+        "cash_margin": cash_margin,
+    }
+    p = Path(ORDERED_LOG)
+    new = not p.exists()
+    try:
+        with open(p, "a", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=list(row.keys()))
+            if new:
+                w.writeheader()
+            w.writerow(row)
+    except Exception as e:
+        print(f"  ⚠ 発注記録の書き込み失敗 ({e})")
 
 
 def main() -> int:
@@ -117,6 +149,8 @@ def main() -> int:
                                 cash_margin=cash_margin)
         if res.get("Result") == 0:
             ok += 1
+            if args.execute:   # 実発注のみ記録(dry-runは記録しない)
+                _log_ordered(s, args.prod, FIXED_QTY, cash_margin)
         if args.with_stop:
             cli.send_stop_sell(sym, qty=FIXED_QTY, trigger_price=stop_p,
                                cash_margin=cash_margin)

@@ -37,14 +37,37 @@ from pathlib import Path
 import pandas as pd
 
 JST = timezone(timedelta(hours=9))
-DATA_DIR = Path(__file__).resolve().parent / "data" / "minute_5m"
+# 保存先は daytrade_data の自動解決を使う(環境変数 MINUTE_5M_DIR →
+# data/minute_5m → 隣接 stock_5min の順)。これで swingtrade から実行しても
+# 「完璧な」J-Quants データ(stock_5min)を直接 追記更新できる。
+try:
+    from daytrade_data import DATA_DIR  # noqa: E402
+except Exception:
+    DATA_DIR = Path(__file__).resolve().parent / "data" / "minute_5m"
 
 
-# .env
+# .env — swingtrade だけでなく近隣フォルダ(kabu station直下・daytrading・
+# stock_5min 等)も探索して JQUANTS_API_KEY 等を読む。データ場所と同じ思想。
 def _load_dotenv():
-    for p in [Path.cwd() / ".env", Path(__file__).resolve().parent / ".env"]:
-        if not p.exists():
+    here = Path(__file__).resolve().parent
+    candidates = [
+        Path.cwd() / ".env",
+        here / ".env",
+        here.parent / ".env",              # "kabu station" 直下
+        here.parent / "daytrading" / ".env",
+        here.parent / "stock_5min" / ".env",
+    ]
+    try:
+        from daytrade_data import DATA_DIR as _DD  # stock_5min 等
+        candidates += [Path(_DD) / ".env", Path(_DD).parent / ".env"]
+    except Exception:
+        pass
+    seen = set()
+    for p in candidates:
+        p = p.resolve()
+        if p in seen or not p.exists():
             continue
+        seen.add(p)
         for line in p.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
@@ -52,7 +75,8 @@ def _load_dotenv():
                 k, v = k.strip(), v.strip().strip('"').strip("'")
                 if k and k not in os.environ:
                     os.environ[k] = v
-        return
+        if os.environ.get("JQUANTS_API_KEY"):
+            return   # キーが取れたら十分
 
 
 _load_dotenv()
@@ -68,13 +92,26 @@ def get_client():
 
 
 def get_last_date(pkl_path: Path) -> str | None:
-    """pkl ファイルの最終日を取得。"""
+    """pkl ファイルの最終日(YYYY-MM-DD)を取得。
+
+    stock_5min は正規化済み(DatetimeIndex・小文字ohlcv)で保存されているため、
+    まず index から読む。旧 raw 形式(Date列)にもフォールバック対応。
+    """
     try:
         df = pickle.loads(pkl_path.read_bytes())
-        if df is None or df.empty:
+        if df is None or getattr(df, "empty", True):
             return None
-        if "Date" in df.columns:
+        # 正規化済み(DatetimeIndex)
+        if isinstance(df.index, pd.DatetimeIndex) and len(df.index):
+            return str(df.index.max())[:10]
+        # 旧 raw 形式(Date列)
+        if hasattr(df, "columns") and "Date" in df.columns:
             return str(df["Date"].max())[:10]
+        # それ以外は正規化して読む
+        from daytrade_data import normalize_minute_df
+        n = normalize_minute_df(df)
+        if n is not None and not n.empty:
+            return str(n.index.max())[:10]
         return None
     except Exception:
         return None
@@ -108,48 +145,202 @@ def get_trading_days(cli, from_date: str, to_date: str) -> set[str]:
     return days
 
 
+_PREVIEW_SHOWN = False
+
+
+def jq_to_yf(code: str) -> str:
+    """J-Quants 5桁コード → yfinance ティッカー。 72030 → 7203.T / 130A0 → 130A.T"""
+    c = str(code).strip().upper()
+    if len(c) == 5 and c.endswith("0"):
+        return c[:4] + ".T"
+    if len(c) == 4:
+        return c + ".T"
+    return (c[:-1] if c.endswith("0") and len(c) > 4 else c) + ".T"
+
+
 def fetch_and_append(cli, code: str, pkl_path: Path,
-                     from_date: str, to_date: str) -> int:
-    """指定期間の5分足を取得して既存pklに追記。"""
-    from_d = from_date.replace("-", "")
-    to_d = to_date.replace("-", "")
+                     from_date: str, to_date: str, dry_run: bool = False,
+                     source: str = "yfinance", fetch_days: int = 7,
+                     prefetched=None) -> int:
+    """5分足を取得し、既存(正規化済み)pklに「後ろだけ」追記する。
 
-    try:
-        df_new = cli.get_eq_bars_5minute(
-            code=code, from_yyyymmdd=from_d, to_yyyymmdd=to_d
-        )
-    except Exception as e:
-        return 0
+    source:
+      "yfinance" (既定) : daytrade_data.load_intraday(source='yfinance') で取得。
+                          index が datetime のまま正規化され、時刻を保持する。
+                          J-Quants サブスク終了後の日次運用はこちら。
+      "jquants"         : cli.get_eq_bars_5minute(raw) を normalize_minute_df で正規化。
 
-    if df_new is None or df_new.empty:
-        return 0
+    安全設計 (共通):
+      - stock_5min と同一の正規化形式(DatetimeIndex・小文字ohlcv)に揃えてから結合。
+        fetch_intraday が時刻を落とす問題は使わないので発生しない。
+      - 既存 index の最大時刻より「後」のバーだけ追加。既存バーは一切書き換えない。
+      - dry_run=True なら書き込まず、追加されるバー数だけ返す(プレビュー)。
+    返り値: 追加される(された)新バー数。
+    """
+    global _PREVIEW_SHOWN
+    from daytrade_data import normalize_minute_df, load_intraday
 
-    # 銘柄フィルタ
-    if "Code" in df_new.columns:
-        df_new = df_new[df_new["Code"].astype(str) == code].copy()
-    if df_new.empty:
-        return 0
-
-    # 既存データ読み込み
-    try:
-        df_old = pickle.loads(pkl_path.read_bytes())
-    except Exception:
-        df_old = pd.DataFrame()
-
-    # 結合 + 重複除去
-    if not df_old.empty:
-        df_combined = pd.concat([df_old, df_new], ignore_index=True)
+    if prefetched is not None:
+        # バッチ取得済みの正規化 df を使う(run_update の高速経路)
+        new = prefetched
+        if new is None or new.empty:
+            return 0
+        if not isinstance(new.index, pd.DatetimeIndex):
+            new = normalize_minute_df(new)
+    elif source == "yfinance":
+        yf_sym = jq_to_yf(code)
+        new = load_intraday(yf_sym, days=fetch_days, source="yfinance")
+        if new is None or new.empty:
+            return 0
+        if not isinstance(new.index, pd.DatetimeIndex):
+            new = normalize_minute_df(new)
     else:
-        df_combined = df_new
+        from_d = from_date.replace("-", "")
+        to_d = to_date.replace("-", "")
+        try:
+            raw_new = cli.get_eq_bars_5minute(
+                code=code, from_yyyymmdd=from_d, to_yyyymmdd=to_d
+            )
+        except Exception:
+            return 0
+        if raw_new is None or raw_new.empty:
+            return 0
+        if "Code" in raw_new.columns:
+            raw_new = raw_new[raw_new["Code"].astype(str) == code].copy()
+        if raw_new.empty:
+            return 0
+        new = normalize_minute_df(raw_new)
+    if new is None or new.empty:
+        return 0
 
-    dt_cols = [c for c in ["Date", "Time"] if c in df_combined.columns]
-    if dt_cols:
-        df_combined = df_combined.drop_duplicates(subset=dt_cols, keep="last")
-        df_combined = df_combined.sort_values(dt_cols).reset_index(drop=True)
+    # 既存(正規化済み)を読み込む
+    try:
+        old = pickle.loads(pkl_path.read_bytes())
+    except Exception:
+        old = pd.DataFrame()
+    if old is not None and not old.empty and not isinstance(old.index, pd.DatetimeIndex):
+        old = normalize_minute_df(old)   # 万一 raw 形式でも揃える
 
-    # 保存
-    pkl_path.write_bytes(pickle.dumps(df_combined))
-    return len(df_new)
+    # 既存の最大時刻より「後」の新バーだけを採用(既存は絶対に触らない)
+    if old is not None and not old.empty:
+        new_only = new[new.index > old.index.max()]
+    else:
+        new_only = new
+    if new_only.empty:
+        return 0
+
+    # プレビュー: 最初の1銘柄だけ、追加内容(時刻が保持されているか)を表示
+    if not _PREVIEW_SHOWN:
+        _PREVIEW_SHOWN = True
+        print(f"  [プレビュー] {code}: 追加 {len(new_only)}本  "
+              f"{new_only.index.min()} 〜 {new_only.index.max()}")
+        print("    追加末尾:")
+        for ts, row in new_only.tail(2).iterrows():
+            print(f"      {ts}  o={row['open']} h={row['high']} "
+                  f"l={row['low']} c={row['close']} v={row['volume']}")
+
+    if dry_run:
+        return len(new_only)
+
+    combined = (pd.concat([old, new_only])
+                if (old is not None and not old.empty) else new_only)
+    combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+    combined.index.name = "DateTime"
+    pkl_path.write_bytes(pickle.dumps(combined))
+    return len(new_only)
+
+
+def run_update(source: str = "yfinance", limit: int = 0, dry_run: bool = False,
+               fetch_days: int = 7, daytrade_only: bool = False,
+               check_only: bool = False, verbose: bool = True) -> dict:
+    """5分足を最新まで更新するコア(run_signals 等から呼べる)。
+
+    yfinance は load_intraday_batch で一括取得して高速化。既存バーは書き換えず、
+    各pklの最終時刻より後のバーだけ追記する(完璧データ保護)。
+    返り値: {'updated','skipped','bars'} 集計。
+    """
+    def _p(*a):
+        if verbose:
+            print(*a, flush=True)
+
+    if not DATA_DIR.exists():
+        _p(f"  [warn] 5分足フォルダが無い: {DATA_DIR} — 更新スキップ")
+        return {"updated": 0, "skipped": 0, "bars": 0, "error": "no_dir"}
+
+    today = datetime.now(JST).strftime("%Y-%m-%d")
+    cli = get_client() if source == "jquants" else None
+
+    # 対象pkl
+    if daytrade_only:
+        try:
+            from daytrade_symbols import DAYTRADE_SYMBOLS
+            codes = [s.replace(".T", "") + "0" for s, _ in DAYTRADE_SYMBOLS]
+            pkl_files = sorted(DATA_DIR / f"{c}.pkl" for c in codes
+                               if (DATA_DIR / f"{c}.pkl").exists())
+        except Exception:
+            pkl_files = sorted(DATA_DIR.glob("*.pkl"))
+    else:
+        pkl_files = sorted(DATA_DIR.glob("*.pkl"))
+    if limit > 0:
+        pkl_files = pkl_files[:limit]
+
+    # 更新が必要な銘柄(最終日 < today)だけに絞る
+    todo = []
+    for pkl in pkl_files:
+        last = get_last_date(pkl)
+        if last is None or last >= today:
+            continue
+        todo.append((pkl, last))
+    _p(f"  対象 {len(pkl_files)}銘柄 / 未取得あり {len(todo)}銘柄 / 基準日 {today}")
+
+    if check_only:
+        for pkl, last in todo:
+            gap = (datetime.strptime(today, "%Y-%m-%d")
+                   - datetime.strptime(last, "%Y-%m-%d")).days
+            _p(f"    {pkl.stem}: 最終 {last} → {gap}日欠損")
+        return {"updated": 0, "skipped": len(pkl_files) - len(todo),
+                "bars": 0, "todo": len(todo)}
+    if not todo:
+        _p("  すべて最新。更新なし。")
+        return {"updated": 0, "skipped": len(pkl_files), "bars": 0}
+
+    # yfinance は一括プリフェッチ(高速)
+    batch = None
+    if source == "yfinance":
+        try:
+            from daytrade_data import load_intraday_batch
+            yf_syms = [jq_to_yf(pkl.stem) for pkl, _ in todo]
+            _p(f"  yfinanceバッチ取得: {len(yf_syms)}銘柄 直近{fetch_days}日 ...")
+            batch = load_intraday_batch(yf_syms, days=fetch_days, source="yfinance")
+        except Exception as e:
+            _p(f"  [warn] バッチ取得失敗({e}) → 個別取得にフォールバック")
+            batch = None
+
+    updated = 0
+    total = 0
+    for i, (pkl, last) in enumerate(todo, 1):
+        code = pkl.stem
+        gap = (datetime.strptime(today, "%Y-%m-%d")
+               - datetime.strptime(last, "%Y-%m-%d")).days
+        pre = None
+        if source == "yfinance" and batch is not None:
+            pre = batch.get(jq_to_yf(code))
+            if pre is None or getattr(pre, "empty", True):
+                continue
+        bars = fetch_and_append(cli, code, pkl, "", today, dry_run=dry_run,
+                                source=source, fetch_days=max(fetch_days, gap + 2),
+                                prefetched=pre)
+        if bars > 0:
+            total += bars
+            updated += 1
+        if verbose and (i % 200 == 0 or i == len(todo)):
+            _p(f"    {i}/{len(todo)} (更新{updated} 追加{total:,})")
+        if source == "jquants":
+            time.sleep(0.3)   # J-Quants レート制限(yfinanceバッチは不要)
+
+    _p(f"  5分足更新完了: 更新{updated} / 追加バー{total:,}"
+       + (" (DRY-RUN 書き込みなし)" if dry_run else ""))
+    return {"updated": updated, "skipped": len(pkl_files) - len(todo), "bars": total}
 
 
 def main():
@@ -159,97 +350,33 @@ def main():
                         help="処理銘柄数の上限 (テスト用)")
     parser.add_argument("--check-only", action="store_true",
                         help="欠損確認のみ (取得しない)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="取得して追加内容をプレビューするが書き込まない (安全確認用)")
+    parser.add_argument("--source", choices=["yfinance", "jquants"], default="yfinance",
+                        help="取得元 (既定 yfinance。J-Quantsサブスク終了後は yfinance)")
+    parser.add_argument("--fetch-days", type=int, default=7,
+                        help="yfinance で遡って取得する日数 (欠損補完の余裕。既定7)")
     parser.add_argument("--daytrade-only", action="store_true",
                         help="daytrade_symbols.py の20銘柄のみ更新 (日次運用用)")
     args = parser.parse_args()
 
+    print(f"  保存先(更新対象): {DATA_DIR}")
+    print(f"  取得元: {args.source}"
+          + (f" (直近{args.fetch_days}日)" if args.source == "yfinance" else "")
+          + ("  ★DRY-RUN(書き込みなし)" if args.dry_run else ""))
     if not DATA_DIR.exists():
-        print("[ERROR] data/minute_5m/ が見つかりません", file=sys.stderr)
+        print(f"[ERROR] 5分足フォルダが見つかりません: {DATA_DIR}\n"
+              "  環境変数 MINUTE_5M_DIR で明示指定するか、stock_5min の場所を確認してください。",
+              file=sys.stderr)
         sys.exit(1)
 
-    cli = get_client()
-    today = datetime.now(JST).strftime("%Y-%m-%d")
-
-    # 対象 pkl ファイル決定
-    if args.daytrade_only:
-        try:
-            from daytrade_symbols import DAYTRADE_SYMBOLS
-        except ImportError:
-            print("[ERROR] daytrade_symbols.py が見つかりません", file=sys.stderr)
-            sys.exit(1)
-        # "8032.T" → "80320" に変換
-        target_codes = [s.replace(".T", "") + "0" for s, _ in DAYTRADE_SYMBOLS]
-        pkl_files = []
-        for code5 in target_codes:
-            pkl = DATA_DIR / f"{code5}.pkl"
-            if pkl.exists():
-                pkl_files.append(pkl)
-            else:
-                print(f"  [warn] {code5}.pkl が存在しません (スキップ)")
-        pkl_files.sort()
-        print(f"daytrade対象: {len(pkl_files)}/{len(target_codes)}銘柄")
-    else:
-        pkl_files = sorted(DATA_DIR.glob("*.pkl"))
-    if args.limit > 0:
-        pkl_files = pkl_files[:args.limit]
-
-    print(f"日次更新: {len(pkl_files)}銘柄 / 基準日: {today}", flush=True)
-
-    # 欠損チェック + 取得
-    updated = 0
-    skipped = 0
-    errors = 0
-    total_bars = 0
-
-    for i, pkl_path in enumerate(pkl_files, 1):
-        code = pkl_path.stem  # "72030"
-
-        # 最終日確認
-        last_date = get_last_date(pkl_path)
-        if last_date is None:
-            skipped += 1
-            continue
-
-        # 最終日が今日ならスキップ
-        if last_date >= today:
-            skipped += 1
-            continue
-
-        # 欠損日数
-        gap_days = (datetime.strptime(today, "%Y-%m-%d")
-                    - datetime.strptime(last_date, "%Y-%m-%d")).days
-
-        # 翌日から今日まで取得
-        fetch_from = (datetime.strptime(last_date, "%Y-%m-%d")
-                      + timedelta(days=1)).strftime("%Y-%m-%d")
-
-        if args.check_only:
-            if gap_days > 1:
-                print(f"  {code}: 最終日 {last_date} → {gap_days}日分の欠損")
-            continue
-
-        # 取得
-        bars = fetch_and_append(cli, code, pkl_path, fetch_from, today)
-        if bars > 0:
-            total_bars += bars
-            updated += 1
-        else:
-            errors += 1
-
-        if i % 100 == 0 or i == len(pkl_files):
-            print(f"  {i}/{len(pkl_files)} 処理済み "
-                  f"(更新:{updated} スキップ:{skipped} エラー:{errors})",
-                  flush=True)
-
-        # レート制限対策
-        time.sleep(0.3)
-
-    print()
     print("=" * 50)
-    print(f"  日次更新完了")
-    print(f"  処理: {len(pkl_files)}銘柄")
-    print(f"  更新: {updated}  スキップ: {skipped}  エラー: {errors}")
-    print(f"  追加バー: {total_bars:,}")
+    res = run_update(source=args.source, limit=args.limit, dry_run=args.dry_run,
+                     fetch_days=args.fetch_days, daytrade_only=args.daytrade_only,
+                     check_only=args.check_only, verbose=True)
+    print("=" * 50)
+    print(f"  完了: 更新 {res.get('updated', 0)}  "
+          f"スキップ {res.get('skipped', 0)}  追加バー {res.get('bars', 0):,}")
     print("=" * 50)
 
 

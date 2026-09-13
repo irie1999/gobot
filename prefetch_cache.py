@@ -79,10 +79,12 @@ def _load_symbols(universe: str | None) -> list[tuple[str, str]]:
 JST = timezone(timedelta(hours=9))
 
 
-def _is_fresh(path: Path) -> bool:
-    """キャッシュが今日（JST）にダウンロードされていれば新鮮と判定。
-    yfinanceのデータ遅延（1〜2日）を考慮し、データの日付ではなく
-    ファイルの更新日時で判断する。"""
+def _cache_ok(path: Path, since_date=None) -> bool:
+    """キャッシュがそのまま使えるか（True=ダウンロード不要）。
+    - 当日（JST）に更新済み かつ 210行以上
+    - since_date 指定時は、その日付まで遡れていること（深さ）も必須。
+      → 既存の浅いキャッシュ(2年など)は不足と判定して深く取り直す。
+      → 既に十分深いキャッシュは縮めずスキップ。"""
     if not path.exists():
         return False
     try:
@@ -91,25 +93,36 @@ def _is_fresh(path: Path) -> bool:
             return False
         with open(path, "rb") as f:
             df = pickle.load(f)
-        return len(df) >= 210
+        if len(df) < 210:
+            return False
+        if since_date is not None:
+            oldest = df.index[0]
+            oldest = oldest.date() if hasattr(oldest, "date") else oldest
+            if oldest > since_date:
+                return False   # since まで遡れていない → 再取得
+        return True
     except Exception:
         return False
 
 
 # ── 1銘柄ダウンロード ─────────────────────────────────────────
 
-def _fetch_one(symbol: str, name: str, refresh: bool) -> str:
-    """1銘柄をダウンロードしてキャッシュ保存。戻り値はステータス文字列。"""
+def _fetch_one(symbol: str, name: str, refresh: bool, since_date=None) -> str:
+    """1銘柄をダウンロードしてキャッシュ保存。戻り値はステータス文字列。
+    since_date 指定時はその日付から取得（過去検証用の深いデータ）。"""
     cache_path = CACHE_DIR / f"{symbol.replace('.', '_')}.pkl"
 
-    if not refresh and _is_fresh(cache_path):
+    if not refresh and _cache_ok(cache_path, since_date):
         return "skip"
 
     try:
         # Ticker.history() を使用（単一銘柄ダウンロードに適しており、並列でも安全）
         # period= はyfinanceサーバー基準で切り捨てが起こるため、明示的なstart/endを使用
         _now_jst = datetime.now(JST)
-        dl_start = (_now_jst - timedelta(days=730)).strftime("%Y-%m-%d")
+        if since_date is not None:
+            dl_start = since_date.strftime("%Y-%m-%d")
+        else:
+            dl_start = (_now_jst - timedelta(days=730)).strftime("%Y-%m-%d")
         dl_end   = (_now_jst + timedelta(days=1)).strftime("%Y-%m-%d")
         ticker = yf.Ticker(symbol)
         raw = ticker.history(start=dl_start, end=dl_end, interval="1d", auto_adjust=False, actions=False)
@@ -174,7 +187,19 @@ def main():
                         help=f"並列ダウンロード数 (default: {WORKERS})")
     parser.add_argument("--refresh", action="store_true",
                         help="既存キャッシュを無視して強制再取得")
+    parser.add_argument("--since", default=None,
+                        help="この日付(YYYY-MM-DD)から取得。過去検証用に深い日足を"
+                             "一括DL。既存の浅いキャッシュは深く取り直し、"
+                             "十分深いものは縮めずスキップ (例: 2013-01-01)")
     args = parser.parse_args()
+
+    since_date = None
+    if args.since:
+        try:
+            since_date = datetime.strptime(args.since, "%Y-%m-%d").date()
+        except ValueError:
+            print(f"  エラー: --since {args.since} は YYYY-MM-DD 形式で指定してください。")
+            sys.exit(1)
 
     symbols = _load_symbols(args.universe)
     total   = len(symbols)
@@ -184,11 +209,13 @@ def main():
     # スキップ予定数を事前カウント
     skip_count = sum(
         1 for sym, _ in symbols
-        if not args.refresh and _is_fresh(CACHE_DIR / f"{sym.replace('.', '_')}.pkl")
+        if not args.refresh and _cache_ok(CACHE_DIR / f"{sym.replace('.', '_')}.pkl", since_date)
     )
     dl_count = total - skip_count
 
     print(f"\n  キャッシュ保存先: {CACHE_DIR.resolve()}")
+    if since_date:
+        print(f"  取得開始日: {since_date} 以降（深い過去データ）")
     print(f"  取得対象: {dl_count}銘柄 / スキップ(キャッシュ済): {skip_count}銘柄")
     print(f"  並列数: {args.workers}")
     if args.refresh:
@@ -206,7 +233,7 @@ def main():
 
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         futures = {
-            executor.submit(_fetch_one, sym, name, args.refresh): (sym, name)
+            executor.submit(_fetch_one, sym, name, args.refresh, since_date): (sym, name)
             for sym, name in symbols
         }
         for future in as_completed(futures):

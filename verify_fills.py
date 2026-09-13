@@ -1,0 +1,1712 @@
+"""verify_fills.py — kabuの実注文/実約定(get_orders)を取得して当日の取引を集計する。
+
+2つのセクションを出力:
+  ① 全注文一覧 — 対象日に出した注文をすべて表示(約定した/しなかった を問わず)。
+     注文株数・注文値・状態(全約定/一部約定/未約定/取消・失効/期限切れ)・約定株数/値/時刻。
+     → 「注文は出したが約定しなかった」ものが一目で分かる。
+  ② 結果 — ①のうち 約定して決済(買戻し)まで済んだ往復取引の実損益・約定時刻。
+     レポート/バックテストの想定値と突き合わせて実運用の乖離(§18.7)を測れる。
+
+使い方(あなたの機械・本番口座 / KABU_API_PASSWORD 設定済み):
+  .\fills                                          # ← 日常はこれ (= --prod --save)
+  .\fills --date 20260728                          # 指定日
+
+  python verify_fills.py --prod                    # 今日の全注文+結果
+  python verify_fills.py --prod --save             # CSV2種を日付つきで自動保存
+  python verify_fills.py --prod --date 20260728    # 指定日
+  python verify_fills.py --prod --orders-csv orders.csv  # 全注文一覧をCSV保存
+  python verify_fills.py --prod --csv fills.csv     # 往復損益サマリーをCSV保存
+  python verify_fills.py --prod --expected signals_expected.csv  # 想定値と乖離比較
+  python verify_fills.py --prod --no-date          # 日付で絞らず全注文
+
+照会のみ(発注しない)。発注サーバ/watcher 稼働中は 401(トークン取り合い)になることが
+あるので、その時は片方を一瞬止めるか少し待って再実行。
+"""
+from __future__ import annotations
+
+# ⛔ Windows で `> out.txt` にリダイレクトすると stdout が cp932 になり、
+#   ⛔ ⚠ ✅ のような cp932 に無い記号で UnicodeEncodeError を出して
+#   **スクリプトごと落ちる**(2026-09-08 に kabu_ws で実際に発生)。
+#   import しただけで効く。出力の中身は変わらない。
+import console_safe  # noqa: F401
+import argparse
+import csv as _csv
+import os
+import re
+from collections import defaultdict
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+
+from kabu_api import KabuClient
+
+try:
+    from backtest_limit_entry import FEE_PCT_ONE_WAY
+except Exception:
+    FEE_PCT_ONE_WAY = 0.001
+
+_JST = timezone(timedelta(hours=9))
+
+ap = argparse.ArgumentParser(description="kabu実約定を集計(実損益・約定時刻)し想定と比較")
+ap.add_argument("--prod", action="store_true", help="本番(18080)。未指定はデモ(18081)")
+ap.add_argument("--date", type=str, default=None, help="対象日 yyyyMMdd(既定=今日JST)")
+ap.add_argument("--csv", type=str, default=None, help="実約定サマリー(往復損益)のCSV保存先")
+ap.add_argument("--orders-csv", type=str, default=None,
+                help="全注文一覧(未約定・取消含む)のCSV保存先")
+ap.add_argument("--expected", type=str, default=None,
+                help="想定値CSV(列: symbol,entry,exit,pnl)。あれば乖離を並べて表示")
+ap.add_argument("--fee", type=float, default=0.0, help="片道手数料率(既定=0。信用大口優遇プランは手数料無料)")
+ap.add_argument("--debug", action="store_true",
+                help="約定が0件のとき等、生の注文/Details構造を先頭数件ダンプして原因調査")
+ap.add_argument("--no-date", action="store_true", help="日付で絞らず全約定を集計")
+ap.add_argument("--trades-csv", type=str,
+                default=os.environ.get("LSS_TRADES_CSV", "lss_trades.csv"),
+                help="バックテスト(レポート)の全取引CSV。対象日の取引を実約定と並べて比較する。"
+                     "既定 lss_trades.csv。--no-compare で比較をスキップ")
+ap.add_argument("--no-compare", action="store_true",
+                help="バックテストとの比較セクションを出さない")
+ap.add_argument("--lss-compare", action="store_true",
+                help="突合相手を **現行lss(逆指値)** の明細に固定する。既定は "
+                     "<csv>_H.csv (H=指値売り) があればそちらを優先する。"
+                     "実発注が H なのに lss と突合すると、寄りで上に飛んで戻らなかった"
+                     "銘柄が『テストに無い』と誤報告され、エントリー方式の差が"
+                     "『滑り』として計上される(2026-08-13)")
+ap.add_argument("--save", action="store_true",
+                help="CSV2種を日付つきファイル名で自動保存 "
+                     "(fills_<日付>.csv / orders_<日付>.csv)。--csv/--orders-csv より優先度低")
+ap.add_argument("--slip-log", type=str, default="slip_daily_log.csv",
+                help="実約定とテストの乖離を1日1行で貯める累積ログ(既定 slip_daily_log.csv)。"
+                     "同じ日を再実行してもその行が上書きされるだけで重複しない")
+ap.add_argument("--no-slip-log", action="store_true",
+                help="累積ログを書かない(表示のみ)")
+# ⛔ 持ち越し決済のあった日は既定で累積ログに入れない(§18.37 の測定が壊れるため)。
+#   それでも記録したいときだけ明示する。
+ap.add_argument("--force-slip-log", action="store_true",
+                help="持ち越し決済があっても累積ログに記録する(既定は除外)")
+args = ap.parse_args()
+
+FEE = args.fee
+# 突合相手の方式(J / H / lss)。累積ログに残し、**方式ごとに別集計**する
+# (§18.24: 別々の条件の数字を混ぜない)。2026-08-18 に実発注が H → J に
+# 変わったので、それ以前の H の行とは合算しない。
+_CMP_MODE = "H"
+_DATE = args.date or datetime.now(_JST).strftime("%Y%m%d")
+
+# --save: 明示指定が無い側だけ日付つきの既定名を割り当てる
+if args.save:
+    _d = _DATE if len(str(_DATE)) == 8 else datetime.now(_JST).strftime("%Y%m%d")
+    if not args.csv:
+        args.csv = f"fills_{_d}.csv"
+    if not args.orders_csv:
+        args.orders_csv = f"orders_{_d}.csv"
+
+
+def _digits(s) -> str:
+    return "".join(ch for ch in str(s) if ch.isdigit())
+
+
+_DATE_DIG = _digits(_DATE)
+
+# ★★ §18.66 のゲートが数える **執行の版**。k_open_confirm._EXEC_VER と揃える。
+#   ⛔ 板の取り方・発注タイミングを変えたら向こうを上げ、ここも上げる。
+#     版が違う日は速さが違うので、混ぜて平均してはいけない(Codex 指摘④)。
+_GATE_VER = "N2"
+# ★ ゲートが数える **指定設定**。ここに一致する日だけを集計する。
+#   ⛔ これは「何を指定して走らせたか」であって「繋がったか」ではない。
+#     接続に失敗して REST に戻った日も、指定が同じなら含める(Codex 指摘④)。
+#     --no-ws / --no-ws-wake の比較運転は指定が違うので自動的に別集計になる。
+_GATE_CFG = {"ws_req": "1", "wake_req": "1"}
+
+
+def _match_date(t: str) -> bool:
+    """約定時刻 t が対象日か。ISO(2026-07-28T..)/yyyyMMddHHMMSS どちらでも桁で判定。
+    時刻が空(取れない)場合は除外しない(=今日扱い)。--no-date で常にTrue。"""
+    if args.no_date:
+        return True
+    dt = _digits(t)
+    if not dt:
+        return True
+    return _DATE_DIG in dt
+
+
+def _exec_time(d: dict) -> str:
+    """約定時刻。ExecutionDay(yyyyMMddHHMMSS)優先、無ければ TransactTime。"""
+    for k in ("ExecutionDay", "TransactTime", "RecvTime"):
+        v = d.get(k)
+        if v:
+            return str(v)
+    return ""
+
+
+def _executions(o: dict):
+    """1注文の約定(RecType=8)明細を [(price, qty, time)] で返す。"""
+    out = []
+    for d in (o.get("Details") or []):
+        if int(d.get("RecType") or 0) != 8:      # 8=約定
+            continue
+        px = float(d.get("Price") or 0)
+        qty = float(d.get("Qty") or 0)
+        if px > 0 and qty > 0:
+            out.append((px, qty, _exec_time(d)))
+    return out
+
+
+def _order_date(o: dict) -> str:
+    """注文を出した日時。RecvTime 優先、無ければ Details の最初の受付/約定時刻。"""
+    for k in ("RecvTime", "TransactTime"):
+        v = o.get(k)
+        if v:
+            return str(v)
+    for d in (o.get("Details") or []):
+        t = _exec_time(d)
+        if t:
+            return t
+    return ""
+
+
+def _order_price(o: dict) -> float:
+    """注文価格。通常は Price。逆指値(ReverseLimitOrder)なら TriggerPrice を拾う。"""
+    p = float(o.get("Price") or 0)
+    if p > 0:
+        return p
+    rl = o.get("ReverseLimitOrder")
+    if isinstance(rl, dict):
+        for k in ("TriggerPrice", "Price", "AfterHitPrice"):
+            v = float(rl.get(k) or 0)
+            if v > 0:
+                return v
+    return 0.0
+
+
+def _order_status(o: dict) -> str:
+    """注文の状態を日本語で返す。約定株数(CumQty)と注文株数(OrderQty)・State から判定。
+    kabu State: 1=待機 2=処理中 3=処理済 4=訂正取消送信中 5=終了。
+    CumQty=0 で終了なら未約定のまま失効/取消。"""
+    oq = float(o.get("OrderQty") or 0)
+    cq = float(o.get("CumQty") or 0)
+    state = int(o.get("State") or o.get("OrderState") or 0)
+    if oq > 0 and cq >= oq:
+        return "全約定"
+    if cq > 0:
+        return f"一部約定({int(cq)}/{int(oq)})"
+    # ここから未約定(CumQty=0)
+    rectypes = {int(d.get("RecType") or 0) for d in (o.get("Details") or [])}
+    if 6 in rectypes:
+        return "取消/失効"
+    if 3 in rectypes:
+        return "期限切れ"
+    if state == 5:
+        return "未約定(終了)"
+    return "未約定(有効)"
+
+
+def _hhmm(t: str) -> str:
+    """約定時刻文字列から HH:MM を抜く(表示用)。yyyyMMddHHMMSS / ISO どちらも対応。"""
+    s = str(t)
+    if len(s) >= 14 and s[:8].isdigit():          # yyyyMMddHHMMSS
+        return f"{s[8:10]}:{s[10:12]}"
+    if "T" in s and len(s) >= 16:                  # ISO 2026-07-28T10:03:...
+        return s[11:16]
+    return s[-8:-3] if len(s) >= 8 else s
+
+
+def _hms(t: str) -> str:
+    """約定時刻から **HH:MM:SS** を抜く(CSV保存用)。
+
+    ⛔⛔ 表示は分までで十分だが、**保存で秒を捨ててはいけない**(2026-09-01)。
+      kabu は ExecutionDay を yyyyMMddHHMMSS で返すので秒がある。ところが
+      orders_*.csv / fills_*.csv は _hhmm() の結果を書いており、
+      **秒が永久に失われていた**。
+      N でいま測っているのは「板寄せから何秒後に約定したか」で、
+      分の解像度では 09:00 と 09:00:59 が区別できない = 測定にならない。
+    """
+    s = str(t)
+    if len(s) >= 14 and s[:8].isdigit():          # yyyyMMddHHMMSS
+        return f"{s[8:10]}:{s[10:12]}:{s[12:14]}"
+    if "T" in s and len(s) >= 19:                  # ISO
+        return s[11:19]
+    return s[-8:] if len(s) >= 8 else s
+
+
+def _load_expected(path):
+    exp = {}
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            for r in _csv.DictReader(f):
+                sym = str(r.get("symbol") or r.get("code") or "").split(".")[0]
+                if sym:
+                    exp[sym] = {k: float(r.get(k) or 0) for k in ("entry", "exit", "pnl")
+                                if r.get(k) not in (None, "")}
+    except Exception as e:
+        print(f"[warn] 想定CSV読込失敗 {path}: {e}")
+    return exp
+
+
+def main():
+    cli = KabuClient(prod=args.prod, dry_run=True)
+    cli.connect()
+    orders = cli.get_orders()
+    print(f"[取得] 全注文 {len(orders)}件 / 接続先 {'本番18080' if args.prod else 'デモ18081'} "
+          f"/ 対象日 {_DATE}\n")
+
+    if args.debug:
+        import json as _json
+        # 約定がありそうな注文(CumQty>0 か Detailsに約定record)を優先して数件ダンプ
+        cand = [o for o in orders if float(o.get("CumQty") or 0) > 0] or orders
+        print("=== [debug] 先頭注文の生構造(RecType/価格/時刻フィールドの確認用) ===")
+        for o in cand[:3]:
+            slim = {k: o.get(k) for k in ("ID", "Symbol", "SymbolName", "Side",
+                                          "State", "OrderState", "OrderQty", "CumQty",
+                                          "Price", "RecvTime", "ExpireDay", "ExpireDate")}
+            print(_json.dumps(slim, ensure_ascii=False))
+            for d in (o.get("Details") or []):
+                print("   Detail:", _json.dumps(d, ensure_ascii=False))
+        print("=== [debug] ここまで ===\n")
+
+    # ── 全注文一覧(対象日に出した注文をすべて。未約定・取消・失効も含む) ──────────
+    # 「注文は出したが約定しなかった」ものも見えるように、注文単位で状態を表示する。
+    names = {}
+    order_rows = []
+    for o in orders:
+        # 対象日に「有効だった」注文を全部拾う。判定は3通りのOR:
+        #   ① 注文日(RecvTime)が対象日
+        #   ② 対象日に約定している
+        #   ③ 有効期限(ExpireDay)が対象日  ← 前日夜に発注して翌営業日を期限にした注文
+        # ③が無いと、前日夜に出して当日ずっと約定しなかった注文が丸ごと漏れ、
+        # 約定率が100%と誤表示される(実測: 2026-08-06)。
+        if not args.no_date:
+            _ok = _match_date(_order_date(o))
+            if not _ok:
+                _ok = any(_match_date(t) for _, _, t in _executions(o))
+            if not _ok:
+                _exp = _digits(o.get("ExpireDay") or o.get("ExpireDate") or "")
+                _ok = bool(_exp) and _exp == _DATE_DIG
+            if not _ok:
+                continue
+        sym = str(o.get("Symbol") or "").split(".")[0]
+        names[sym] = str(o.get("SymbolName") or "")
+        side = "売" if str(o.get("Side")) == "1" else "買"
+        oq = int(float(o.get("OrderQty") or 0))
+        cq = int(float(o.get("CumQty") or 0))
+        # 約定時刻(あれば):この注文の約定明細の最初の時刻
+        _ex = [t for _, _, t in _executions(o)]
+        fill_t = _hhmm(min(_ex)) if _ex else "—"
+        # 約定値(あれば):約定明細の平均
+        _exf = [(px, q) for px, q, _ in _executions(o)]
+        fill_p = (sum(px * q for px, q in _exf) / sum(q for _, q in _exf)) if _exf else 0.0
+        order_rows.append({
+            "code": sym, "name": names.get(sym, ""), "side": side,
+            "order_qty": oq, "order_price": round(_order_price(o), 1),
+            "status": _order_status(o), "cum_qty": cq,
+            "fill_price": round(fill_p, 1), "fill_time": fill_t,
+            "recv": _hhmm(_order_date(o)),
+            # ★ 秒つきを別列で保存する(2026-09-01)。表示は分のままでよいが、
+            #   「板寄せから何秒後に約定したか」は秒が無いと測れない。
+            # ⚠ 部分約定に備えて **最初と最後を分ける**(2026-09-01 レビュー)。
+            #   100株が複数回に分かれて約定すると、first と last が離れる。
+            #   「板寄せから何秒で建ったか」は first、「全数量がそろったのは
+            #   いつか」は last で見る。今日の 5301 は1約定なので同値。
+            "fill_time_s": _hms(min(_ex)) if _ex else "",
+            "fill_time_last_s": _hms(max(_ex)) if _ex else "",
+            "n_exec": len(_ex),
+            "recv_s": _hms(_order_date(o)),
+        })
+
+    order_rows.sort(key=lambda r: (r["code"], r["side"]))
+    _n_all = len(order_rows)
+    _n_fill = sum(1 for r in order_rows if r["cum_qty"] > 0)
+    _n_nofill = _n_all - _n_fill
+    # 売り(エントリー)だけの内訳も出す。lssの約定率はこちらが本体。
+    _s_all = [r for r in order_rows if r["side"] == "売"]
+    _s_fill = sum(1 for r in _s_all if r["cum_qty"] > 0)
+    print(f"=== 全注文一覧 (対象日 {_DATE} に有効だった注文: {_n_all}件 / "
+          f"約定 {_n_fill}件・未約定 {_n_nofill}件) ===")
+    if _s_all:
+        print(f"  うち売り(エントリー): {len(_s_all)}件 / 約定 {_s_fill}件・"
+              f"未約定 {len(_s_all) - _s_fill}件  → 約定率 "
+              f"{_s_fill / len(_s_all) * 100:.1f}%")
+    print(f"{'コード':>6} {'銘柄':<12}{'売買':>4}{'注文株':>7}{'注文値':>9}"
+          f"{'発注':>6}{'状態':>14}{'約定株':>7}{'約定値':>9}{'約定':>6}")
+    for r in order_rows:
+        _fp = f"{r['fill_price']:,.1f}" if r['fill_price'] else "—"
+        print(f"{r['code']:>6} {r['name'][:12]:<12}{r['side']:>4}{r['order_qty']:>7}"
+              f"{r['order_price']:>9,.1f}{r['recv']:>6}{r['status']:>14}"
+              f"{r['cum_qty']:>7}{_fp:>9}{r['fill_time']:>6}")
+    if not order_rows:
+        print("  (対象日に出した注文が見つかりませんでした。--no-date で全期間、--debug で生構造を確認)")
+    if args.orders_csv and order_rows:
+        with open(args.orders_csv, "w", newline="", encoding="utf-8-sig") as f:
+            w = _csv.DictWriter(f, fieldnames=list(order_rows[0].keys()))
+            w.writeheader()
+            w.writerows(order_rows)
+        print(f"[出力] 全注文一覧 → {args.orders_csv}")
+    print()
+
+    # 銘柄×売買 で約定を集約(対象日のみ)
+    sells = defaultdict(lambda: {"qty": 0.0, "notional": 0.0, "times": []})
+    buys = defaultdict(lambda: {"qty": 0.0, "notional": 0.0, "times": []})
+    # ⛔⛔ **日跨ぎの決済(持ち越し→翌日返済)も往復として拾う**(2026-08-20)。
+    #   旧実装は『同じ対象日に 売り と 買い が両方ある』ときだけ往復とみなし、
+    #   前日に建てて当日返済した取引を **qty=0 → 損益 +0円** として黙って
+    #   捨てていた。2026-08-19 の watcher 障害で8銘柄を持ち越し、翌朝
+    #   強制決済(寄成)されたとき、実損 -13,120円 が **+0円 と表示**された。
+    #   損失が数字に出ない = 今日の一連の障害とまったく同じ形なので直す。
+    #   → 対象日より **前** の売り約定も別に集めておき、当日 買いだけの銘柄は
+    #     そちらを建値として突き合わせる。
+    prev_sells = defaultdict(lambda: {"qty": 0.0, "notional": 0.0, "times": []})
+    for o in orders:
+        sym = str(o.get("Symbol") or "").split(".")[0]
+        names[sym] = str(o.get("SymbolName") or "")
+        side = str(o.get("Side"))            # "1"=売 "2"=買
+        for px, qty, t in _executions(o):
+            if not _match_date(t):
+                # 対象日より前の売り = 持ち越し玉の建値候補
+                if side == "1" and _digits(t) and _digits(t)[:8] < _DATE_DIG:
+                    prev_sells[sym]["qty"] += qty
+                    prev_sells[sym]["notional"] += px * qty
+                    prev_sells[sym]["times"].append(t)
+                continue
+            book = sells if side == "1" else buys
+            book[sym]["qty"] += qty
+            book[sym]["notional"] += px * qty
+            book[sym]["times"].append(t)
+
+    exp = _load_expected(args.expected) if args.expected else {}
+
+    rows = []
+    tot_net = 0.0
+    n_carry = 0
+    for sym in sorted(set(sells) | set(buys)):
+        s, b = sells.get(sym), buys.get(sym)
+        # ★ 当日に売りが無く買いだけある = **前日以前に建てた玉の返済**。
+        #   前日以前の売り約定を建値として使う(持ち越し決済)。
+        _carried = False
+        if (not s or not s["qty"]) and b and b["qty"] and prev_sells.get(sym, {}).get("qty"):
+            s = prev_sells[sym]
+            _carried = True
+            n_carry += 1
+        avg_sell = (s["notional"] / s["qty"]) if (s and s["qty"]) else 0.0
+        avg_buy = (b["notional"] / b["qty"]) if (b and b["qty"]) else 0.0
+        qty = min(s["qty"] if s else 0, b["qty"] if b else 0)
+        et = _hhmm(min(s["times"])) if (s and s["times"]) else "—"   # 売り=エントリー時刻
+        if _carried and s["times"]:
+            _d = _digits(min(s["times"]))[:8]
+            et = f"{_d[4:6]}/{_d[6:8]}"       # 建てた日を出す(当日でないと分かるように)
+        xt = _hhmm(max(b["times"])) if (b and b["times"]) else "—"   # 買戻し=決済時刻
+        # ★ 秒つき(CSV用)。表示は上の分表記を使う。
+        # ⚠ 部分約定に備えて最初と最後の両方を持つ(2026-09-01 レビュー)。
+        et_s = _hms(min(s["times"])) if (s and s["times"]) else ""
+        et_last_s = _hms(max(s["times"])) if (s and s["times"]) else ""
+        xt_first_s = _hms(min(b["times"])) if (b and b["times"]) else ""
+        xt_s = _hms(max(b["times"])) if (b and b["times"]) else ""
+        n_exec_s = len(s["times"]) if s else 0
+        n_exec_b = len(b["times"]) if b else 0
+        if qty > 0:                                # 往復完了(lssショート: 売り→買戻し)
+            gross = (avg_sell - avg_buy) * qty
+            fee = (avg_sell + avg_buy) * qty * FEE
+            net = gross - fee
+            pct = (avg_sell - avg_buy) / avg_sell * 100 if avg_sell else 0.0
+            tot_net += net
+        else:                                      # 片側のみ(未決済/データ欠)
+            net = pct = 0.0
+        rows.append({"symbol": sym, "name": names.get(sym, ""), "qty": int(qty),
+                     "entry(売)": round(avg_sell, 1), "exit(買戻)": round(avg_buy, 1),
+                     "entry_t": et, "exit_t": xt, "pnl": round(net, 0),
+                     "pct": round(pct, 2), "carried": int(_carried),
+                     # ★ 秒つき(2026-09-01)。「板寄せから何秒後に約定したか」は
+                     #   分の解像度では測れない。表示は上の et/xt のまま。
+                     "entry_t_s": et_s, "entry_t_last_s": et_last_s,
+                     "exit_t_first_s": xt_first_s, "exit_t_s": xt_s,
+                     "n_exec_entry": n_exec_s, "n_exec_exit": n_exec_b})
+
+    # 表示
+    print("=== 結果 (上の注文のうち 約定して決済まで済んだ取引の実損益) ===")
+    print(f"{'コード':>6} {'銘柄':<12}{'株数':>5}{'実売り':>9}{'実買戻':>9}"
+          f"{'約定':>6}{'決済':>6}{'実損益':>10}{'%':>7}" + ("   |想定損益  乖離" if exp else ""))
+    for r in rows:
+        line = (f"{r['symbol']:>6} {r['name'][:12]:<12}{r['qty']:>5}"
+                f"{r['entry(売)']:>9,.1f}{r['exit(買戻)']:>9,.1f}"
+                f"{r['entry_t']:>6}{r['exit_t']:>6}{r['pnl']:>+10,.0f}{r['pct']:>+6.2f}%"
+                + ("  ⛔持越決済" if r.get("carried") else ""))
+        if exp:
+            e = exp.get(r["symbol"], {})
+            ep = e.get("pnl")
+            if ep is not None:
+                line += f"   |{ep:>+9,.0f} {r['pnl']-ep:>+9,.0f}"
+        print(line)
+
+    print(f"\n[実損益 合計] {tot_net:+,.0f}円  (往復完了 {sum(1 for r in rows if r['qty']>0)}銘柄)")
+    if n_carry:
+        _cn = sum(r["pnl"] for r in rows if r.get("carried"))
+        print(f"""
+{'=' * 78}
+⛔⛔ **持ち越し決済が {n_carry}銘柄 あります** (前日以前に建てて当日返済)
+{'=' * 78}
+  この {n_carry}銘柄の実損益: {_cn:+,.0f}円
+  ⚠ J は **同日決済**の戦略です。持ち越しは設計外 = 何かが起きた日です
+    (watcher が落ちた / 引け決済が飛んだ 等)。
+  ⛔ **一般信用(デイトレ)を持ち越した場合は 強制決済手数料 2,200円/銘柄**が
+     別途かかります(この {n_carry}銘柄なら {n_carry * 2200:,}円)。上の実損益には
+     **含まれていません**。
+  ⛔ **この日の数字を J の成績・スリッページ測定に混ぜないでください。**
+     戦略の損益ではなく事故の費用です(§18.37 の測定が壊れます)。
+{'=' * 78}""")
+    if exp:
+        matched = [(r, exp[r["symbol"]]) for r in rows
+                   if r["symbol"] in exp and "pnl" in exp[r["symbol"]] and r["qty"] > 0]
+        if matched:
+            d_pnl = sum(r["pnl"] - e["pnl"] for r, e in matched)
+            e_tot = sum(e["pnl"] for _, e in matched)
+            print(f"[想定 合計] {e_tot:+,.0f}円  /  実−想定(乖離) {d_pnl:+,.0f}円  "
+                  f"({'実の方が良い' if d_pnl>=0 else '実の方が悪い=劣化'})")
+
+    if args.csv:
+        with open(args.csv, "w", newline="", encoding="utf-8-sig") as f:
+            w = _csv.DictWriter(f, fieldnames=list(rows[0].keys()) if rows else
+                                ["symbol", "name", "qty", "entry(売)", "exit(買戻)",
+                                 "entry_t", "exit_t", "pnl", "pct"])
+            w.writeheader()
+            w.writerows(rows)
+        print(f"\n[出力] {args.csv}")
+
+    # ── ③' N のエントリー計測 (突合とは無関係に必ず走る) ───────────────────
+    #   ⛔ 2026-09-09 に発覚: 3段分解もゲートも `_compare_with_backtest` の中に
+    #     置いていたので、毎日の `.\fills --no-compare` では **一度も走って
+    #     いなかった**。N の測定にテスト側の母集団は要らない(「テストの建値」=
+    #     その日の始値で、n_quotes に入っている)。J の経路にぶら下げたのが誤り。
+    _n_entry_report(rows, order_rows)
+
+    # ── ③ バックテスト(レポート)の同日取引と突合 ───────────────────────────
+    if not args.no_compare:
+        _compare_with_backtest(rows, order_rows)
+
+
+def _n_entry_report(rows: list, order_rows: list) -> None:
+    """N のエントリーを `n_quotes_<日付>.csv` だけで測り、日次ログに貯める。
+
+    測るもの(すべて突合なしで出せる):
+      検知遅れ  = 板を見た時刻 − 寄り時刻      … **PUSH の効果はここに出る**
+      段1       = 検知時の板(bid) − 始値        … 待ち行列のコスト
+      段2       = 実約定 − 検知時の板(bid)      … 注文〜約定のコスト
+      合計      = 実約定 − 始値 = エントリー滑り … 段1 + 段2(恒等式・検算する)
+
+    ⛔ 滑りは **PUSH の効果ではない**。遅れが有利に出るか不利に出るかは
+       銘柄の動き次第(§18.44 の実測で 60〜71%が不利側)。PUSH を測るのは
+       **検知遅れ**のほう。混同しないこと。
+    """
+    _p = Path(f"n_quotes_{_DATE_DIG}.csv")
+    if not _p.exists():
+        # ⛔ **黙って消えないこと**(2026-09-10)。対象日が既定(今日)のまま
+        #   日付をまたぐと、前日の分を見たいのに何も出ずに終わる。実際
+        #   9/10 の朝に 9/9 の内訳を見ようとして「出ない」と迷った。
+        #   材料が無いことと、どの日なら在ることを言う。
+        _have = sorted(x.name[9:17] for x in Path(".").glob("n_quotes_*.csv")
+                       if len(x.name) == 21)
+        print(f"\n[エントリー計測] {_p.name} が無いので測れません。")
+        if _have:
+            print(f"  在るのは {', '.join(_have[-5:])}"
+                  f"{' ほか' if len(_have) > 5 else ''}"
+                  f" → .\\fills --no-compare --date {_have[-1]}")
+        else:
+            print("  n_quotes_<日付>.csv は k_open_confirm(.\\nexec)が書きます。")
+        return
+
+    def _num(v) -> float:
+        try:
+            return float(str(v).replace(",", "").strip() or 0)
+        except ValueError:
+            return 0.0
+
+    def _sec(hms: str):
+        """'09:03:00.123' / '2026-09-09T09:03:00+09:00' → 秒。取れなければ None。"""
+        _m = re.search(r"(\d{2}):(\d{2}):(\d{2})(\.\d+)?", str(hms or ""))
+        if not _m:
+            return None
+        return (int(_m.group(1)) * 3600 + int(_m.group(2)) * 60
+                + int(_m.group(3)) + float(_m.group(4) or 0))
+
+    def _has_frac(hms: str) -> bool:
+        """その時刻に **秒未満** が入っているか(丸めの有無の判定に使う)。"""
+        _m = re.search(r"\d{2}:\d{2}:\d{2}(\.\d+)", str(hms or ""))
+        return bool(_m)
+
+    # 銘柄ごとに **最初に寄りを検知した行** = その周に発注判定をしている。
+    # ⛔⛔ 気配は **この行のもの以外を使わない**(2026-09-10 Codex 指摘②)。
+    #   f91b75a では「後から 0101(一般気配)になった最初の行」を拾っていたが、
+    #   それは約定より後の板でもよく、発注時に見えていた量ではない。
+    #   後から見つけた板で補うと **また別の量**になる。
+    #   → 発注判定の周が一般気配でなければ、内訳は **欠測**にする。
+    #   気配フラグ(kabu 公式 5617行): 0101 一般 / 0102 特別 / 0103 注意 /
+    #   0107・0116・0117 寄前 / 0108 停止前特別 / 0109 引け後。
+    _first: dict = {}
+    _cfg: dict = {}
+    _push = _http = 0
+    try:
+        with open(_p, encoding="utf-8-sig", newline="") as f:
+            for r0 in _csv.DictReader(f):
+                _s = str(r0.get("symbol") or "").strip()
+                if not _s or _s in _first or _num(r0.get("open_p")) <= 0:
+                    continue
+                _first[_s] = r0
+                if not _cfg:
+                    # ★ **指定した設定**と**その結果**を分けて拾う。
+                    #   全行 同じ値なので最初の1行から取る
+                    _cfg.update({
+                        "版": str(r0.get("exec_ver") or "").strip(),
+                        "ws_req": str(r0.get("ws_req") or "").strip(),
+                        "wake_req": str(r0.get("wake_req") or "").strip(),
+                        "ws_ok": str(r0.get("ws_ok") or "").strip()})
+                if str(r0.get("req_ts") or "").strip() == "push":
+                    _push += 1
+                else:
+                    _http += 1
+    except Exception as e:                                       # noqa: BLE001
+        print(f"\n[!] {_p.name} を読めませんでした: {e}")
+        return
+    if not _first:
+        return
+
+    # ── 検知遅れ。**発注の有無に関係なく、寄った全銘柄で測れる** ──────────
+    # ⛔⛔ **測れるのは上界だけ**(2026-09-10 に判明)。kabu の
+    #   `OpeningPriceTime` は **秒未満を切り上げて**記録している。実測:
+    #     5803 検知 09:02:44.263 → 寄り **09:02:45**
+    #     5801 検知 09:02:59.313 → 寄り **09:03:00**
+    #   つまり真の寄りは (open_time − 1秒, open_time] のどこかで、
+    #   遅れは [_d−_o, _d−_o+1) の区間にしかならない。**遅れそのものが
+    #   1秒未満なので、丸め誤差と同じ大きさ**= 精密には測れない。
+    #   素直に引くと負になり、以前はそれを黙って捨てて 50件中47件を
+    #   落としていた(「速すぎて負に出た」を「測れなかった」と誤記録)。
+    #   → 上界 max(0, _d−_o+1) で報告する。**真値はこれ以下**。
+    _lags = []
+    _raw: list = []            # ⛔ 生の時刻差。**負も捨てない**(Codex 指摘④)
+    _skip: dict = {}
+    _negs: list = []
+    _rounded = 0
+    for _s, _q in _first.items():
+        # ★ 検知時刻は **open_seen_ts**(当日の始値が初めて届いた時刻)。
+        #   resp_ts は「その板を受け取った時刻」で毎周 進むので、検知遅れの
+        #   分子には使えない(2026-09-10 Codex 指摘②)。古い CSV には
+        #   open_seen_ts が無いので、その場合だけ resp_ts に落ちる。
+        _o = _sec(_q.get("open_time"))
+        _d = _sec(_q.get("open_seen_ts"))
+        if _d is None:
+            _d = _sec(_q.get("resp_ts"))
+        _why = ""
+        if _o is None:
+            _why = "寄り時刻(open_time)が空か読めない"
+        elif _d is None:
+            _why = "検知時刻(resp_ts)が空か読めない"
+        if _why:
+            _skip[_why] = _skip.get(_why, 0) + 1
+            continue
+        # 秒未満が無い = 切り上げられている → 真の寄りは最大1秒 手前
+        _rnd = 0.0 if _has_frac(_q.get("open_time")) else 1.0
+        _lag = _d - _o
+        _raw.append((_lag, str(_q.get("req_ts") or "").strip() == "push"))
+        if _lag < -_rnd - 0.1 or _lag >= 3600:
+            # ⛔ 仮定(切り上げ・時計一致)で説明できない外れ。**潰さず数える**
+            _why = ("検知が寄りより **前**(丸めでは説明できない)"
+                    if _lag < 0 else "差が1時間以上")
+            _skip[_why] = _skip.get(_why, 0) + 1
+            _negs.append((_lag, _s, str(_q.get("open_time") or ""),
+                          str(_q.get("resp_ts") or "")))
+            continue
+        if _rnd and _lag < 0:
+            _rounded += 1                      # 丸めの範囲内 = ごく速い
+        _lags.append((max(0.0, _lag + _rnd),
+                      str(_q.get("req_ts") or "").strip() == "push"))
+    print()
+    print("=" * 78)
+    print(f"=== N のエントリー計測 ({_p.name} / {len(_first)}銘柄が寄った) ===")
+    if _lags:
+        _v = sorted(x[0] for x in _lags)
+        _pv = sorted(x[0] for x in _lags if x[1])
+        _hv = sorted(x[0] for x in _lags if not x[1])
+
+        def _q50(a):
+            return a[len(a) // 2] if a else float("nan")
+        print(f"  ★ 検知遅れ (寄り → 板を見た) — **PUSH の効果はここに出る**")
+        # ⛔ まず **生の差**。仮定を1つも置いていない唯一の数字(Codex 指摘④)
+        _rv = sorted(x[0] for x in _raw)
+        print(f"     生の差   {len(_rv):>3}件  中央 {_rv[len(_rv)//2]:>+6.2f}秒  "
+              f"最小 {_rv[0]:>+6.2f}秒  最大 {_rv[-1]:>+6.2f}秒")
+        _nneg = sum(1 for x in _raw if x[0] < 0)
+        print(f"     ⚠ 以下は **『kabu が秒を切り上げ、PC と配信元の時計が"
+              f"合っている』と仮定したときの参考上界**。時計のズレでも")
+        print(f"       負は出るので、負の {_nneg}件 だけでは切り上げと"
+              f"区別できない")
+        print(f"     全体   {len(_v):>3}件  中央 {_q50(_v):>6.1f}秒以下  "
+              f"最大 {_v[-1]:>6.1f}秒以下")
+        if _pv:
+            print(f"     PUSH   {len(_pv):>3}件  中央 {_q50(_pv):>6.1f}秒以下  "
+                  f"最大 {_pv[-1]:>6.1f}秒以下")
+        if _hv:
+            print(f"     HTTP   {len(_hv):>3}件  中央 {_q50(_hv):>6.1f}秒以下  "
+                  f"最大 {_hv[-1]:>6.1f}秒以下")
+        if _pv and _hv:
+            # ⛔ **PUSH と HTTP は別の集団**。PUSH 側は「板が動いて当日の始値が
+            #   届いた銘柄」、HTTP 側はその残り。速く寄った銘柄ほど PUSH に
+            #   入りやすいので、差の全部を PUSH の効果と読んではいけない。
+            print(f"     ⚠ この2行は **別の集団**(PUSH=始値が届いた銘柄 / "
+                  f"HTTP=届かなかった残り)。差の全部が PUSH の効果ではない")
+        if _rounded:
+            print(f"     うち {_rounded}件 は引くと負(= 丸めより速く届いた)。"
+                  f"**1秒を切っているのは確実**だが、それ以上は測れない")
+    else:
+        print("  ⚠ 寄り時刻か検知時刻が読めず、検知遅れを出せません")
+    print(f"     PUSH {_push}件 / HTTP {_http}件")
+    if _skip:
+        # ★ 分母を隠さない。ここが大きいときは PUSH の速さを語れない。
+        print(f"     ⚠ **測れなかった {sum(_skip.values())}件 / {len(_first)}件**")
+        for _w, _n in sorted(_skip.items(), key=lambda x: -x[1]):
+            print(f"        {_n:>3}件  {_w}")
+        for _dv, _s, _ot, _rt in sorted(_negs)[:3]:
+            print(f"        例) {_s}  寄り {_ot} → 検知 {_rt}  ({_dv:+.1f}秒)")
+
+    # ── 段1 / 段2。**約定した銘柄だけ**(段2に実約定価格が要る) ────────────
+    # ⛔⛔ **kabu の Bid/Ask は名前が逆**(2026-09-10 Codex 指摘①・公式仕様で確認)。
+    #   「下記にあるBIDとASKとは、トレーダー目線から見た場合の値であるため、
+    #     BidPrice=Sell1のPrice、AskPrice=Buy1のPriceという数値となります」
+    #   → **売る側が当たるのは AskPrice(= Buy1 = 最良買い気配)**。
+    #   ここは `bid`(= BidPrice = 売り気配)を使っており、段1が売り気配ぶん
+    #   高く出ていた。3日間 気づかなかった。
+    # ⛔ 現在値へのフォールバックもやめる。気配が無い行を黙って別の量で
+    #   埋めると、何を測ったのか分からなくなる(Codex 指摘)。
+    # ⛔⛔ **ゲートの合計滑りは気配に依存させない**(2026-09-10 Codex 指摘①)。
+    #   f91b75a で内訳を気配ベースにしたとき、合計滑りと約定件数まで
+    #   「一般気配の行があった銘柄」だけに絞ってしまっていた。実約定と始値が
+    #   分かっていれば合計滑りは出せるので、**先に別ループで**計算する。
+    _tot, _tdet = [], []
+    for r in rows:
+        _s = str(r.get("symbol") or "").strip()
+        _q = _first.get(_s) or _first.get(_s.replace(".T", ""))
+        if not _q:
+            continue
+        _op, _real = _num(_q.get("open_p")), _num(r.get("entry(売)"))
+        if _op <= 0 or _real <= 0:
+            continue
+        _tot.append((_real - _op) / _op * 1e4)
+        _tdet.append(_s)
+    if _tot:
+        print()
+        print(f"  ★ エントリー滑り (実約定 − 始値) — **ゲートはこれで数える**")
+        for _s, _t in zip(_tdet, _tot):
+            print(f"     {_s:<8}{_t:>+9.1f}bp")
+        print(f"     {'平均':<8}{sum(_tot)/len(_tot):>+9.1f}bp  ({len(_tot)}件)")
+        print(f"     ⚠ **PUSH の効果ではない**。遅れが有利に出たか不利に"
+              f"出たかで、60〜71%は不利側(§18.44)")
+
+    # ── 内訳(段1/段2)。**発注判定に使った周の板が一般気配のときだけ** ──────
+    _s1, _s2, _chk, _det = [], [], [], []
+    _qskip: dict = {}
+    _namechk = [0, 0]                 # [照合できた, AskPrice != Buy1.Price]
+    _late = 0
+    for r in rows:
+        _s = str(r.get("symbol") or "").strip()
+        _q = _first.get(_s) or _first.get(_s.replace(".T", ""))
+        if not _q:
+            continue
+        _op, _real = _num(_q.get("open_p")), _num(r.get("entry(売)"))
+        if _op <= 0 or _real <= 0:
+            continue
+        _sg = str(_q.get("ask_sign") or "").strip()
+        if _sg != "0101":
+            _w = (f"発注判定の周が一般気配でない(フラグ {_sg or '(空)'})")
+            _qskip[_w] = _qskip.get(_w, 0) + 1
+            continue
+        # 板を見た時刻が約定より後なら、その気配で段1は語れない
+        _tb, _tf = _sec(_q.get("resp_ts")), _sec(r.get("entry_t_s"))
+        if _tb is not None and _tf is not None and _tb > _tf + 1.0:
+            _late += 1
+            _qskip["板を見た時刻が約定より後"] = (
+                _qskip.get("板を見た時刻が約定より後", 0) + 1)
+            continue
+        # AskPrice = Buy1.Price のはず。生データがあれば突き合わせて確かめる
+        _buy1 = _num(_q.get("buy1_price"))
+        _bid1 = _num(_q.get("ask"))               # ← AskPrice。名前に注意
+        if _buy1 > 0 and _bid1 > 0:
+            _namechk[0] += 1
+            if abs(_buy1 - _bid1) > 1e-9:
+                _namechk[1] += 1
+        _bd = _bid1 or _buy1                      # 現在値では埋めない
+        if _bd <= 0:
+            _qskip["買い気配(AskPrice/Buy1)が空"] = (
+                _qskip.get("買い気配(AskPrice/Buy1)が空", 0) + 1)
+            continue
+        _a = (_bd - _op) / _op * 1e4
+        _b = (_real - _bd) / _op * 1e4
+        _t = (_real - _op) / _op * 1e4
+        _s1.append(_a); _s2.append(_b)
+        _chk.append(_a + _b - _t)
+        _det.append((_s, _a, _b, _t))
+    if _s1:
+        _n = len(_s1)
+        print()
+        print(f"  ── エントリー滑りの内訳 ({_n}件 / 約定したぶんだけ) ──")
+        print(f"     {'銘柄':<8}{'段1 寄り→買気配':>18}{'段2 買気配→実約定':>20}"
+              f"{'合計':>10}")
+        for _s, _a, _b, _t in _det:
+            print(f"     {_s:<8}{_a:>+17.1f}bp{_b:>+19.1f}bp{_t:>+9.1f}bp")
+        print(f"     {'平均':<8}{sum(_s1)/_n:>+17.1f}bp"
+              f"{sum(_s2)/_n:>+19.1f}bp"
+              f"{sum(x[3] for x in _det)/_n:>+9.1f}bp")
+        _c = sum(_chk) / _n
+        if abs(_c) > 0.01:
+            print(f"     ⛔ 検算が合いません(段1+段2 − 合計 = {_c:+.3f}bp)")
+        if _n < len(_tot):
+            print(f"     ⚠ 内訳は {_n}/{len(_tot)}件だけ。**上のゲート用の"
+                  f"合計滑りとは母集団が違う**ので平均を比べないこと")
+        # ⚠ 恒等式は **どんな価格を間に置いても成立する**。一致しても
+        #   気配や時刻が正しい保証にはならない(Codex 指摘③)。
+        print(f"     ⚠ 段2は通信の遅れだけではない。始値ちょうどの売り指値は"
+              f"「買い気配が始値を下回ると即時約定せず、戻って約定する」ので、")
+        print(f"       **戻り待ちの値動きと、約定した銘柄だけを見ている偏り**"
+              f"が混ざる。段1が負・段2が正は構造的に出る")
+        print(f"     ⚠ 合計(=エントリー滑り)は **PUSH の効果ではない**。"
+              f"遅れが有利に出たか不利に出たかで、60〜71%は不利側(§18.44)")
+        if _namechk[0]:
+            if _namechk[1]:
+                print(f"     ⛔ AskPrice != Buy1.Price が {_namechk[1]}/"
+                      f"{_namechk[0]}件。**板の命名の向きが想定と違う**")
+            else:
+                print(f"     ✅ AskPrice == Buy1.Price を {_namechk[0]}件で確認"
+                      f"(= AskPrice が買い気配で正しい)")
+    else:
+        print("\n  (段1/段2を出せる約定がありません。検知遅れは上のとおり)")
+    if _qskip:
+        for _w, _n2 in sorted(_qskip.items(), key=lambda x: -x[1]):
+            print(f"     ⚠ 段1/段2 から除外 {_n2}件: {_w}")
+
+    # ── 日次ログ。ゲート(§18.66)はここから読む ────────────────────────────
+    _ymd = (f"{_DATE_DIG[:4]}-{_DATE_DIG[4:6]}-{_DATE_DIG[6:8]}"
+            if len(_DATE_DIG) == 8 else str(_DATE))
+    _row = {
+        "date": _ymd,
+        "寄った銘柄": len(_first),
+        "PUSH件数": _push, "HTTP件数": _http,
+        "検知遅れ中央秒": (round(sorted(x[0] for x in _lags)[len(_lags) // 2], 2)
+                           if _lags else ""),
+        # ⛔ ゲートが数えるのは **気配に依存しない**この2つ(Codex 指摘①)
+        "約定": len(_tot),
+        "発注": sum(1 for o in order_rows if str(o.get("side") or "") == "売"),
+        "エントリー滑りbp": round(sum(_tot) / len(_tot), 1) if _tot else "",
+        # ↓ 内訳は母集団が違う(一般気配の周があったものだけ)。参考値
+        "内訳件数": len(_s1),
+        "段1bp": round(sum(_s1) / len(_s1), 1) if _s1 else "",
+        "段2bp": round(sum(_s2) / len(_s2), 1) if _s2 else "",
+        # ★ 対象日は **実行時の設定**で決める。PUSH の受信件数で選ぶと
+        #   「新方式で走ったのに PUSH が全滅した日」が消える(Codex 指摘④)。
+        #   ⛔ ws_on は「--ws で接続できたか」= 設定。受信結果ではない。
+        "方式": "N",
+        "版": _cfg.get("版", ""),
+        "ws_req": _cfg.get("ws_req", ""),      # 指定(ゲートはこれで選ぶ)
+        "wake_req": _cfg.get("wake_req", ""),
+        "ws_ok": _cfg.get("ws_ok", ""),        # 結果(選択には使わない)
+    }
+    _lp = Path("n_entry_log.csv")
+    _hist: dict = {}
+    if _lp.exists():
+        try:
+            with open(_lp, encoding="utf-8-sig", newline="") as f:
+                for r0 in _csv.DictReader(f):
+                    if r0.get("date"):
+                        _hist[r0["date"]] = r0
+        except Exception:
+            _hist = {}
+    _hist[_ymd] = _row            # 同じ日を再実行したら上書き(重複しない)
+    try:
+        with open(_lp, "w", encoding="utf-8-sig", newline="") as f:
+            w = _csv.DictWriter(f, fieldnames=list(_row), extrasaction="ignore")
+            w.writeheader()
+            for d in sorted(_hist):
+                w.writerow(_hist[d])
+        print(f"\n  → {_lp.name} ({len(_hist)}営業日)")
+    except Exception as e:                                       # noqa: BLE001
+        print(f"\n[!] {_lp.name} を書けませんでした: {e}")
+        return
+
+    # ── ゲート (§18.66)。**1日=1観測**で数える ────────────────────────────
+    # ⛔⛔ **対象日は「執行の版」で固定する**(2026-09-10 Codex 指摘④)。
+    #   ・PUSH の受信件数で選ぶと「新方式なのに PUSH が全滅した日」が消える
+    #   ・方式(N)だけで選ぶと、PUSH 導入前や起床が効いていなかった日まで
+    #     「PUSH後」のゲートに混ざる。速さの違う日を平均することになる
+    #   ・版が空の古いログは **自動的に混ぜない**(設定が分からないため)
+    #   ・**指定した設定**(ws_req / wake_req)で選ぶ。接続に失敗して REST に
+    #     戻った日(ws_ok=0)も同じ設定で走らせた以上 含める。結果で落とすと
+    #     「失敗した日だけ消える」ことになる
+    #   ・--no-ws のような意図的な比較運転は指定が違うので自動的に別集計
+    def _isgate(h: dict) -> bool:
+        if str(h.get("版") or "") != _GATE_VER:
+            return False
+        return all(str(h.get(_k) or "") == _v for _k, _v in _GATE_CFG.items())
+
+    _has = [(d, h) for d, h in sorted(_hist.items())
+            if str(h.get("エントリー滑りbp") or "") != ""]
+    _ok = [(d, h) for d, h in _has if _isgate(h)]
+    _old = [d for d, h in _has if str(h.get("版") or "") != _GATE_VER]
+    _oth = [d for d, h in _has
+            if str(h.get("版") or "") == _GATE_VER and not _isgate(h)]
+    # ★ 約定ゼロの日は滑りを観測できないのでゲートに入らない(仕様どおり)。
+    #   ただし **暦日は進む**ので、見えないと「あと何日か」を読み違える。
+    _zero = [d for d, h in sorted(_hist.items())
+             if str(h.get("エントリー滑りbp") or "") == "" and _isgate(h)]
+    _nows = sum(1 for _, h in _ok if str(h.get("ws_ok") or "") != "1")
+    _nb = sum(int(_f0(h.get("約定"))) for _, h in _ok)
+    _nd = len(_ok)
+    print(f"  ★ §18.66 ゲート(版 {_GATE_VER}) — **{_nb}件 / {_nd}営業日**"
+          f"(目標 20件 かつ 8営業日)")
+    if _old:
+        print(f"     ⚠ 版が違う/不明な {len(_old)}営業日は **入れていません**"
+              f" ({', '.join(_old[-4:])}{' ほか' if len(_old) > 4 else ''})")
+        print(f"        板の取り方が変わると速さが変わるので、混ぜて平均"
+              f"できない。含めるなら n_entry_log.csv の 版 列を手で埋める")
+    if _oth:
+        print(f"     ⚠ 版は {_GATE_VER} だが **指定設定が違う** {len(_oth)}営業日は"
+              f"別集計 ({', '.join(_oth[-4:])})")
+        print(f"        --no-ws / --no-ws-wake の比較運転はここに落ちる")
+    if _nows:
+        print(f"     ⚠ うち {_nows}営業日は **接続に失敗して REST に戻った**。"
+              f"指定は同じなので **除外していない**(結果で日を選ばない)")
+    if _nd >= 2:
+        _dv = [_f0(h.get("エントリー滑りbp")) for _, h in _ok]
+        _mu = sum(_dv) / _nd
+        _sd = (sum((x - _mu) ** 2 for x in _dv) / (_nd - 1)) ** 0.5
+        _se = _sd / (_nd ** 0.5)
+        _t = _t95(_nd - 1)
+        print(f"     日次平均 {_mu:+.1f}bp / 95%CI "
+              f"{_mu - _t * _se:+.1f} 〜 {_mu + _t * _se:+.1f}")
+        if _nb >= 20 and _nd >= 8:
+            _v = ("✅ 続行" if _mu >= -6 else
+                  "⚠ 30件まで続行" if _mu > -11 else "⛔ 棄却")
+            print(f"     ▶ 判定点に到達 → **{_v}**"
+                  f"  (≥-6 ✅ / -6〜-11 ⚠ / ≤-11 ⛔)")
+        else:
+            print(f"     ▶ あと {max(0, 20 - _nb)}件 / "
+                  f"{max(0, 8 - _nd)}営業日")
+            # ⛔⛔ ペースの分母は **稼働日数**(約定ゼロの日も含む)。
+            #   観測に入った日だけで割ると、約定ゼロの日が分母から落ちて
+            #   **実際より短く見積もる**(2026-09-10 Codex 指摘)。
+            #   例: 10営業日走って約定があったのが5日で10件 → 2件/日 ではなく
+            #       1件/日。残10件は5日ではなく10営業日かかる。
+            _run = _nd + len(_zero)
+            if _run:
+                # ⛔ ペースを整数に丸めない。round(0.5)=0 → max(1,0)=1 となり
+                #   0.5件/日 なのに「残16件を16日」と **半分に見積もる**。
+                # ⛔ 浮動小数でも割らない。5件/3日 で 15/(5/3) が 8.999… に
+                #   なり、切り上げが1日ずれる。**整数のまま** 残×日÷件 で出す。
+                _pd = _nb / _run
+                _rest = max(0, 20 - _nb)
+                _byn = (-(-_rest * _run // _nb)
+                        if _rest and _nb * 2 >= _run else 0)  # 0.5件/日 未満は不問
+                _need = max(max(0, 8 - _nd), _byn)
+                if _need:
+                    print(f"        稼働 {_run}日で {_nb}件 = {_pd:.1f}件/日 の"
+                          f"ペースなら **あと約 {_need}営業日**"
+                          + ("(件数が律速)" if _byn > max(0, 8 - _nd) else ""))
+    if _zero:
+        print(f"     ⚠ 約定ゼロで観測に入らなかった {len(_zero)}営業日がある"
+              f" ({', '.join(_zero[-4:])})。**暦日はそのぶん延びる**")
+    print("=" * 78)
+
+
+def _f0(v) -> float:
+    try:
+        return float(str(v).replace(",", "").strip() or 0)
+    except ValueError:
+        return 0.0
+
+
+def _j_missing_reason(p: Path, ymd: str) -> list[str]:
+    """J の明細に対象日が無い理由を、推測ではなく **中身を見て** 説明する。"""
+    _out = []
+    if not p.exists():
+        return [f"{p.name} がありません。.\\dailyfast を1回流してください"]
+    _ds: set = set()
+    _n = 0
+    try:
+        with open(p, encoding="utf-8-sig", newline="") as f:
+            for r in _csv.DictReader(f):
+                _n += 1
+                _d = str(r.get("entry_date") or "")[:10]
+                if _d:
+                    _ds.add(_d)
+    except Exception as e:
+        return [f"{p.name} を読めません: {e}"]
+    _sd = sorted(_ds)
+    _out.append(f"ファイルは {_n:,}行 / 日付 {len(_sd)}日ぶん"
+                + (f"（最新 {_sd[-1]}）" if _sd else ""))
+    _want = f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:8]}"
+    if _sd and _sd[-1] < _want:
+        _out.append(f"⛔ **当日({_want})の行がまだありません**。")
+        _out.append("   J(09:00確認)は **5分足の09:00バー** から始値を取ります。")
+        _out.append("   当日ぶんの5分足を yfinance で埋めた場合、yfinance は")
+        _out.append("   09:00-09:05 のバーを持たない(§18.38)ので、全銘柄が")
+        _out.append("   『遅寄り』扱いになり J は1件も建てません。")
+        _out.append("   → **翌営業日に J-Quants の5分足が入ってから** "
+                    ".\\dailyfast を流し直すと突合できます。")
+    elif _want in _ds:
+        _out.append(f"⚠ {_want} の行はあるのに拾えていません。列名を確認してください")
+    else:
+        _out.append(f"⚠ {_want} だけが抜けています(前後の日はあります)。"
+                    "その日の5分足か合格判定を確認してください")
+    return _out
+
+
+def _bt_trades_for_date(path: str, ymd: str) -> list[dict]:
+    """lss_trades.csv から対象日(entry_date)の取引を読む。無ければ空リスト。"""
+    p = Path(path)
+    if not p.exists():
+        return []
+    want = f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:8]}"
+    out = []
+    try:
+        with open(p, encoding="utf-8-sig", newline="") as f:
+            for r in _csv.DictReader(f):
+                d = str(r.get("entry_date") or "")[:10]
+                if d != want:
+                    continue
+                try:
+                    out.append({
+                        "symbol": str(r.get("symbol", "")).split(".")[0],
+                        "name": str(r.get("name", "")),
+                        "strategy": str(r.get("strategy", "")),
+                        "bt": float(r.get("bt", 0) or 0),
+                        # 発注順は **流動性(売買代金)降順**(18.21/18.37)。BTは
+                        # アルゴリズムから外したので並びにも使わない。
+                        "liq": float(r.get("liquidity", 0) or 0),
+                        "entry_p": float(r.get("entry_p", 0) or 0),
+                        "exit_p": float(r.get("exit_p", 0) or 0),
+                        # 指値そのもの。**約定の滑りと分けて見る**ために要る。
+                        # 指値が違えば約定値も違うが、それは滑りではなく
+                        # 『ライブとバックテストで注文が別物』という別の問題
+                        # (2026-08-14: 3197 で実 3,205 / テスト 3,230 と 25円ズレ、
+                        #  それを『エントリー滑り -0.77%』と誤表示していた)。
+                        "order_limit": float(r.get("order_limit", 0) or 0),
+                        "reason": str(r.get("reason", "")),
+                        "pnl": float(r.get("pnl", 0) or 0),
+                        "qty": int(float(r.get("qty", 0) or 0)),
+                    })
+                except Exception:
+                    continue
+    except Exception:
+        return []
+    return out
+
+
+def _compare_with_backtest(real_rows: list, order_rows: list) -> None:
+    """実約定 vs バックテスト(レポート)の同日取引を並べて比較する。"""
+    # ⛔ 突合相手は **実際に出している注文方式** の明細でなければ意味がない。
+    #    実発注は H(前日終値-5tick の指値売り)なのに、既定の lss_trades.csv は
+    #    現行lss(逆指値売り)の明細だった(2026-08-13 発覚)。lss は『前日終値-1tick
+    #    まで下がったら約定』なので、寄りで上に飛んで戻らなかった銘柄は約定しない。
+    #    実際 7186/9508/5844 は H では寄りで約定したのに lss 明細に無く、
+    #    『テストに無い』と誤報告された。1605 も lss 3,710 vs H 3,730 を比べて
+    #    滑り +0.54% と出ていたが、これは滑りではなくエントリー方式の差。
+    _tp = Path(args.trades_csv)
+    _hp = _tp.with_name(_tp.stem + "_H" + _tp.suffix)
+    # ★★ 実発注は **J(09:00確認)** に変わった (2026-08-18)。突合相手も J に
+    #   しないと意味がない。J の明細はレポートが lss_trades_K.csv に出す
+    #   (推奨変種 = H寄り確認…資金均等。ファイル名の K は歴史的な名前で、
+    #    中身は J の推奨設定)。⛔ H(前日終値-5tick の指値)とは **建てる条件も
+    #   約定値も違う**ので、H と突合すると滑りが全部でたらめになる。
+    #   J → H → (--lss-compare のときだけ lss) の順に探す。
+    _jp = _tp.with_name(_tp.stem + "_K" + _tp.suffix)
+    global _CMP_MODE
+    if args.lss_compare:
+        _CMP_MODE = "lss"
+        bt = _bt_trades_for_date(args.trades_csv, _DATE_DIG)
+        _src_label = f"{_tp.name} ⚠ 現行lss(逆指値)。--lss-compare 指定"
+    else:
+        bt = _bt_trades_for_date(str(_jp), _DATE_DIG) if _jp.exists() else []
+        if bt:
+            _CMP_MODE = "J"
+            _src_label = f"{_jp.name} (J=09:00確認。**実発注と同じ方式**)"
+        else:
+            # ⛔ **なぜ J が使えないのか**を必ず言う。黙って H に落ちると、
+            #   H の指値(前日終値-5tick)と J の指値(始値×0.995)を比べて
+            #   『指値のズレ』という誤警告が出る(2026-08-18 に実際に出た:
+            #    9107 実1,100 vs テスト3,045 と表示されたが、J の指値は
+            #    3,119×0.995=3,103→3,100 で **ライブが正しかった**)。
+            _CMP_MODE = "H(J実発注)"
+            bt = _bt_trades_for_date(str(_hp), _DATE_DIG) if _hp.exists() else []
+            _src_label = f"{_hp.name} (H=指値売り) ⚠ 実発注は J なので参考値"
+            _why = _j_missing_reason(_jp, _DATE_DIG)
+            print()
+            print("=" * 78)
+            print(f"⛔ J の明細({_jp.name})に {_DATE} の取引がありません。")
+            for _ln in _why:
+                print(f"   {_ln}")
+            print( "   → 下の『指値のズレ』は **H の指値と比べたもの**なので")
+            print( "     無視してください(方式が違うだけで、ライブは正しい)。")
+        if not bt:
+            # ⛔ lss へフォールバックしない。方式が違う明細と突合すると
+            #    『テストに無い』『滑り』が全部でたらめになる(2026-08-13)。
+            print()
+            print("=" * 78)
+            print("=== バックテスト比較: スキップ (J/H の明細がありません) ===")
+            print(f"  {_jp.name} も {_hp.name} も無い、または {_DATE} の取引が")
+            print( "  ありません。実発注は **J(09:00確認 / 始値を見てから発注)** なので、")
+            print( "  lss(逆指値)や H(前日終値-5tick)の明細と突合しても意味がありません")
+            print( "  (方式が違うので別の銘柄・別の約定値になる)。")
+            print( "  → git pull してから .\\jfast を1回流してください。")
+            print(f"     J の明細は {_jp.name} に出ます")
+            print( "     ⛔ LSS_TRADES_CSV を別名に逃がして走らせた場合は、その名前の")
+            print( "        _K.csv を --trades-csv で指してください")
+            print( "  どうしても lss と比べたいときだけ .\\fills --lss-compare")
+            return
+    print()
+    print("=" * 78)
+    print(f"[突合相手] {_src_label}")
+    if not bt:
+        print(f"=== バックテスト比較: スキップ ===")
+        print(f"  {args.trades_csv} に {_DATE} の取引が見つかりません。")
+        print(f"  daily.bat / dailyfast.bat は LSS_TRADES_CSV=lss_trades.csv を既定で設定します。")
+        print(f"  出ていない場合は git pull してから .\\daily を1回流してください")
+        print(f"  (対象日の取引はレポート生成時点までしか入りません。当日ぶんが要るなら"
+              f"引け後に .\\daily → .\\fills の順で)。")
+        return
+
+    # ★ 『約定せず』は合計・一覧から外すが、診断用に控えておく。
+    #    実約定したのにテストに無い銘柄が
+    #      (a) テストは母集団に持っていて「約定しない」と判定した  → 約定モデルの誤り
+    #      (b) そもそも母集団に無い(バックテストがシグナルを出していない)
+    #    のどちらなのかで、直す場所がまったく違う(2026-08-13)。
+    _nofill = {t["symbol"]: t for t in bt if str(t.get("reason")) == "約定せず"}
+    bt = [t for t in bt if str(t.get("reason")) != "約定せず"]
+    if _nofill:
+        print(f"  (うち H が『約定せず』と判定 {len(_nofill)}件 は合計から除外)")
+
+    # ⛔ 並び・統合に BT を使わない(18.21 で BT降順はランダム帯の外=有意に悪いと
+    #    実測 / 18.37 で「BTは一切使わない」に確定 / 2026-08-12 ユーザー決定)。
+    #    実発注(lss_budget_cap → lss_order_rank)とまったく同じキーで並べる。
+    #    ここがズレると「発注していない銘柄」を見て誤った予算判断をする
+    #    (2026-08-14: BT88 の銘柄が未発注と出て、枠不足に見えた)。
+    try:
+        import lss_order_rank as _lor
+        def _ordk(t):
+            return _lor.sort_key(t.get("bt"), t.get("liq"), t.get("symbol", ""))
+        _ord_lbl = _lor.describe()
+    except Exception:
+        def _ordk(t):
+            return (0 if float(t.get("liq") or 0) > 0 else 1,
+                    -float(t.get("liq") or 0), str(t.get("symbol", "")))
+        _ord_lbl = "lss発注順: 流動性(売買代金)降順(フォールバック)"
+
+    # 同一銘柄が複数戦略で出たら発注順が先の1件に統合(実運用=1銘柄1ポジション)
+    by_sym: dict = {}
+    for t in bt:
+        e = by_sym.get(t["symbol"])
+        if e is None or _ordk(t) < _ordk(e):
+            by_sym[t["symbol"]] = t
+    # その日の発注順位(#1 が最優先)。実発注のリストと同じ並びになる。
+    _rank = {s: i + 1 for i, s in
+             enumerate(sorted(by_sym, key=lambda s: _ordk(by_sym[s])))}
+
+    print(f"=== バックテスト(レポート)の {_DATE} 取引 : {len(by_sym)}銘柄 ===")
+    print(f"  {_ord_lbl}")
+    print(f"{'コード':>6} {'銘柄':<12}{'戦略':>8}{'発注順':>6}{'売買代金':>10}"
+          f"{'約定値':>9}{'決済値':>9}{'株数':>5}{'損益':>10}  理由")
+    _bt_tot = 0.0
+    for s in sorted(by_sym, key=lambda x: _rank[x]):
+        t = by_sym[s]
+        _bt_tot += t["pnl"]
+        _lq = float(t.get("liq") or 0)
+        print(f"{s:>6} {t['name'][:12]:<12}{t['strategy']:>8}"
+              f"{('#' + str(_rank[s])):>6}"
+              f"{(f'{_lq / 1e8:,.1f}億' if _lq else '—'):>10}"
+              f"{t['entry_p']:>9,.1f}{t['exit_p']:>9,.1f}{t['qty']:>5}"
+              f"{t['pnl']:>+10,.0f}  {t['reason']}")
+    _bt_w = sum(1 for t in by_sym.values() if t["pnl"] > 0)
+    print(f"\n[テスト 合計] {_bt_tot:+,.0f}円  ({len(by_sym)}銘柄 / 勝ち{_bt_w} 負け{len(by_sym)-_bt_w})")
+
+    # ── 突合 ──
+    # ⛔ **持ち越し決済(carried)は突合から外す**(2026-08-20)。
+    #    建てたのは前営業日以前なので、対象日のテスト明細と突き合わせても
+    #    必ず食い違う。実際 08-20 は 08-19 に建てた8銘柄が
+    #    『テストの母集団に無い(バックテストがシグナルを出していない)』と
+    #    誤報告された(バックテストは 08-19 側にちゃんと持っている)。
+    #    同じ銘柄が両日に出ていれば『両方にある』に化けて滑りまで捏造する。
+    real_all = {r["symbol"]: r for r in real_rows if r["qty"] > 0}
+    carried = {s: r for s, r in real_all.items() if r.get("carried")}
+    real_done = {s: r for s, r in real_all.items() if not r.get("carried")}
+    ordered = {r["code"] for r in order_rows if r.get("side") == "売"}
+    both = sorted(set(real_done) & set(by_sym))
+    real_only = sorted(set(real_done) - set(by_sym))
+    bt_only = sorted(set(by_sym) - set(real_done))
+
+    print()
+    print("=" * 78)
+    print("=== 突合: 実約定 vs テスト ===")
+    if carried:
+        _cd = sorted({r["entry_t"] for r in carried.values()})
+        print(f"\n⛔ 持ち越し決済 {len(carried)}銘柄 は突合から除外しました "
+              f"(建てたのは {'/'.join(_cd)})")
+        print(f"   {' '.join(sorted(carried))}")
+        print(f"   → この銘柄の突合は建てた日で見ること: "
+              f".\\fills --date <建てた日>")
+    if both:
+        # ⛔ **損益の額を直接引き算してはいけない**(2026-08-18)。
+        #    テストは予算400万の資金均等(300株など)、少額テストの実運用は
+        #    予算60万で100株。株数が違えば損益の額も当然違うので、その差は
+        #    『乖離』ではなく『サイズの差』。比較していいのは **1株あたり**だけ。
+        #    (この日: 2734 テスト -3,600円/300株 = -12円/株 に対し
+        #     実運用 -1,200円/100株 = -12円/株 で **完全一致**。額だけ見ると
+        #     2,400円ズレて見える)
+        _ps = lambda v, q: (float(v) / q if q else 0.0)     # noqa: E731
+        _qmix = any(int(real_done[s]["qty"]) != int(by_sym[s]["qty"]) for s in both)
+        print(f"\n▼ 両方にある {len(both)}銘柄 (これが本当の乖離)")
+        print(f"  ★ 損益は **1株あたり** で比べます(株数が違うと額は比較できません)")
+        print(f"{'コード':>6} {'銘柄':<12}{'株数実/テ':>11}{'実約定値':>10}{'テスト':>9}"
+              f"{'滑り':>8}{'実決済':>10}{'テスト':>9}"
+              f"{'実円/株':>9}{'テ円/株':>9}{'差/株':>8}")
+        _d_ps = 0.0
+        for s in both:
+            r, t = real_done[s], by_sym[s]
+            slip = ((r["entry(売)"] - t["entry_p"]) / t["entry_p"] * 100
+                    if t["entry_p"] else 0.0)
+            _rq, _tq = int(r["qty"] or 0), int(t["qty"] or 0)
+            _rp, _tp = _ps(r["pnl"], _rq), _ps(t["pnl"], _tq)
+            _d_ps += _rp - _tp
+            print(f"{s:>6} {t['name'][:12]:<12}"
+                  f"{(str(_rq) + '/' + str(_tq)):>11}"
+                  f"{r['entry(売)']:>10,.1f}{t['entry_p']:>9,.1f}"
+                  f"{slip:>+7.2f}%{r['exit(買戻)']:>10,.1f}{t['exit_p']:>9,.1f}"
+                  f"{_rp:>+9,.1f}{_tp:>+9,.1f}{_rp - _tp:>+8,.1f}")
+        print(f"{'平均':>6} {'':<12}{'':>11}{'':>10}{'':>9}{'':>8}{'':>10}{'':>9}"
+              f"{sum(_ps(real_done[s]['pnl'], real_done[s]['qty']) for s in both) / len(both):>+9,.1f}"
+              f"{sum(_ps(by_sym[s]['pnl'], by_sym[s]['qty']) for s in both) / len(both):>+9,.1f}"
+              f"{_d_ps / len(both):>+8,.1f}")
+        print(f"  (参考: 額の合計 実 {sum(real_done[s]['pnl'] for s in both):+,.0f}円 / "
+              f"テスト {sum(by_sym[s]['pnl'] for s in both):+,.0f}円"
+              + ("  ⛔ **株数が違うので この2つは比較できません**" if _qmix else "")
+              + ")")
+        if _qmix:
+            print(f"  → 少額テスト(予算60万)は 100株、レポート(予算400万)は資金均等。")
+            print(f"    ⛔ **少額テストの実損益をレポートの損益と比べないでください。**")
+            print(f"    値がさ株は少額では1単元も建たないので、銘柄の顔ぶれ自体が"
+                  f"違います(構造バイアス)。比較できるのは上の 円/株 だけ。")
+        # 差/株 の合計は乖離の総量。0 に近ければ約定モデルは正しい。
+        _d_tot = _d_ps
+
+        # ── 指値そのもののズレ ────────────────────────────────────
+        # ⛔ 上の「滑り」は (実約定値 - テスト約定値) なので、**指値が違う**だけでも
+        #    滑りとして出てしまう。それは執行の問題ではなく『ライブとバックテストで
+        #    注文が別物』という設定・データの問題で、直す場所がまったく違う
+        #    (2026-08-14: 3197 が実 3,205 / テスト 3,230 の 25円ズレなのに
+        #     『エントリー滑り -0.77%』と表示され、約定モデルの問題に見えた)。
+        _ordp = {r["code"]: r["order_price"] for r in order_rows
+                 if r.get("side") == "売" and float(r.get("order_price") or 0) > 0}
+        # ⛔⛔ **J では この検査が必ず誤警告になる**(2026-08-24 修正)。
+        #   H は『前日終値-5tick の指値』なので ライブの指値 と テストの
+        #   order_limit が同じ意味で比較できる。J(09:00確認)は違う:
+        #     ライブの指値 = **始値 × (1 - 50bp)** の保護指値(掴まされ防止)
+        #     テストの order_limit = **始値そのもの**(約定値と同じ)
+        #   定義が違うものを引き算しているので、常に -50bp ぶんズレて出る。
+        #   J で意味があるのは「実約定 vs テスト始値」= 上の滑り列のほうで、
+        #   その差は主に **執行遅延**(§18.44: 1分 -15.8bp / 3分 -29.4bp)。
+        if _CMP_MODE == "J":
+            _gaps = []
+            for s in both:
+                _re = float(real_done[s].get("entry(売)") or 0)
+                _tl = float(by_sym[s].get("entry_p") or 0)
+                if _re > 0 and _tl > 0:
+                    _gaps.append((s, _re, _tl, (_re - _tl) / _tl * 1e4))
+            if _gaps:
+                _avg_bp = sum(g[3] for g in _gaps) / len(_gaps)
+                print(f"\n  ★ 【エントリーのズレ】{len(_gaps)}銘柄 — 平均 "
+                      f"{_avg_bp:+.1f}bp (実約定 vs テストの始値)")
+                print(f"  ⛔ ライブの指値(始値-50bp)は**保護指値**なので、"
+                      f"テストの始値と直接比べても意味がありません。ここは"
+                      f"『いくらで売れたか』の比較です。")
+                print(f"  {'コード':>6} {'銘柄':<12}{'実約定':>10}"
+                      f"{'テスト始値':>11}{'差':>8}{'bp':>8}")
+                for s, _re, _tl, _bp in sorted(_gaps, key=lambda g: g[3]):
+                    print(f"  {s:>6} {by_sym[s]['name'][:12]:<12}{_re:>10,.1f}"
+                          f"{_tl:>11,.1f}{_re - _tl:>+8,.1f}{_bp:>+8.1f}")
+                # §18.44 の1分足実測。どれくらい遅れて約定したかの目安になる。
+                _tbl = ((-15.8, "約1分"), (-26.8, "約2分"), (-29.4, "約3分"),
+                        (-36.6, "約5分"))
+                _near = min(_tbl, key=lambda t: abs(t[0] - _avg_bp))
+                if _avg_bp < -5:
+                    print(f"  → 全体にマイナス = **執行が板寄せに間に合わず"
+                          f"ザラ場で約定**しています。§18.44 の減衰実測では "
+                          f"{_avg_bp:+.1f}bp ≒ **{_near[1]}の遅れ**に相当。\n"
+                          f"    (1分 -15.8 / 2分 -26.8 / 3分 -29.4 / 5分 -36.6 bp)\n"
+                          f"    ⚠ レポートは『約定=始値(執行が瞬時)』が前提なので、"
+                          f"このぶんは実運用で目減りします。")
+                elif _avg_bp > 5:
+                    print(f"  → 全体にプラス = テストより**高く売れて**います"
+                          f"(板寄せが指値より上でついた)。")
+                else:
+                    print(f"  → ほぼゼロ。始値の取得と執行が一致しています。")
+            _mis = []
+        else:
+            _mis = []
+            for s in both:
+                _rl = float(_ordp.get(s) or 0)
+                _tl = float(by_sym[s].get("order_limit") or 0)
+                if _rl > 0 and _tl > 0 and abs(_rl - _tl) >= 0.5:
+                    _mis.append((s, _rl, _tl))
+        if _mis:
+            print(f"\n  ⛔ 【指値のズレ】{len(_mis)}銘柄 — ライブとバックテストで"
+                  f"**注文そのものが別物**です(滑りではありません)")
+            print(f"  {'コード':>6} {'銘柄':<12}{'実際の指値':>10}{'テスト':>9}"
+                  f"{'差':>8}{'株数ぶん':>10}")
+            for s, _rl, _tl in _mis:
+                print(f"  {s:>6} {by_sym[s]['name'][:12]:<12}{_rl:>10,.1f}"
+                      f"{_tl:>9,.1f}{_rl - _tl:>+8,.1f}"
+                      f"{(_rl - _tl) * by_sym[s]['qty']:>+10,.0f}円")
+            print(f"  → 前日終値・呼値・LSS_H_LIMIT_TICKS のどれかが食い違っています。"
+                  f"§18.9 の鉄則(バックテストとライブを揃える)に反するので要調査。")
+        elif _ordp:
+            print(f"\n  ✅ 指値は全銘柄で一致(ライブとバックテストが同じ注文を出している)")
+
+    if bt_only:
+        # 発注順(=流動性降順)で並べる。件数が多いので上位だけ出して残りは要約。
+        _lst = sorted(bt_only, key=lambda s: _rank[s])
+        _o = sum(1 for s in _lst if s in ordered)
+        _n = len(_lst) - _o
+        _p = sum(by_sym[s]["pnl"] for s in _lst)
+        print(f"\n▼ テストにあるが実約定なし {len(_lst)}銘柄 (発注順)")
+        _SHOW = 15
+        for s in _lst[:_SHOW]:
+            t = by_sym[s]
+            tag = "発注済(未約定)" if s in ordered else "発注していない"
+            print(f"{s:>6} {t['name'][:12]:<12}{t['strategy']:>8}"
+                  f"{('#' + str(_rank[s])):>6}"
+                  f"{t['pnl']:>+10,.0f}  {tag}")
+        if len(_lst) > _SHOW:
+            _rest = _lst[_SHOW:]
+            print(f"  ... 他 {len(_rest)}銘柄 (想定損益合計 "
+                  f"{sum(by_sym[s]['pnl'] for s in _rest):+,.0f}円)")
+        print(f"  → 想定損益 {_p:+,.0f}円 を取り逃し "
+              f"(発注済だが未約定 {_o}件 / そもそも発注していない {_n}件)")
+
+        # 発注順位帯別: 枠を増やすと **次に何が入るか** が分かる。
+        # ⛔ BT帯では出さない。BTは発注順に一切使っていないので、BTで束ねても
+        #    「枠を増やしたら拾える集団」にならない(18.12/18.21/18.37)。
+        #    枠は発注順で上から埋まるので、順位で束ねるのが唯一正しい切り方。
+        print(f"\n  【発注順位帯別の取り逃し】枠を増やすと上から順に拾える")
+        print(f"  {'順位帯':<10}{'銘柄':>5}{'想定損益':>12}{'1件あたり':>11}")
+        _n_all = len(by_sym)
+        for lo, hi in [(1, 10), (11, 20), (21, 30), (31, 50), (51, 10**6)]:
+            g = [s for s in _lst if lo <= _rank[s] <= hi]
+            if not g:
+                continue
+            gp = sum(by_sym[s]["pnl"] for s in g)
+            _lb = f"#{lo}-{min(hi, _n_all)}" if hi < 10**6 else f"#{lo}以降"
+            print(f"  {_lb:<10}{len(g):>5}{gp:>+11,.0f}円{gp / len(g):>+10,.0f}円")
+
+    if real_only:
+        print(f"\n▼ 実約定したがテストに無い {len(real_only)}銘柄")
+        _n_model, _n_pop = 0, 0
+        for s in real_only:
+            r = real_done[s]
+            _nf = _nofill.get(s)
+            if _nf:
+                _n_model += 1
+                _why = (f"H は『約定せず』と判定 "
+                        f"(指値{_nf.get('entry_p') or '-'}) ← **約定モデルの誤り**")
+            else:
+                _n_pop += 1
+                _why = "テストの母集団に無い(バックテストがシグナルを出していない)"
+            print(f"{s:>6} {r['name'][:12]:<12}{r['pnl']:>+10,.0f}  {_why}")
+        if _n_model:
+            print(f"  ・{_n_model}件: **H の約定判定が実際とズレている**。"
+                  f"寄りが指値以上なら板寄せで約定するはずなので、"
+                  f"ギャップガード(±3%)や5分足の欠落を疑う")
+        if _n_pop:
+            print(f"  ・{_n_pop}件: **損益タブの母集団に無い**。シグナルタブ(ライブ判定 "
+                  f"check_signal_on_date)は出したのに、損益タブ(バックテスト "
+                  f"run_limit_backtest)が当日の取引として持っていない。")
+            print(f"    当日ぶんは決着していないと『発注中』扱いで明細から外れる"
+                  f"(nikkei_analysis: pending_trades=[])。翌営業日に .\\daily を"
+                  f"流し直すと入るはずなので、まずそれで消えるか確認すること。")
+
+    _r_tot = sum(r["pnl"] for r in real_done.values())
+    print()
+    print("-" * 78)
+    print(f"[実約定] {len(real_done)}銘柄 {_r_tot:+,.0f}円   "
+          f"[テスト] {len(by_sym)}銘柄 {_bt_tot:+,.0f}円   "
+          f"[差] {_r_tot - _bt_tot:+,.0f}円")
+    if carried:
+        _ct = sum(r["pnl"] for r in carried.values())
+        print(f"         ※ 上の[実約定]に **持ち越し {len(carried)}銘柄 "
+              f"{_ct:+,.0f}円 は含みません**(突合の対象外)。"
+              f"当日の実損益の総額は上の『[実損益 合計]』を見ること")
+    if ordered:
+        print(f"[約定率] 実 {len(real_done)}/{len(ordered)}件 "
+              f"({len(real_done) / len(ordered) * 100:.1f}%)  vs  "
+              f"テスト {len(by_sym)}件が約定判定")
+    else:
+        # エントリーの売り注文が対象日に無い = 前日夜に発注してRecvTimeが前日になっている
+        # ケース。約定率は算出できないので、その旨を出す(0除算で落ちない)。
+        print(f"[約定率] 算出不可: 対象日 {_DATE} に『売り』注文が1件もありません。")
+        print(f"         エントリーの逆指値売りは前営業日の夜に発注されている可能性があります。")
+        print(f"         前日で確認: .\\fills --date <前営業日>  /  日付を見ない: .\\fills --no-date")
+
+    # ⛔⛔ **持ち越し決済のあった日は乖離ログに入れない**(2026-08-20)。
+    #   slip_daily_log.csv は「J の実運用がバックテストからどれだけ劣化するか」を
+    #   測るためのもの(§18.37)。持ち越し = 同日決済という設計が破れた日なので、
+    #   混ぜると測定そのものが壊れる。事故の費用は戦略の損益ではない。
+    _n_carry = sum(1 for r in real_rows if r.get("carried"))
+    if _n_carry:
+        print(f"\n⛔ 持ち越し決済 {_n_carry}銘柄 があるので "
+              f"**この日は slip_daily_log.csv に記録しません**。\n"
+              f"   J は同日決済の戦略なので、持ち越した日の数字を混ぜると"
+              f"実スリッページの測定(§18.37)が壊れます。\n"
+              f"   どうしても記録するなら --force-slip-log。")
+    if not args.no_slip_log and (not _n_carry or args.force_slip_log):
+        _append_slip_log(both, real_done, by_sym, ordered, _r_tot, _bt_tot)
+
+
+# ── 乖離の日次累積ログ ────────────────────────────────────────────────────
+# なぜ必要か: 1日の突合だけでは「たまたま悪い2件があった」のか「毎日そうなのか」が
+# 分からない。lss の月の期待値は +37,647円(CLAUDE.md 18.12)しかないので、1日
+# -2,900円 の乖離が常態なら月 -58,000円 になり期待値が消える。10営業日ぶん貯めれば
+# それが確定する。tenkan_daily_log.csv と同じ思想(1日1行・同じ日は上書き)。
+#
+# ⛔ **額の列(実損益/テスト損益/差/エントリー滑り/決済滑り)は株数に比例する**。
+#    少額テスト(100株)と本番サイズ(資金均等)を混ぜて足すと意味を失うので、
+#    日をまたいで比べるときは **/株** の列を見ること(2026-08-18 に追加)。
+_SLIP_COLS = ["date", "方式", "突合", "実損益", "テスト損益", "差",
+              "差/株", "エントリー滑り/株", "決済滑り/株",
+              "エントリー滑り", "決済滑り", "平均エントリー滑り%",
+              "実件数", "実損益_全", "テスト件数", "テスト損益_全", "差_全",
+              "発注件数", "約定率%",
+              # ★★ エントリー滑りの3段分解 (2026-09-08)
+              #   これまで「実約定 − 始値」を1つの数字で見ていたので、
+              #   悪かった日に **待ち行列のせいなのか、注文のせいなのか**が
+              #   分からなかった。板は n_quotes_<日付>.csv に既に取れている
+              #   (検知時の bid と 10段の板)ので、読むだけで分けられる。
+              #
+              #     段1 = 検知時の板(bid) − 始値       … 待ち行列のコスト
+              #     段2 = 実約定 − 検知時の板(bid)     … 注文〜約定のコスト
+              #     段1 + 段2 = エントリー滑り/株      … 恒等式(検算する)
+              #
+              #   ⛔ 段3(不約定の機会損失)はここに入れない。突合できるのは
+              #      **約定した銘柄**だけで、不約定は n_paper --close の側。
+              "段1_始値→検知板/株", "段2_検知板→実約定/株", "段1+2_検算差",
+              # PUSH(WebSocket) を使った日か。PUSH前/後を混ぜないための列。
+              # 待ち行列そのものを消す変更なので、**測っている量が変わる**。
+              "PUSH件数", "HTTP件数"]
+
+
+def _entry_stages(both: set, real_done: dict, by_sym: dict) -> dict:
+    """エントリー滑りを 段1(待ち行列) と 段2(注文〜約定) に割る。
+
+    材料は `n_quotes_<日付>.csv`(k_open_confirm が銘柄ごとに書いている)。
+    無ければ空を返すだけで、既存の列には一切影響しない。
+
+    ★ 符号の向きは既存の「エントリー滑り」と同じ = **高く売れていればプラス**。
+      ショートなので、寄ってから下がるほど段1がマイナスになる。
+    """
+    _out = {"段1_始値→検知板/株": "", "段2_検知板→実約定/株": "",
+            "段1+2_検算差": "", "PUSH件数": "", "HTTP件数": ""}
+    _p = Path(f"n_quotes_{_DATE_DIG}.csv")
+    if not _p.exists() or not both:
+        return _out
+    # 銘柄ごとに **最初に寄りを検知した行**を採る(以降の行は値が動いている)
+    _first: dict = {}
+    _push = _http = 0
+    try:
+        with open(_p, encoding="utf-8-sig", newline="") as f:
+            for r0 in _csv.DictReader(f):
+                _s = str(r0.get("symbol") or "").strip()
+                if not _s or _s in _first:
+                    continue
+                try:
+                    if float(r0.get("open_p") or 0) <= 0:
+                        continue
+                except ValueError:
+                    continue
+                _first[_s] = r0
+                if str(r0.get("req_ts") or "").strip() == "push":
+                    _push += 1
+                else:
+                    _http += 1
+    except Exception:
+        return _out
+    _out["PUSH件数"], _out["HTTP件数"] = _push, _http
+
+    def _num(v) -> float:
+        try:
+            return float(str(v).replace(",", "").strip() or 0)
+        except ValueError:
+            return 0.0
+
+    _s1: list[float] = []
+    _s2: list[float] = []
+    _chk: list[float] = []
+    for s in both:
+        _q = _first.get(s) or _first.get(str(s).replace(".T", ""))
+        if not _q:
+            continue
+        _op = _num(_q.get("open_p"))
+        # ⛔ 売る側が当たる先は **最良買い気配(bid)**。無いときだけ現在値。
+        _bd = _num(_q.get("bid")) or _num(_q.get("current_price"))
+        _real = _num((real_done.get(s) or {}).get("entry(売)"))
+        _test = _num((by_sym.get(s) or {}).get("entry_p"))
+        if _op <= 0 or _bd <= 0 or _real <= 0 or _test <= 0:
+            continue
+        _s1.append(_bd - _op)
+        _s2.append(_real - _bd)
+        # ★ 恒等式の検算: 段1 + 段2 == 実約定 − 始値。
+        #   テストの建値が始値でない日(方式が違う)は 0 にならないので、
+        #   **0 から外れたら混ざっている**という警報になる。
+        _chk.append((_bd - _op) + (_real - _bd) - (_real - _test))
+    if not _s1:
+        return _out
+    _n = len(_s1)
+    _out["段1_始値→検知板/株"] = round(sum(_s1) / _n, 2)
+    _out["段2_検知板→実約定/株"] = round(sum(_s2) / _n, 2)
+    _out["段1+2_検算差"] = round(sum(_chk) / _n, 3)
+    return _out
+
+
+# 両側95%の t 値。**1.96 を使わない**(営業日が10日そこそこでは広すぎる区間になる)
+_TCRIT = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447,
+          7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228, 11: 2.201, 12: 2.179,
+          13: 2.160, 14: 2.145, 15: 2.131, 16: 2.120, 17: 2.110, 18: 2.101,
+          19: 2.093, 20: 2.086, 25: 2.060, 30: 2.042}
+
+
+def _t95(df: int) -> float:
+    if df <= 0:
+        return float("nan")
+    if df in _TCRIT:
+        return _TCRIT[df]
+    return min((_TCRIT[k] for k in _TCRIT if k >= df), default=1.960)
+
+
+def _gate_block(cv: list, _f) -> None:
+    """エントリー滑りを §18.66 のゲートの形で出す。
+
+    ★ **同じ日の10件を独立10件と数えない。** lss/N は同日決済で、その日の
+      寄り後の方向を全銘柄が共有するので、実効サンプルは取引件数ではなく
+      **営業日数**(§18.13 の同日相関)。1日を1観測として平均と標準誤差を出す。
+
+    ★ **PUSH前後を混ぜない。** PUSH は待ち行列を消す = 測っている量(遅延)
+      そのものを変える。予算を 300→400万 にしたときは bp がサイズ非依存
+      なので合算できたが、今回は違う(2026-09-08)。
+    """
+    def _grp(h) -> str:
+        try:
+            return "PUSH後" if float(_f(h.get("PUSH件数"))) > 0 else "PUSH前"
+        except Exception:
+            return "PUSH前"
+
+    _rows = [(_grp(h), _f(h.get("平均エントリー滑り%")) * 100.0,
+              int(_f(h.get("突合"))))
+             for h in cv if int(_f(h.get("突合"))) > 0]
+    if not _rows:
+        return
+    print("  ★ エントリー滑り — §18.66 のゲート (日クラスタ / 1日=1観測)")
+    print(f"     {'区分':<8}{'営業日':>7}{'件数':>6}{'日次平均':>10}"
+          f"{'SE':>8}{'95%CI':>22}{'件数加重':>10}")
+    for _g in ("PUSH前", "PUSH後"):
+        _d = [(b, n) for g, b, n in _rows if g == _g]
+        if not _d:
+            print(f"     {_g:<8}{0:>7}{0:>6}{'—':>10}")
+            continue
+        _n = len(_d)
+        _m = sum(b for b, _ in _d) / _n                    # 日ごとの平均(等重み)
+        _wm = (sum(b * n for b, n in _d) / sum(n for _, n in _d))
+        if _n >= 2:
+            _var = sum((b - _m) ** 2 for b, _ in _d) / (_n - 1)
+            _se = (_var / _n) ** 0.5
+            _t = _t95(_n - 1)
+            _ci = f"{_m - _t * _se:+.1f} 〜 {_m + _t * _se:+.1f}"
+        else:
+            _se, _ci = float("nan"), "—(1日では出せない)"
+        print(f"     {_g:<8}{_n:>7}{sum(n for _, n in _d):>6}{_m:>+9.1f}bp"
+              f"{_se:>8.1f}{_ci:>22}{_wm:>+9.1f}bp")
+    # ── 判定 ────────────────────────────────────────────────────────
+    _a = [(b, n) for g, b, n in _rows if g == "PUSH後"]
+    print("     判定は **PUSH後** の行で行う"
+          "(グロス +15.7bp/件 − 呼値片道4.4bp = 遅延に使える予算 11.3bp)")
+    print("       ≥ -6bp ✅続行 / -6〜-11bp ⚠30件まで続行 / ≤ -11bp ⛔棄却")
+    if not _a:
+        print("     ▶ PUSH後 まだ0日。ここが 20件 かつ 8営業日 に達したら判定")
+    else:
+        _nd, _nb = len(_a), sum(n for _, n in _a)
+        _m = sum(b for b, _ in _a) / _nd
+        if _nd < 8 or _nb < 20:
+            print(f"     ▶ PUSH後 {_nb}件 / {_nd}営業日。"
+                  f"**20件 かつ 8営業日** まであと "
+                  f"{max(0, 20 - _nb)}件 / {max(0, 8 - _nd)}営業日")
+        else:
+            _v = ("✅ 続行" if _m >= -6 else
+                  "⚠ 30件まで続行" if _m > -11 else "⛔ 棄却")
+            print(f"     ▶ 判定点に到達。日次平均 {_m:+.1f}bp → **{_v}**")
+    print()
+
+
+def _append_slip_log(both, real_done, by_sym, ordered, r_tot, bt_tot) -> None:
+    """当日の乖離を1行にして累積ログへ upsert し、2日以上あれば累計を表示する。
+
+    差の内訳(空売りなので符号に注意):
+      エントリー滑り = (実売値 - テスト売値) x 株数   高く売れていればプラス
+      決済滑り       = (テスト買戻値 - 実買戻値) x 株数 安く買い戻せていればプラス
+    どちらが効いているかで打ち手が変わる(エントリー=発注価格、決済=損切りの出し方)。
+    """
+    _e_slip = _x_slip = 0.0
+    _e_ps = _x_ps = _d_ps = 0.0
+    _r_both = _t_both = 0.0
+    _pcts: list[float] = []
+    for s in both:
+        r, t = real_done[s], by_sym[s]
+        q = r["qty"] or 100
+        if t["entry_p"]:
+            _e_slip += (r["entry(売)"] - t["entry_p"]) * q
+            _e_ps += r["entry(売)"] - t["entry_p"]
+            _pcts.append((r["entry(売)"] - t["entry_p"]) / t["entry_p"] * 100)
+        if t["exit_p"]:
+            _x_slip += (t["exit_p"] - r["exit(買戻)"]) * q
+            _x_ps += t["exit_p"] - r["exit(買戻)"]
+        _d_ps += (r["pnl"] / q) - (t["pnl"] / (t["qty"] or 100))
+        _r_both += r["pnl"]
+        _t_both += t["pnl"]
+    _n_b = max(1, len(both))
+
+    _ymd = f"{_DATE_DIG[:4]}-{_DATE_DIG[4:6]}-{_DATE_DIG[6:8]}" if len(_DATE_DIG) == 8 else str(_DATE)
+    row = {
+        "date": _ymd,
+        "方式": _CMP_MODE,
+        "突合": len(both),
+        "実損益": round(_r_both),
+        "テスト損益": round(_t_both),
+        "差": round(_r_both - _t_both),
+        # ★ 株数に依存しない列。日をまたいだ比較はこちらで行う。
+        "差/株": round(_d_ps / _n_b, 2),
+        "エントリー滑り/株": round(_e_ps / _n_b, 2),
+        "決済滑り/株": round(_x_ps / _n_b, 2),
+        "エントリー滑り": round(_e_slip),
+        "決済滑り": round(_x_slip),
+        "平均エントリー滑り%": round(sum(_pcts) / len(_pcts), 3) if _pcts else 0.0,
+        "実件数": len(real_done),
+        "実損益_全": round(r_tot),
+        "テスト件数": len(by_sym),
+        "テスト損益_全": round(bt_tot),
+        "差_全": round(r_tot - bt_tot),
+        "発注件数": len(ordered),
+        "約定率%": round(len(real_done) / len(ordered) * 100, 1) if ordered else 0.0,
+    }
+    # ★ エントリー滑りの3段分解。材料が無ければ列が空になるだけ。
+    _st = _entry_stages(both, real_done, by_sym)
+    row.update(_st)
+    if _st.get("段1_始値→検知板/株") != "":
+        _c = float(_st["段1+2_検算差"])
+        print(f"\n  ── エントリー滑りの内訳 (1株あたり) ──")
+        print(f"     段1 始値 → 検知時の板   {float(_st['段1_始値→検知板/株']):+8.2f}円"
+              f"   (待ち行列のコスト。PUSH で消したいのはここ)")
+        print(f"     段2 検知時の板 → 実約定  {float(_st['段2_検知板→実約定/株']):+8.2f}円"
+              f"   (注文を出してから約定するまで)")
+        print(f"     PUSH {_st['PUSH件数']}件 / HTTP {_st['HTTP件数']}件")
+        if abs(_c) > 0.01:
+            print(f"     ⛔ 検算が合いません(段1+段2 − エントリー滑り = {_c:+.3f}円)。"
+                  f"\n        テストの建値が始値でない = **方式が混ざっています**。"
+                  f"この日の分解は読まないこと")
+        # ⛔ 段3(不約定の機会損失)はここでは出せない。突合できるのは約定した
+        #    銘柄だけなので、不約定は n_paper --close の側で見る。
+        print(f"     ▶ 段3(不約定の機会損失)は python n_paper.py --close で")
+
+    p = Path(args.slip_log)
+    hist: dict = {}
+    if p.exists():
+        try:
+            with open(p, encoding="utf-8-sig", newline="") as f:
+                for r0 in _csv.DictReader(f):
+                    if r0.get("date"):
+                        hist[r0["date"]] = r0
+        except Exception:
+            hist = {}
+    hist[_ymd] = row            # 同じ日を再実行したら上書き(重複しない)
+    try:
+        with open(p, "w", encoding="utf-8-sig", newline="") as f:
+            w = _csv.DictWriter(f, fieldnames=_SLIP_COLS, extrasaction="ignore")
+            w.writeheader()
+            for d in sorted(hist):
+                w.writerow(hist[d])
+    except Exception as e:
+        print(f"\n[!] 累積ログを書けませんでした: {e}")
+        return
+
+    def _f(v) -> float:
+        try:
+            return float(str(v).replace(",", "").strip() or 0)
+        except ValueError:
+            return 0.0
+
+    print()
+    print("=" * 78)
+    # ⛔ 集計は **いまの方式(H)の行だけ**。08/05〜08/07 は lss(逆指値)の実発注を
+    #    v16前の楽観モデルと突合したもので、混ぜると『決済滑り -10,012円/日』の
+    #    ような、いまのモデルとは無関係な数字が出る(2026-08-13)。
+    #    方式列が無い古い行は lss(旧) 扱いにして集計から外す。
+    def _mode_of(h) -> str:
+        return str(h.get("方式") or "").strip() or "lss(旧)"
+
+    _cur = [d for d in sorted(hist) if _mode_of(hist[d]) == _CMP_MODE]
+    _old = [d for d in sorted(hist) if _mode_of(hist[d]) != _CMP_MODE]
+    print(f"=== 累積: 実約定 vs テストの乖離 ({p.name} / {_CMP_MODE} {len(_cur)}営業日) ===")
+    print(f"  {'日付':<12}{'方式':>8}{'突合':>5}{'実損益':>10}{'テスト':>10}{'差':>10}"
+          f"{'エントリ滑り':>12}{'決済滑り':>10}{'約定率':>8}")
+    for d in sorted(hist):
+        h = hist[d]
+        _m = _mode_of(h)
+        _mk = "" if _m == _CMP_MODE else "  ← 集計対象外"
+        print(f"  {d:<12}{_m:>8}{int(_f(h.get('突合'))):>5}{_f(h.get('実損益')):>+10,.0f}"
+              f"{_f(h.get('テスト損益')):>+10,.0f}{_f(h.get('差')):>+10,.0f}"
+              f"{_f(h.get('エントリー滑り')):>+12,.0f}{_f(h.get('決済滑り')):>+10,.0f}"
+              f"{_f(h.get('約定率%')):>7.1f}%{_mk}")
+    if _old:
+        print(f"  ※ {len(_old)}日ぶんは別方式(または v16前)なので集計から除外: "
+              f"{', '.join(_old)}")
+    if not _cur:
+        print(f"  {_CMP_MODE} の行がまだありません。累計は次回から出ます。")
+        print()
+        return
+
+    _cv = [hist[d] for d in _cur]
+    n_d = len(_cv)
+    n_b = sum(int(_f(h.get("突合"))) for h in _cv)
+    d_tot = sum(_f(h.get("差")) for h in _cv)
+    e_tot = sum(_f(h.get("エントリー滑り")) for h in _cv)
+    x_tot = sum(_f(h.get("決済滑り")) for h in _cv)
+    print("  " + "-" * 76)
+    print(f"  {'合計(' + _CMP_MODE + ')':<12}{'':>8}{n_b:>5}"
+          f"{sum(_f(h.get('実損益')) for h in _cv):>+10,.0f}"
+          f"{sum(_f(h.get('テスト損益')) for h in _cv):>+10,.0f}{d_tot:>+10,.0f}"
+          f"{e_tot:>+12,.0f}{x_tot:>+10,.0f}")
+    print()
+    # ★★ **株数に依存しない集計**。少額テストと本番サイズが混ざっても意味を保つ。
+    #    額の列は株数に比例するので、サイズを変えた日をまたぐと足せない。
+    _wb = [(int(_f(h.get("突合"))), _f(h.get("差/株")),
+            _f(h.get("エントリー滑り/株")), _f(h.get("決済滑り/株")))
+           for h in _cv if int(_f(h.get("突合"))) > 0 and h.get("差/株") not in (None, "")]
+    if _wb:
+        _nb2 = sum(w[0] for w in _wb)
+        print(f"  ★ 1株あたり(サイズ非依存 / 突合 {_nb2}件・{len(_wb)}営業日)")
+        print(f"     乖離        {sum(w[0] * w[1] for w in _wb) / _nb2:>+9,.2f} 円/株")
+        print(f"     エントリー  {sum(w[0] * w[2] for w in _wb) / _nb2:>+9,.2f} 円/株"
+              f"   決済 {sum(w[0] * w[3] for w in _wb) / _nb2:>+9,.2f} 円/株")
+        print()
+    print(f"  【額】※ 株数が同じ日どうしでしか比べられません")
+    print(f"  1日あたりの乖離   {d_tot / n_d:>+12,.0f}円"
+          f"   → 月20営業日換算 {d_tot / n_d * 20:>+12,.0f}円")
+    if n_b:
+        print(f"  1件あたりの乖離   {d_tot / n_b:>+12,.0f}円   (突合 {n_b}件)")
+    print(f"  内訳: エントリー {e_tot / n_d:>+10,.0f}円/日   決済 {x_tot / n_d:>+10,.0f}円/日")
+    print()
+    _gate_block(_cv, _f)
+    if n_d < 10:
+        print(f"  ※ まだ {n_d}営業日。10営業日ぶん貯まるまでは判断材料になりません"
+              f"(1件の外れ値で符号が反転します)")
+    else:
+        print(f"  ※ 月20営業日換算の乖離を lss の月期待値(+37,647円 / CLAUDE.md 18.12)と"
+              f"比べてください。")
+        print(f"     これを超えているなら、バックテストが黒字でも実運用は赤字です。")
+
+
+if __name__ == "__main__":
+    main()

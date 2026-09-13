@@ -1,0 +1,452 @@
+r"""analyze_nofill_short.py — #6b の信頼版検証: 「lss逆指値が9:05までに未発動なら9:05成行ショート」。
+
+背景: lss(ロング候補を逆指値売り)が寄り〜9:05に未約定=株が前日終値まで下げず持ちこたえた日。
+その日に9:05成行でショートを入れると取れるか(=lssの空振り日への上乗せ)。当時 analyze_short_nofill_long
+(再実装ツール)で PF1.73 と出たが、同系ツールは本番と2度食い違った(ガード2%/鏡像)ため信頼できない。
+本ツールは analyze_gap_bt / compare_lss_stop_1m と同じ『本番同等の信号+クリーン1分足』で測り直す。
+
+方式(本番同等):
+  * 信号=エンジン run_limit_backtest(stop_sell) の trade_log + nofill_log(=約定+不約定の全lss信号)。
+    各信号の order_limit(トリガー=前日終値-1tick)/order_stop(上)/order_target(下)/entry_dt(約定日)を使う。
+  * その約定日の1分足で「09:00〜09:05未満に 安値<=トリガー があったか」= lssが9:05までに発動したか判定。
+    発動あり → lssが処理=対象外。発動なし(=9:05時点で未約定) → #6b候補。
+  * #6b候補は 09:05の始値で成行ショート。損切/利確は元信号の距離を9:05約定値に移設
+    (stop05=entry05+(order_stop-order_limit) / target05=entry05-(order_limit-order_target))。
+    決済は1分足first-touch+delay1(現行lssと同じ)。損益=short_pnl。
+  * ★成行ショートは実スリッページ(規制/薄板 §18.3)が逆指値より大きい。--slip で入れて評価すること
+    (既定0=現行lssと同基準だが楽観。0.2〜0.3%も必ず見る)。
+
+BTは lss_trades.csv の bt列(=レポート一致)、BT>=--bt-min(既定40)。OOS(--base-month)分割。
+前提: fetch_1m_all 済(時刻付き1分足) + .\daily で lss_trades.csv。
+
+使い方:
+  set LSS_TRADES_CSV=lss_trades.csv & python analyze_nofill_short.py --bt-min 40 --workers 8
+  python analyze_nofill_short.py --bt-min 40 --slip 0.002   # 実スリッページ込み(本命の見方)
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import os
+import sys
+from datetime import time as dtime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
+import pandas as pd
+
+ap = argparse.ArgumentParser(description="#6b 検証: lss未約定(9:05まで)→9:05成行ショート(本番同等)")
+ap.add_argument("--trades-csv", type=str,
+                default=os.environ.get("LSS_TRADES_CSV", "lss_trades.csv"))
+ap.add_argument("--bt-min", type=float, default=40.0)
+ap.add_argument("--base-month", type=str, default="2026-01",
+                help="OOS分割(以前=TRAIN、以後=TEST)。空=全期間のみ")
+ap.add_argument("--sm", type=float, default=0.1)
+ap.add_argument("--tm", type=float, default=1.0)
+ap.add_argument("--tf", choices=["5m", "1m"], default="5m",
+                help="分足(既定5m=stock_5min・完全に揃っている。#6bは9:05境界なので5分で十分)。"
+                     "1m=jquantsキャッシュ(再取得が要る)")
+ap.add_argument("--stop-delay-bars", type=int, default=None,
+                help="損切り遅延(本数)。未指定=delay1相当(5m:1本/1m:5本=どちらも5分)")
+ap.add_argument("--slip", type=float, default=0.0,
+                help="成行ショートの不利スリップ(既定0=現行lssと同基準だが楽観。0.002=0.2%%も見る)")
+ap.add_argument("--min-gap", type=float, default=None,
+                help="この始値ギャップ率以上の候補だけに絞る(例0.05=+5%%以上の大ギャップUPだけ空売り)。"
+                     "未指定=全候補。大ギャップUPフェード戦略の検証用")
+ap.add_argument("--entry-time", type=str, default="09:05",
+                help="成行ショートの時刻 HH:MM(既定09:05)。この時刻以降の最初の足で約定=以降で決済。"
+                     "lss発動判定(安値<=トリガー)もこの時刻より前で行う。9:10/09:15/09:30 で吹き値売りを比較")
+ap.add_argument("--guf", action="store_true",
+                help="GUF(Gap-Up Fade)プリセット: --min-gap 0.05 かつ --entry-time 09:05。"
+                     "lss未約定+始値が前日終値+5%%以上の日を9:05成行ショート(寄り天フェード)で拾うサブ戦略。"
+                     "この戦略の成績を lss(ショート)本体と分けて見るための既定設定")
+ap.add_argument("--by-month", action="store_true",
+                help="約定月ごとの成績を出す(GUFの月次頑健性チェック=本番投入前の最終確認)。"
+                     "全月プラス寄りなら本物。特定月だけプラスなら overfit の疑い")
+ap.add_argument("--exclude-lss-overlap", action="store_true",
+                help="lssが9:05以降にその日約定する日をGUFから除外する。既定OFF=含める(元の挙動)。"
+                     "GUFとlssは別価格の独立トレードなので二重計上ではない(足しても重複なし)。"
+                     "同一日に両者が発火した件数だけ知りたい場合の分析用オプション")
+ap.add_argument("--require-rollover", action="store_true",
+                help="ロールオーバー確認: 寄り〜エントリー時刻までの最初の足が陰線(崩れ始め)の時だけ"
+                     "9:05成行ショート。踏み上げ月(ギャップが崩れず上昇継続)は『崩れないのでエントリーしない』"
+                     "→ 上昇局面の連続被弾を回避する狙い。強さに逆らわず崩れを確認してから売る")
+ap.add_argument("--days", type=int, default=500)
+ap.add_argument("--limit", type=int, default=0)
+ap.add_argument("--qty", type=int, default=None)
+ap.add_argument("--workers", type=int, default=6)
+ap.add_argument("--no-cache", action="store_true")
+ap.add_argument("--refresh-cache", action="store_true")
+args = ap.parse_args()
+
+# GUF(Gap-Up Fade)プリセット: 大ギャップUP(+5%以上)を9:05成行ショートで拾うサブ戦略。
+# 明示指定が無い項目だけプリセット値に落とす(ユーザーが個別に上書きしたら尊重)。
+_GUF = bool(args.guf)
+if _GUF:
+    if args.min_gap is None:
+        args.min_gap = 0.05
+    if "--entry-time" not in sys.argv:
+        args.entry_time = "09:05"
+
+import backtest_limit_entry as ble
+from jquants_fetch import _load_pkl, _cache_path, MINUTE_CACHE_DIR, yf_to_jquants
+from daytrade_data import split_by_day, load_intraday
+from sameday5m_core import mod_for
+
+ble._MIRROR_PNL = False
+ble._ENTRY_TYPE_FORCE = None
+ble._INTRADAY_5M = False
+
+QTY = args.qty if args.qty is not None else ble.FIXED_QTY
+FEE = ble.FEE_PCT_ONE_WAY
+# delay1相当=約定バーから5分。5m足なら1本、1m足なら5本。
+DELAY = args.stop_delay_bars if args.stop_delay_bars is not None else (1 if args.tf == "5m" else 5)
+DELAY = max(0, int(DELAY))
+try:
+    _eh, _em = args.entry_time.split(":")
+    _0905 = dtime(int(_eh), int(_em))     # 成行ショートの時刻(既定09:05)。sweep可
+except Exception:
+    _0905 = dtime(9, 5)
+
+
+def _norm(sym): return str(sym).upper().removesuffix(".T").split(".")[0]
+
+
+def _jq_to_yf(code):
+    c = str(code).strip().upper()
+    if c.endswith(".T"):
+        return c
+    if len(c) == 5 and c[-1] == "0" and c[:4].isalnum():
+        return c[:4] + ".T"
+    return c + ".T"
+
+
+def _load_bt_pairs():
+    p = Path(args.trades_csv)
+    if not p.exists():
+        print(f"[error] BTソースCSVが無い: {p}", file=sys.stderr); return {}
+    bt = {}; name = {}
+    for r in csv.DictReader(open(p, encoding="utf-8-sig")):
+        sym = _norm(r.get("symbol") or r.get("code") or "")
+        strat = str(r.get("strategy") or "").strip()
+        if not sym or not strat:
+            continue
+        try:
+            b = float(r.get("bt") or 0)
+        except Exception:
+            b = 0.0
+        bt[(sym, strat)] = max(bt.get((sym, strat), -1e9), b)
+        if r.get("name"):
+            name[sym] = r.get("name")
+    _load_bt_pairs.name = name
+    return {k: v for k, v in bt.items() if v >= args.bt_min}
+
+
+def _load_tf(sym_yf):
+    """分足ロード。--tf 5m=stock_5min(完全) / 1m=jquantsキャッシュ(再取得要)。"""
+    try:
+        if args.tf == "5m":
+            return load_intraday(sym_yf, days=args.days + 5, source="local")
+        return _load_pkl(_cache_path(MINUTE_CACHE_DIR, f"{yf_to_jquants(sym_yf)}_1m"))
+    except Exception:
+        return None
+
+
+def _short_exit(highs, lows, closes, opens, stop_p, target_p):
+    """9:05ショートの同日決済(1分足first-touch+delay1・現実的exit)。bar0=09:05約定バー。"""
+    n = len(highs)
+    stop_from = DELAY
+    for j in range(n):
+        if lows[j] <= target_p:               # 利確(下)優先(バー内)
+            return target_p, "target"
+        if j >= stop_from and highs[j] >= stop_p:
+            if DELAY > 0 and j == stop_from and lows[j] > stop_p:
+                return max(stop_p, float(opens[j])), "stop"   # 無保護窓で通過済→実価格
+            return stop_p, "stop"
+    return float(closes[-1]), "close"
+
+
+def _pnl(entry_p, exit_p, qty):
+    entry_eff = entry_p * (1.0 - args.slip)   # 成行ショート: 安く売る=不利
+    fee = (entry_eff + exit_p) * qty * FEE
+    return (entry_eff - exit_p) * qty - fee
+
+
+def _collect(sym_yf, strat):
+    """1(銘柄,戦略)の #6b トレード(9:05成行ショート)を集める。
+    ★修正(2026-08-01): エンジンのfill結果でなく df_ind の entry_sig(全シグナル)から直接拾う。
+      (旧: _INTRADAY_5M=False だと nofill_log が空=ギャップアップ等の本当の不約定が欠落していた)"""
+    out = []
+    stats = {"sig": 0, "filled905": 0, "nofill905": 0, "nodata": 0, "warmup": 0,
+             "pair": 1, "has1m": 0, "overlap_late": 0, "roll_skip": 0}
+    params = getattr(mod_for(strat), "STRATEGY_PARAMS", {}).get(strat)
+    if not params:
+        return out, stats
+    cf = params[0]
+    m1 = _load_tf(sym_yf)
+    if m1 is None or m1.empty:
+        return out, stats            # 1分足キャッシュ無し(未取得)=has1m=0
+    by_day = split_by_day(m1)
+    if not by_day:
+        return out, stats
+    stats["has1m"] = 1
+    try:
+        df_raw = ble.fetch(sym_yf, args.days + 420)
+        df_ind = cf(df_raw.copy())
+    except Exception:
+        return out, stats
+    if df_ind is None or df_ind.empty or "entry_sig" not in df_ind.columns:
+        return out, stats
+    one_dates = sorted(by_day.keys())
+    from datetime import timedelta as _td
+    since = ble._TODAY - _td(days=args.days)
+    sig = df_ind[df_ind["entry_sig"].fillna(False)]
+    for S, row in sig.iterrows():
+        try:
+            Sdate = S.date() if hasattr(S, "date") else S
+        except Exception:
+            continue
+        if Sdate < since:
+            continue
+        prev_close = float(row.get("close", 0) or 0)
+        atr = float(row.get("atr", 0) or 0)
+        if prev_close <= 0 or atr <= 0 or atr != atr:   # NaN除外(指標ウォームアップ等)
+            stats["warmup"] += 1
+            continue
+        stats["sig"] += 1                     # 有効シグナル(atr確定)
+        trigger = prev_close                  # lss注文価格(em=0)。-1tickは<0.1%で無視
+        # エントリー日 = シグナル日の翌1分足営業日
+        edate = next((d for d in one_dates if d > Sdate), None)
+        if edate is None:
+            stats["nodata"] += 1
+            continue
+        db = by_day.get(edate)
+        if db is None or len(db) < 2:
+            stats["nodata"] += 1
+            continue
+        pre = db[db.index.time < _0905]
+        if not pre.empty and float(pre["low"].min()) <= trigger:
+            stats["filled905"] += 1
+            continue   # 9:05までに安値がトリガー到達=lssが約定 → #6b対象外
+        post = db[db.index.time >= _0905]
+        if post.empty or len(post) < 2:
+            stats["nodata"] += 1
+            continue
+        stats["nofill905"] += 1
+        # lssが9:05以降にその日約定する日(post安値<=トリガー)。GUF(9:05成行)とlss(prev_close逆指値)は
+        #   別価格の独立トレードなので二重計上ではない → 既定は含める。--exclude-lss-overlap で除外可。
+        if float(post["low"].min()) <= trigger:
+            stats["overlap_late"] += 1
+            if args.exclude_lss_overlap:
+                continue
+        day_open = float(db["open"].iloc[0])
+        entry05 = float(post["open"].iloc[0])
+        if entry05 <= 0:
+            continue
+        gap = (day_open - prev_close) / prev_close if prev_close > 0 else 0.0
+        if args.min_gap is not None and gap < args.min_gap:
+            continue   # 指定ギャップ未満は除外(大ギャップUPフェードだけ検証)
+        # ロールオーバー確認: 寄り〜エントリー時刻の最初の足が陰線(崩れ始め)の時だけ売る。
+        #   踏み上げ(ギャップ崩れず上昇継続)日はエントリーしない=上昇局面の連続被弾を回避。
+        if args.require_rollover:
+            if pre.empty:
+                continue   # 確認材料なし(エントリー時刻=寄り等)は見送り
+            if float(pre["close"].iloc[-1]) >= float(pre["open"].iloc[0]):
+                stats["roll_skip"] += 1
+                continue   # 最初の足が陽線/同値=まだ崩れていない → 見送り
+        stop05 = entry05 + atr * args.sm       # ショート: 損切=上
+        target05 = entry05 - atr * args.tm     # 利確=下
+        xp, _rsn = _short_exit(post["high"].to_numpy(float), post["low"].to_numpy(float),
+                               post["close"].to_numpy(float), post["open"].to_numpy(float),
+                               stop05, target05)
+        out.append({"fd": pd.Timestamp(edate), "pnl": _pnl(entry05, xp, QTY), "gap": gap})
+    return out, stats
+
+
+def _stat(pnls):
+    n = len(pnls)
+    if n == 0:
+        return None
+    wins = [p for p in pnls if p > 0]
+    gp = sum(wins); gl = -sum(p for p in pnls if p <= 0)
+    pf = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0.0)
+    return {"n": n, "pnl": sum(pnls), "pf": pf, "wr": len(wins) / n * 100}
+
+
+def _fmt(s):
+    if not s:
+        return "  該当なし"
+    _pf = "∞" if s["pf"] == float("inf") else f"{s['pf']:.2f}"
+    return f"{s['n']:>6}件  損益{s['pnl']:>+13,.0f}  勝率{s['wr']:>4.0f}%  PF{_pf:>5}  1件平均{s['pnl']/s['n']:>+7,.0f}"
+
+
+def main():
+    keep = _load_bt_pairs()
+    if not keep:
+        print("[error] BT対象ペアが0。", file=sys.stderr); return
+    names = getattr(_load_bt_pairs, "name", {})
+    pairs = sorted(keep.keys())
+    if args.limit > 0:
+        pairs = pairs[:args.limit]
+    _LABEL = "GUF(Gap-Up Fade)" if _GUF else "#6b"
+    print(f"[info] BT{args.bt_min:.0f}以上 {len(pairs)}ペア / tf={args.tf} sm={args.sm} tm={args.tm} "
+          f"entry={args.entry_time} delay={DELAY}本 slip{args.slip*100:.2f}% fee{FEE*100:.2f}% "
+          f"min_gap={args.min_gap} / {_LABEL}=lss未約定→{args.entry_time}成行ショート(本番同等)")
+    if _GUF:
+        print("  ★GUF(Gap-Up Fade): lss(ロング候補)が未約定 かつ 始値が前日終値+5%以上 → 9:05成行ショート(寄り天フェード)。"
+              "lss本体とは別戦略として成績を測る。")
+    if args.require_rollover:
+        print("  ★ロールオーバー確認ON: 最初の足が陰線(崩れ始め)の日だけ売る=踏み上げ日は見送り。")
+
+    import hashlib as _h, pickle as _pk
+    _cd = Path(".nofillshort_cache")
+    _key = _h.md5("|".join(str(x) for x in [
+        "nfsv9", args.tf, args.min_gap, args.entry_time, args.exclude_lss_overlap, args.require_rollover,
+        getattr(ble, "_BT_LOGIC_VER", "?"), args.sm, args.tm, DELAY, args.slip,
+        args.days, args.bt_min, args.limit, QTY,
+        _h.md5(",".join(f"{s}:{t}" for s, t in pairs).encode()).hexdigest(),
+    ]).encode()).hexdigest()[:16]
+    _cf = _cd / f"trades_{_key}.pkl"
+
+    trades = None
+    agg_stats = None
+    if _cf.exists() and not args.no_cache and not args.refresh_cache:
+        try:
+            _obj = _pk.loads(_cf.read_bytes())
+            trades, agg_stats = _obj if isinstance(_obj, tuple) else (_obj, None)
+            print(f"[cache] 再利用: {_cf} ({len(trades)}件) ※--refresh-cacheで再計算")
+        except Exception:
+            trades = None
+    if trades is None:
+        trades = []
+        agg_stats = {"sig": 0, "filled905": 0, "nofill905": 0, "nodata": 0, "warmup": 0,
+                     "pair": 0, "has1m": 0, "overlap_late": 0, "roll_skip": 0}
+        with ThreadPoolExecutor(max_workers=args.workers) as ex:
+            futs = {ex.submit(_collect, _jq_to_yf(s), t): (s, t) for (s, t) in pairs}
+            done = 0
+            for fut in as_completed(futs):
+                done += 1
+                if done % 100 == 0:
+                    print(f"  ...{done}/{len(pairs)}ペア", flush=True)
+                try:
+                    _o, _st = fut.result()
+                    trades += _o
+                    for k in agg_stats:
+                        agg_stats[k] += _st.get(k, 0)
+                except Exception:
+                    continue
+        if not args.no_cache:
+            try:
+                _cd.mkdir(exist_ok=True)
+                _cf.write_bytes(_pk.dumps((trades, agg_stats)))
+                print(f"[cache] 保存: {_cf} ({len(trades)}件)")
+            except Exception as _e:
+                print(f"[cache] 保存失敗({_e})")
+
+    if agg_stats:
+        _sig = agg_stats["sig"]
+        _fr = agg_stats["filled905"] / _sig * 100 if _sig else 0
+        _nr = agg_stats["nofill905"] / _sig * 100 if _sig else 0
+        print("\n" + "=" * 78)
+        print("【約定率の健全性チェック】(実運用の fill率 ~70% と比べる)")
+        print(f"  {args.tf}足あり {agg_stats['has1m']} / 全 {agg_stats['pair']} ペア"
+              f"{'  ← ★分足データ不足(5mなら stock_5min / 1mなら再取得を確認)' if agg_stats['has1m'] < agg_stats['pair'] * 0.9 else ''}")
+        print(f"  有効シグナル {_sig} / 9:05までに約定 {agg_stats['filled905']}({_fr:.0f}%) "
+              f"/ 未約定(=GUF候補) {agg_stats['nofill905']}({_nr:.0f}%) "
+              f"/ データ欠 {agg_stats['nodata']} / 指標未確定 {agg_stats['warmup']}")
+        _ovl = agg_stats.get("overlap_late", 0)
+        _ovl_state = "除外" if args.exclude_lss_overlap else "含める(別価格の独立トレード=二重計上ではない)"
+        print(f"  うち同一日にlssも9:05以降約定(GUFとlss両発火) {_ovl}件 → GUF側は{_ovl_state}")
+        if args.require_rollover:
+            _rs = agg_stats.get("roll_skip", 0)
+            print(f"  ロールオーバー未確認(最初の足が陽線=踏み上げ)で見送り {_rs}件 → 実エントリーから除外")
+        print("  ★1分足ありが全ペアに満たない=再取得完了後に再実行(--refresh-cache)して母数を揃えること。")
+
+    if not trades:
+        print("[error] #6bトレード0件。1分足キャッシュ/CSVを確認。", file=sys.stderr); return
+
+    def _report(ts, title):
+        print("\n" + "=" * 78)
+        print(f"【{title}】 {_LABEL}({args.entry_time}成行ショート) {len(ts)}件")
+        print("-" * 78)
+        print("  " + _fmt(_stat([t["pnl"] for t in ts])))
+
+    def _month_report(ts, title):
+        """約定月ごとの成績(GUFの月次頑健性=本番投入前の最終確認)。"""
+        from collections import defaultdict
+        agg = defaultdict(list)
+        for t in ts:
+            try:
+                mk = pd.Timestamp(t["fd"]).strftime("%Y-%m")
+            except Exception:
+                continue
+            agg[mk].append(t["pnl"])
+        print("\n" + "=" * 78)
+        print(f"【{title}】約定月別  計{len(ts)}件（全月プラス寄り=本物 / 特定月だけ=overfit疑い）")
+        print("-" * 78)
+        _plus = _minus = 0
+        for mk in sorted(agg.keys()):
+            s = _stat(agg[mk])
+            if s and s["pnl"] > 0:
+                _plus += 1
+            elif s:
+                _minus += 1
+            print(f"  {mk}  {_fmt(s)}")
+        print("-" * 78)
+        print(f"  プラス月 {_plus} / マイナス月 {_minus} / 合計 {_plus + _minus}ヶ月")
+
+    def _gbucket(g):
+        p = g * 100
+        if p < 0:   return "<0%(下げたが未約定)"
+        if p < 1:   return "0〜+1%"
+        if p < 2:   return "+1〜+2%"
+        if p < 3:   return "+2〜+3%"
+        if p < 5:   return "+3〜+5%"
+        return "+5%超(大ギャップUP)"
+    _GORDER = ["<0%(下げたが未約定)", "0〜+1%", "+1〜+2%", "+2〜+3%", "+3〜+5%", "+5%超(大ギャップUP)"]
+
+    def _gap_report(ts, title):
+        from collections import defaultdict
+        agg = defaultdict(list)
+        for t in ts:
+            agg[_gbucket(t.get("gap", 0.0))].append(t["pnl"])
+        print("\n" + "=" * 78)
+        print(f"【{title}】ギャップ帯別(始値の前日終値比) #6b内訳  計{len(ts)}件")
+        print("-" * 78)
+        for b in _GORDER:
+            pn = agg.get(b)
+            if not pn:
+                continue
+            print(f"  {b:<20} {_fmt(_stat(pn))}")
+
+    _report(trades, f"BT{args.bt_min:.0f}以上・全期間(in-sample含む)")
+    if not _GUF:
+        _gap_report(trades, f"BT{args.bt_min:.0f}以上・全期間")
+    bm = args.base_month.strip()
+    if bm:
+        try:
+            be = pd.Period(bm, "M").end_time.normalize()
+            te = [t for t in trades if t["fd"] > be]
+            _report([t for t in trades if t["fd"] <= be], f"TRAIN ≤{be.date()} (in-sample)")
+            _report(te, f"TEST >{be.date()} (OOS)")
+            if not _GUF:
+                _gap_report(te, f"BT{args.bt_min:.0f}以上・TEST(OOS)")
+        except Exception as _e:
+            print(f"[warn] base-month分割スキップ({_e})")
+
+    if args.by_month:
+        _month_report(trades, f"{_LABEL}・BT{args.bt_min:.0f}以上・全期間")
+
+    print("\n" + "=" * 78)
+    if _GUF:
+        print("判断(GUF): 月次(--by-month)が全月プラス寄り かつ TEST(OOS)がPF>1.1なら本番投入候補。")
+        print("  GUFは lss(ショート)本体とは別戦略。lssの空振り日(未約定)に上乗せする独立エッジ。")
+        print("  live実装は『lss未約定 かつ 始値+5%以上 → 9:05成行ショート』を watcher/order_server に追加。")
+    else:
+        print("判断: TEST(OOS)が明確にプラス(PF>1.1目安)なら #6b は上乗せ価値あり。")
+        print("  無差別は却下(全期間PF~0.96)。大ギャップUP(--guf / --min-gap 0.05等)に絞ると TRAIN/OOS両方+。")
+    print("  スリッページは現行lssと同基準で考慮しない(slip=0固定・ユーザー方針2026-08-01)。")
+
+
+if __name__ == "__main__":
+    main()

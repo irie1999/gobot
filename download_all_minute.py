@@ -34,7 +34,26 @@ from threading import Lock
 import pandas as pd
 
 JST = timezone(timedelta(hours=9))
-DATA_DIR = Path(__file__).resolve().parent / "data" / "minute_5m"
+
+
+def _resolve_out_dir() -> Path:
+    """保存先を決める。レポートが読む場所と同じにしないと、部分DLが
+    完璧な stock_5min を隠してしまう(daytrade_data の優先順位より)。
+      1. 環境変数 MINUTE_5M_DIR (最優先)
+      2. daytrade_data.DATA_DIR (= 実際に stock_5min を解決する)
+      3. 従来の data/minute_5m (フォールバック)
+    """
+    env = os.environ.get("MINUTE_5M_DIR")
+    if env:
+        return Path(env)
+    try:
+        import daytrade_data as _dd
+        return Path(_dd.DATA_DIR)
+    except Exception:
+        return Path(__file__).resolve().parent / "data" / "minute_5m"
+
+
+DATA_DIR = _resolve_out_dir()
 PROGRESS_FILE = Path(__file__).resolve().parent / "data" / "download_progress.json"
 MAX_RETRY = 4
 RATE_LIMIT_WAIT = 30  # 429 時の待機秒
@@ -183,9 +202,37 @@ def download_one(cli, code: str, days: int, interval: str) -> pd.DataFrame | Non
     return None
 
 
-def save_data(code: str, df: pd.DataFrame, with_csv: bool = False) -> int:
-    """pickle 保存 (高速)。オプションで CSV も。"""
+def _merge_existing(code: str, df: pd.DataFrame) -> pd.DataFrame:
+    """既存pklと新規取得を結合して重複排除(union)。
+    過去へ延長するとき、既存の完璧なデータを絶対に失わないための安全策。
+    新規fetchが既存より短くても、和集合を取るので縮まない。
+    """
+    pkl_path = DATA_DIR / f"{code}.pkl"
+    if not pkl_path.exists():
+        return df
+    try:
+        old = pickle.loads(pkl_path.read_bytes())
+    except Exception:
+        return df
+    if old is None or getattr(old, "empty", True):
+        return df
+    try:
+        combined = pd.concat([old, df], ignore_index=True)
+        key = [c for c in ["Date", "Time"] if c in combined.columns]
+        if key:
+            combined = combined.drop_duplicates(subset=key, keep="last")
+            combined = combined.sort_values(key).reset_index(drop=True)
+        return combined
+    except Exception:
+        return df  # 結合に失敗したら新規を返す(既存は上書きされるが例外時のみ)
+
+
+def save_data(code: str, df: pd.DataFrame, with_csv: bool = False,
+              merge: bool = False) -> int:
+    """pickle 保存 (高速)。オプションで CSV も / 既存とマージ。"""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if merge:
+        df = _merge_existing(code, df)
     pkl_path = DATA_DIR / f"{code}.pkl"
     pkl_path.write_bytes(pickle.dumps(df))
     if with_csv:
@@ -218,6 +265,9 @@ def main() -> None:
     parser.add_argument("--with-csv", action="store_true",
                         help="CSV も保存 (遅くなる)")
     parser.add_argument("--no-resume", action="store_true")
+    parser.add_argument("--refresh", action="store_true",
+                        help="既存銘柄もスキップせず再取得し、既存pklとマージ"
+                             "(過去へ延長するとき用。既存データは失われない)")
     args = parser.parse_args()
 
     signal.signal(signal.SIGINT, _signal_handler)
@@ -234,9 +284,14 @@ def main() -> None:
         symbols = symbols[:args.limit]
 
     # スキップ判定
-    prog = {"completed": [], "failed": []} if args.no_resume else load_progress()
-    existing = set(f.stem for f in DATA_DIR.glob("*.pkl")) if DATA_DIR.exists() else set()
-    skip = set(prog["completed"]) | existing
+    # --refresh: 既存pkl/進捗を無視して全銘柄を再取得(過去延長)。マージ保存で既存は守る。
+    prog = {"completed": [], "failed": []} if (args.no_resume or args.refresh) else load_progress()
+    if args.refresh:
+        skip = set()
+        print("  [refresh] 既存銘柄も再取得し、既存pklとマージします(過去延長モード)")
+    else:
+        existing = set(f.stem for f in DATA_DIR.glob("*.pkl")) if DATA_DIR.exists() else set()
+        skip = set(prog["completed"]) | existing
     todo = [s for s in symbols if s["code"] not in skip]
 
     print(f"\n対象: {len(symbols)}  スキップ: {len(skip)}  残り: {len(todo)}")
@@ -259,7 +314,7 @@ def main() -> None:
                           args.interval)
         if df is None or df.empty:
             return code, 0, 0, 0
-        size = save_data(code, df, with_csv=args.with_csv)
+        size = save_data(code, df, with_csv=args.with_csv, merge=args.refresh)
         n_days = df["Date"].nunique() if "Date" in df.columns else 0
         return code, len(df), n_days, size
 
