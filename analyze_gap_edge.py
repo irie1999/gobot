@@ -750,8 +750,16 @@ def _scan(sym: str) -> list[dict]:
         #   重ならない窓どうしなら、相関はそのまま
         #   「**過去のβが次の期間のβを言い当てるか**」= 選択に使えるか になる。
         _beta2 = _beta.shift(max(20, a.beta_win) + 10)
-    _sl, _s = [], 0                                       # 連続上昇日数(D時点まで)
-    for _u in (_c > _c.shift(1)).fillna(False).tolist():
+    # ⛔⛔ **_SIDE 漏れだった** (2026-09-13)。ここは常に「上昇」を数えていたが、
+    #   鏡像(long)は **前日 ≤ -1.753% の銘柄だけ**を拾うので、シグナル日の
+    #   連続上昇日数は構造上ほぼ全部 0 になる。分位に切れず qcut が1本に潰れ、
+    #   `--side long --explore` が NaN で落ちていた(クラッシュは症状で、
+    #   本体は『鏡像で意味を持たない軸をそのまま測っていた』こと)。
+    #   ret1/ret2/ret3・gap_hi_bp・res60/res120 は _SIDE 済みで、ここだけ漏れ。
+    #   ★ 鏡像では **連続下落日数**。どちらも「同じ向きに何日続いたか」= 過熱。
+    _sl, _s = [], 0                       # 連続上昇(short) / 連続下落(long) 日数
+    _dirs = (_c > _c.shift(1)) if _SIDE > 0 else (_c < _c.shift(1))
+    for _u in _dirs.fillna(False).tolist():
         _s = _s + 1 if _u else 0
         _sl.append(_s)
     _streak = pd.Series(_sl, index=df.index, dtype=float)
@@ -826,7 +834,13 @@ def _scan(sym: str) -> list[dict]:
             # ── 選別軸(D時点で確定) ──
             "atr_pct": _fv(_atr_pct, pos),
             "liq": _fv(_turn, pos),
-            "range_pos": _fv(_rngpos, pos),
+            # ⛔ これも _SIDE 漏れだった(2026-09-13 / up_streak と同じ)。
+            #   0=20日安値 / 100=20日高値。ショートの「過熱」は高値圏なので
+            #   そのまま、鏡像の「過熱」は安値圏なので **100 - x** で揃える。
+            #   ⚠ 反転は `* _SIDE` ではない(0〜100 のスケールなので符号反転では
+            #     意味が壊れる)。両側とも「大きいほど過熱」になる形にする。
+            "range_pos": (lambda _x: None if _x is None else
+                          (_x if _SIDE > 0 else 100.0 - _x))(_fv(_rngpos, pos)),
             "ret1": (lambda _x: None if _x is None else _x * _SIDE)(_fv(_ret1, pos)),
             "ret2": (lambda _x: None if _x is None else _x * _SIDE)(_fv(_ret2, pos)),
             "ret3": (lambda _x: None if _x is None else _x * _SIDE)(_fv(_ret3, pos)),
@@ -870,7 +884,6 @@ def _scan(sym: str) -> list[dict]:
 AXES = {
     "atr_pct":   "ATR%(ボラ)",
     "liq":       "売買代金20日平均",
-    "range_pos": "20日レンジ位置%",
     "ret1":      "前日リターン%",
     "ret2":      "2日リターン%(過熱の窓)",
     "ret3":      "3日リターン%(過熱の窓)",
@@ -885,7 +898,10 @@ AXES = {
     "nearhi60_bp":  "★前夜版 60日高値への近さ(大きいほど線に近い)",
     "nearhi120_bp": "★前夜版 120日高値への近さ(同上)",
     "touch120_pc":  "★前夜版 同じ価格帯を通った日数(基準=前日終値)",
-    "up_streak": "連続上昇日数",
+    # ★ 側で中身が変わる2軸。ラベルも変える(中身と名前の食い違いは §18.40b)。
+    "up_streak": ("連続上昇日数" if _SIDE > 0 else "連続下落日数(鏡像)"),
+    "range_pos": ("20日レンジ位置%(100=高値圏)" if _SIDE > 0 else
+                  "20日レンジ位置%(鏡像 / 100=**安値**圏)"),
     "vol_ratio": "出来高比(D/20日平均)",
     "entry_p":   "建値",
     "gap_bp":    "ギャップbp(参考)",
@@ -907,6 +923,18 @@ def _qlabel(sub: pd.DataFrame, col: str, nq: int):
     try:
         q = pd.qcut(s[ok], nq, labels=False, duplicates="drop")
     except Exception:
+        return None
+    # ⛔ **タイが多い軸では qcut が NaN を返す** (2026-09-13 にクラッシュ)。
+    #   整数の軸(連続日数・出来高比の丸め)で値がほぼ1種類に偏ると、
+    #   duplicates="drop" がビン境界を潰し、pandas は全部 NaN を返す。
+    #   `int(NaN)` で落ちていた。NaN は素通しして、後段が「その行は分位なし」
+    #   として扱えるようにする。
+    q = pd.to_numeric(q, errors="coerce")
+    q = q[q.notna()]
+    # ★ 分位が1つしか作れない軸は **黙って1分位で判定しない**。
+    #   最良分位 == 全体になり、帰無と実測が同じになって較正不能。
+    #   §18.34b で曜日が同じ形(実測=帰無中央=帰無95%)になったのと同種。
+    if q.nunique() < 2:
         return None
     out = pd.Series(index=sub.index, dtype=object)
     out.loc[q.index] = [f"Q{int(v) + 1}" for v in q]
@@ -949,10 +977,19 @@ def _axis_scan(w: pd.DataFrame, col: str, label: str, nq: int, seeds: int):
     # ⛔ 日の中で値が一定の軸(曜日など)は、日の中でシャッフルしても何も変わらない
     #    = 帰無 == 実測 になり較正不能。候補として扱ってはいけない。
     #    2026-08-25 に曜日で 実測/帰無中央/帰無95% が3つとも +21.7 になって発覚。
-    _const_in_day = bool(sub.groupby("date")["_q"].nunique().max() <= 1)
+    _nuq = sub.groupby("date")["_q"].nunique()
+    _const_in_day = bool(_nuq.max() <= 1)
+    # ★★ **較正の強さの診断** (2026-09-13)。
+    #   帰無は「日の中で分位ラベルを入れ替える」ので、1日の中に分位が
+    #   何種類あるかで **どれだけ動かせるか** が決まる。5分位なのに日内が
+    #   1〜2種類しかない軸は、シャッフルしてもほとんど並びが変わらず
+    #   帰無分布が不当に狭くなる = **偽陽性が出やすい**。
+    #   _const_in_day(=1種類)は弾いていたが、2〜3種類はすり抜けていた。
+    #   判定は変えない。列に出して読み手が割り引けるようにするだけ。
+    _qpd = float(_nuq.median()) if len(_nuq) else float("nan")
     if _const_in_day:
         return {"label": label, "col": col, "rows": rows, "best": best,
-                "worst": worst, "null_med": float("nan"),
+                "worst": worst, "null_med": float("nan"), "qpd": _qpd,
                 "null_p95": float("nan"), "hit": False, "uncalib": True}
     # 帰無: 日の中で分位ラベルだけを入れ替え、**同じく最良分位を選ぶ**
     import random as _rnd
@@ -977,7 +1014,7 @@ def _axis_scan(w: pd.DataFrame, col: str, label: str, nq: int, seeds: int):
     p95 = nulls[min(len(nulls) - 1, int(len(nulls) * 0.95))]
     med = nulls[len(nulls) // 2]
     return {"label": label, "col": col, "rows": rows, "best": best,
-            "worst": worst, "null_med": med, "null_p95": p95,
+            "worst": worst, "null_med": med, "null_p95": p95, "qpd": _qpd,
             "hit": best[2] > p95, "uncalib": False}
 
 
@@ -4447,9 +4484,13 @@ if a.explore:
           f"最大を選ぶだけで z は平均+1ずれる(§18.34b)。0 と比べてはいけません。")
     _want = [x.strip() for x in a.axes.split(",") if x.strip()] or list(AXES)
     _hits, _tried = [], 0
+    print(f"  ⚠ **日内分位** = 1日の中に分位が何種類あるかの中央値。帰無は"
+          f"『日の中で入れ替える』ので、これが {a.nq} に近いほど較正が効きます。"
+          f"\n     2以下だとシャッフルしても並びがほとんど変わらず、帰無が"
+          f"不当に狭くなる = **✅ が出やすい**。その行は割り引いて読むこと。")
     print(f"\n  {'軸':<22}{'最良':>6}{'件数':>9}{'bp/件':>9}{'日t':>8}"
-          f"{'帰無中央':>9}{'帰無95%':>9}  判定")
-    print("  " + "-" * 84)
+          f"{'帰無中央':>9}{'帰無95%':>9}{'超過':>7}{'日内分位':>9}  判定")
+    print("  " + "-" * 100)
     for _ax in _want:
         if _ax not in AXES:
             print(f"  ⚠ 未知の軸: {_ax}(--list-axes で確認)")
@@ -4466,12 +4507,34 @@ if a.explore:
             continue
         _tried += 1
         _mk = "✅ 候補" if _res["hit"] else "—"
+        # ★ 帰無95%点を **どれだけ超えたか**。+1〜2bp の超過は §18.73 で
+        #   「帯の中と変わらない」として TEST を消費しないと決めた水準。
+        _ovr = _b[2] - _res["null_p95"]
+        _qpd = _res.get("qpd", float("nan"))
         if _res["hit"]:
+            if _qpd == _qpd and _qpd <= 2.0:
+                _mk = "⚠ 候補(較正弱)"
             _hits.append(_res)
         print(f"  {_res['label']:<22}{_b[0]:>6}{_b[1]:>9,}{_b[2]:>+9.1f}"
-              f"{_b[3]:>+8.2f}{_res['null_med']:>+9.1f}{_res['null_p95']:>+9.1f}  {_mk}")
+              f"{_b[3]:>+8.2f}{_res['null_med']:>+9.1f}{_res['null_p95']:>+9.1f}"
+              f"{_ovr:>+7.1f}{_qpd:>9.1f}  {_mk}")
     print(f"\n  掃いた軸 {_tried} / **候補 {len(_hits)} 個** "
           f"(帰無の期待 {_tried * 0.05:.1f} 個)")
+    # ⛔⛔ 候補が期待の3倍を超えたら、**軸が効いたのではなく較正が壊れている**
+    #    可能性のほうが高い(2026-09-13 に鏡像で 10/18 が出た)。
+    #    「たくさん見つかった」は良い報せではない。
+    if _tried and len(_hits) > max(2.0, _tried * 0.05 * 3):
+        print(f"  ⛔⛔ **候補が多すぎます**(期待の"
+              f"{len(_hits) / max(1e-9, _tried * 0.05):.0f}倍)。"
+              f"軸が効いたのではなく **帰無較正が壊れている**疑いが濃厚です。")
+        print(f"     ① 上の『日内分位』列を見る。{a.nq}分位なのに 1〜2 なら、"
+              f"日の中で入れ替えても並びが変わらず帰無が狭すぎます")
+        print(f"     ② 『日t』列を見る。ほぼ全部がゼロ近辺なら、"
+              f"その分位の効果自体が日クラスタで有意ではありません(§18.13)")
+        print(f"     ③ 『超過』列を見る。+1〜2bp なら帯の中と変わらない"
+              f"(§18.73 で TEST を消費しないと決めた水準)")
+        print(f"     ⚠ **この状態で --confirm を回さないこと。**"
+              f" TEST を1回使い切ります。")
     if _hits:
         print(f"\n  候補の中身:")
         for _r in _hits:
@@ -4484,10 +4547,24 @@ if a.explore:
                       f"{_lo:>+12,.1f} 〜{_hi:>+11,.1f}{_m}")
         print(f"\n  ⛔ **ここで採用しないこと。** TRAIN で最良を選んだだけです。")
         print(f"     TEST で検証するには 1候補につき1回だけ:")
+        # ⛔⛔ **母集団を決める引数を落とすと、別のものを確認することになる**
+        #   (2026-09-13)。以前は --side / --min-ret1 / 価格帯が抜けており、
+        #   鏡像の探索結果を貼ると **ショート側**を confirm してしまっていた。
+        #   §18.40b(ラベルと中身の食い違いで半日)と同じ形。
+        _rerun = (f"--workers {a.workers} --days {a.days} "
+                  f"--split {a.split} --side {a.side} "
+                  f"--min-gap-bp {a.min_gap_bp:.0f}")
+        if a.min_ret1:
+            _rerun += f" --min-ret1 {a.min_ret1}"
+        if a.min_price:
+            _rerun += f" --min-price {a.min_price:.0f}"
+        if a.max_price:
+            _rerun += f" --max-price {a.max_price:.0f}"
         for _r in _hits:
-            print(f"       python analyze_gap_edge.py --workers {a.workers} "
-                  f"--days {a.days} --min-gap-bp {a.min_gap_bp:.0f} "
-                  f"--split {a.split} --confirm {_r['col']}:{_r['best'][0]}")
+            print(f"       python analyze_gap_edge.py {_rerun} "
+                  f"--confirm {_r['col']}:{_r['best'][0]}")
+        print(f"     ⚠ 母集団を決める引数(--side / --min-ret1 / 価格帯)を"
+              f"落とさないこと。落とすと別のものを確認することになります。")
     else:
         print(f"\n  ⛔ 候補ゼロ。この母集団でも選別軸は見つかりませんでした。")
         print(f"     §18.13(15軸78検定) / §18.24 / §18.31 / §18.48⑪ と同じ結論です。")
