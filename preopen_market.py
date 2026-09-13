@@ -32,9 +32,25 @@ yfinance を1回だけ叩いてプロセス内にキャッシュする。取得�
 """
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone
 
 JST = timezone(timedelta(hours=9))
+
+# ⛔⛔ **`^N225` の始値は取引できない** (§18.71 / 2026-09-07)。
+#   日経225の「始値」は構成銘柄の寄り値から作るが、09:00 に寄っていない銘柄は
+#   **前日終値のまま**入る。だから `始値→終値` は overnight の一部を含み、
+#   夜間先物と相関して当然。実測 (OOS 369日 / 夜間リターンとの相関):
+#     ^N225 始値→終値 +0.364 / mini先物 09:00→引け +0.079 / 1321 始値→終値 +0.064
+#   **取引できる2つは一致し、^N225 だけ4〜5倍。** 始値では買えないので、
+#   この相関は取引できない = アーティファクト。
+#
+#   ★ 同日(始値→終値)を使う関数だけ、ティッカーを差し替えられるようにした。
+#     既定は従来どおり ^N225(過去の数字と比較できるように)。測り直すときは
+#       $env:GAP_INDEX_TICKER = "1321.T"      # 日経連動 ETF(取引できる)
+#     ⚠ 前日どうしのリターン(_SERIES["n225"])はこの問題と無関係なので触らない。
+#       壊れているのは **始値** だけ。
+_SAMEDAY_TICKER = os.environ.get("GAP_INDEX_TICKER", "^N225")
 
 # 系列名 -> (yfinance ティッカー, 説明)。取れなかったものは黙って落とす。
 _SERIES = {
@@ -235,7 +251,9 @@ def sameday_features(days: list[str]) -> dict:
     d0, d1 = min(days), max(days)
     start = (datetime.fromisoformat(d0) - timedelta(days=40)).strftime("%Y-%m-%d")
     end = (datetime.fromisoformat(d1) + timedelta(days=2)).strftime("%Y-%m-%d")
-    ser = _load_ohlc("^N225", start, end)
+    # ⚠ 既定は ^N225。GAP_INDEX_TICKER で取引できる指数に差し替えられる
+    #   (上の _SAMEDAY_TICKER のコメント / §18.71)。
+    ser = _load_ohlc(_SAMEDAY_TICKER, start, end)
     ks = sorted(ser)
     _pos = {k: i for i, k in enumerate(ks)}
     out: dict = {}

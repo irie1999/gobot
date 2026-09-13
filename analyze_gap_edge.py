@@ -604,19 +604,26 @@ if a.beta_scan:
     #   ble 未定義の NameError を「日経を取れません」と出して、原因の切り分けに
     #   遠回りした。import/名前解決の失敗はそのまま送出する。
     from preopen_market import _load_ohlc as _n225_ohlc     # noqa: E402
+    from preopen_market import _SAMEDAY_TICKER as _IDX      # noqa: E402
     _tdy = ble.datetime.now(ble.JST).date()      # _MIN_START と同じ経路
     _e0 = (_tdy - _td(days=a.days + 460)).isoformat()
     _e1 = (_tdy + _td(days=2)).isoformat()
-    _nk = _n225_ohlc("^N225", _e0, _e1)
+    # ⛔ 既定は ^N225 だが、その **始値は取引できない**(§18.71)。
+    #   $env:GAP_INDEX_TICKER = "1321.T" で取引できる指数に差し替えて測り直す。
+    _nk = _n225_ohlc(_IDX, _e0, _e1)
     if len(_nk) < 300:
         sys.exit(f"[error] 日経の日足が {len(_nk)}日しか取れず β を測れません"
                  f"(要求 {_e0}〜{_e1})。ネットワークか yfinance を確認してください")
     _N225_ID = pd.Series(
         {pd.Timestamp(_k): (_v[1] / _v[0] - 1.0) * 100.0
          for _k, _v in _nk.items()}).sort_index()
-    print(f"[info] 日経の日中(始値→終値)リターン {len(_N225_ID):,}日 "
+    print(f"[info] 指数 **{_IDX}** の日中(始値→終値)リターン {len(_N225_ID):,}日 "
           f"({str(_N225_ID.index.min())[:10]}〜{str(_N225_ID.index.max())[:10]})"
           f" / β の窓 {a.beta_win}日")
+    if _IDX == "^N225":
+        print("  ⚠ ^N225 の **始値は取引できません**(§18.71)。寄っていない銘柄が"
+              " 前日終値のまま入るので overnight を含み、β が過大に出ます。"
+              ' 測り直すときは $env:GAP_INDEX_TICKER = "1321.T"')
 
 
 def _jq_to_yf(code: str) -> str:
