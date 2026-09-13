@@ -127,7 +127,7 @@ def _newgap_sim(rows: list, budget_man: float, watch: int,
                 gap_bp: float, ret1_min: float,
                 qty_mode: str = "fixed", qty: int = 0,
                 max_pct: float = 0.0, order: str = "gap",
-                max_qty: int = 0) -> dict:
+                max_qty: int = 0, side_col: str = "") -> dict:
     """日ごとに 候補 → watch上限 → ギャップ判定 → 予算 の順で建てる。
 
     ★ この順番が実運用そのもの。**watch上限を先に掛ける**のが肝で、
@@ -143,6 +143,14 @@ def _newgap_sim(rows: list, budget_man: float, watch: int,
              「資金が余っている日は200株のようにして」。
              ⛔ これが無いと "equal" は合格1件の日に予算の全部を1銘柄に入れる
                (§18.65② の実測で1,700株まで膨らんだ)。株数で頭を切る。
+    side_col: **両側を1つの財布で回すとき**の側の列名(+1=N / -1=鏡像)。
+             2026-09-13 ユーザー依頼「N優先 + 余りを鏡像」。
+             ★★ これを渡すと watch上限を **側ごとに** 掛ける。ライブは
+               N の50件と鏡像の50件を **別バッチ**で読むから(§18.69 の
+               PUSH ローテーション実測: 2バッチ目も登録から1〜3秒)。
+             ⛔ 渡さずに両側を concat すると、流動性降順の上位50件を
+               **両側から混ぜて**取ることになり、片側が枠を食い尽くす。
+               ライブの形と違うので数字が意味を持たなくなる。
     ⚠ 合格件数は 09:00 に確定するので、それで割るのは **先読みではない**。
     """
     _q0 = int(qty or _NG_QTY)
@@ -166,8 +174,20 @@ def _newgap_sim(rows: list, budget_man: float, watch: int,
                           "built": 0, "used": 0.0, "pnl": 0.0, "missed": 0})
             continue
         # ② 朝に板を読める上限(kabu 登録上限50件 / §18.44)。流動性降順
-        _w = _cand.sort_values("liq", ascending=False, na_position="last")
-        _watched = _w if watch <= 0 else _w.head(watch)
+        _2side = bool(side_col) and side_col in _cand.columns
+        if _2side:
+            # ★ **側ごとに watch50**。ライブは N の50件と鏡像の50件を
+            #   別バッチで読む(§18.69 の PUSH ローテーション)。混ぜない。
+            _ws = [(_sg.sort_values("liq", ascending=False,
+                                    na_position="last")
+                    if watch <= 0 else
+                    _sg.sort_values("liq", ascending=False,
+                                    na_position="last").head(watch))
+                   for _, _sg in _cand.groupby(side_col)]
+            _watched = pd.concat(_ws) if _ws else _cand.iloc[0:0]
+        else:
+            _w = _cand.sort_values("liq", ascending=False, na_position="last")
+            _watched = _w if watch <= 0 else _w.head(watch)
         # ③ 09:00 の始値でギャップ判定
         _hit = _watched[_watched["gap_bp"] >= gap_bp]
         # ④ watch で切り捨てたぶんのうち、本当は建てられた件数(機会損失)
@@ -185,7 +205,18 @@ def _newgap_sim(rows: list, budget_man: float, watch: int,
         #   "rand:<seed>" … ランダム。**帯を作るため**(§18.24)。
         #       ⛔ 2条件を1回ずつ比べて差を語らない。ランダムを何本か回して
         #         散らばりを出し、その外に出て初めて『効いている』と言える。
-        if order == "liq":
+        if order == "nfirst" and _2side:
+            # ★★ **N優先 + 余りを鏡像** (2026-09-13 ユーザー依頼)。
+            #   N を全部先に置き、**余った予算だけ**鏡像に回す。N は1件も
+            #   削られないので、§18.75 で落ちた 200/200(N を削る形)とは別物。
+            #   N の稼働率は40%(§18.55: 投入162万/日 ÷ 予算400万)なので、
+            #   平均 238万/日 が遊んでいる。そこだけを使う。
+            #   ⚠ 各側の中は **ギャップ降順**。ライブでは実現できない並び
+            #     (§18.67)だが、既定タブ(★新方式N)と同じ土俵にするため
+            #     揃える。ライブ順で見たいときは order="liq" の変種を使う。
+            _hit = _hit.sort_values([side_col, "gap_bp"],
+                                    ascending=[False, False])
+        elif order == "liq":
             _hit = _hit.sort_values("liq", ascending=False, na_position="last")
         elif order == "price":
             _hit = _hit.sort_values("entry_p", ascending=True)
@@ -209,7 +240,14 @@ def _newgap_sim(rows: list, budget_man: float, watch: int,
         _lot_cap = (_cap * max_pct / 100.0) if max_pct > 0 else _cap
         _slot = (_cap / max(1, len(_hit))) if qty_mode == "equal" else 0.0
         _cash, _p, _n = _cap, 0.0, 0
-        for _r in _hit.itertuples():
+        # ⛔⛔ **itertuples から side を getattr で取らない** (2026-09-13 に踏んだ)。
+        #   pandas は Python 識別子として無効な列名(**アンダースコア始まり**を
+        #   含む)を `_1` `_2` … の位置名に改名する。`getattr(_r, "_side", 1)`
+        #   は黙って既定の +1 を返し、**鏡像の行が全部 N 表記**になった。
+        #   金額は合うので出力からは分からない = §18.63 と同じ形の事故。
+        #   → 列名に依存しない配列で取る。
+        _sd_arr = _hit[side_col].to_numpy() if _2side else None
+        for _i, _r in enumerate(_hit.itertuples()):
             if qty_mode == "equal":
                 _unit = float(_r.entry_p) * 100.0
                 # 1銘柄の上限(予算比)。⛔ 無いと合格1件の日に全額が1銘柄へ
@@ -226,10 +264,19 @@ def _newgap_sim(rows: list, budget_man: float, watch: int,
             _cash -= _cost
             _p += float(_r.pnl) / _NG_QTY * _q     # pnl は100株ぶんで持っている
             _n += 1
-            _det.append({"date": _d, "symbol": _r.symbol, "ret1": _r.ret1,
-                         "gap_bp": _r.gap_bp, "entry_p": _r.entry_p,
-                         "qty": _q,
-                         "pnl": float(_r.pnl) / _NG_QTY * _q, "liq": _r.liq})
+            _row = {"date": _d, "symbol": _r.symbol, "ret1": _r.ret1,
+                    "gap_bp": _r.gap_bp, "entry_p": _r.entry_p, "qty": _q,
+                    "pnl": float(_r.pnl) / _NG_QTY * _q, "liq": _r.liq}
+            # ★ 両側を混ぜたときだけ **どちら側か**を残す。
+            #   ⛔⛔ **片側のときに付けてはいけない**(2026-09-13 に踏みかけた)。
+            #     鏡像タブ(side="long")の det に side=+1 を入れると、
+            #     行ごとの判定が「売り」と読んで **買いの明細が全部
+            #     ショート表記**になる(決済値・向き・損益の符号が全部ずれる)。
+            #     §18.63 で3ヶ月気づかなかった事故とまったく同じ形。
+            #     列が **無い**ことが「呼び出し側の side を使え」の合図。
+            if _2side:
+                _row["side"] = int(_sd_arr[_i])
+            _det.append(_row)
         _days.append({"date": _d, "cand": _n_cand, "watched": len(_watched),
                       "hit": len(_hit), "built": _n, "used": _cap - _cash,
                       "pnl": _p, "missed": _missed,

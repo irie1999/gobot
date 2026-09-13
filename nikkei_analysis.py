@@ -652,6 +652,18 @@ from newgap_core import (_NG_BUDGET, _NG_GAP_BP, _NG_QTY, _NG_RET1,
 #   スキャンは N と共有するので計算はほぼ増えない。切るなら 0。
 _NG_MIRROR_TAB = os.environ.get("LSS_NEWGAP_MIRROR", "1").strip().lower() \
     not in ("0", "false", "no", "")
+# ★★ **N優先 + 余りを鏡像** のタブ (2026-09-13 ユーザー依頼)。既定OFF
+#   (`.\nlong` が 1 にする)。スキャンは N と共有するので追加コストは
+#   予算シミュ1回ぶんだけ。
+#   ⛔ §18.75 で落ちた 200/200 とは **別物**。あれは予算を割るので N が
+#     削られる。こちらは N を全部建ててから **余りだけ** 鏡像に回す。
+#   ★ N の稼働率は40%(§18.55: 投入162万/日 ÷ 予算400万)。平均238万/日 が
+#     遊んでいるので、そこが使えるかを見る。
+#   ⚠ **判定ではなく参考値**。§18.75 の凍結の後に実装した選択肢なので、
+#     同じ窓で採否を出すと窓の使い回しになる(§18.75 自身がそう書いている)。
+#   ⚠ 行数が2倍になる(両側を concat する)。長い窓で落ちるなら 0。
+_NG_NFIRST_TAB = os.environ.get("LSS_NEWGAP_NFIRST", "0").strip().lower() \
+    not in ("0", "false", "no", "")
 # ★ N の「株価制限なし」変種タブ (2026-09-05 ユーザー依頼)。既定OFF。
 #   dailyfast.bat が 1 にする。スキャンは N と共有(価格帯は後処理)なので
 #   計算はほぼ増えない。⚠ 100株固定なので値がさ株ほど1件の建玉が大きく、
@@ -862,7 +874,14 @@ def _newgap_rows_to_trades(det, side: str = "short") -> list:
         return out
     _nm = _newgap_names()
     _short = side != "long"
+    # ★ 両側を1つの財布で回す変種(nfirst)は det に **行ごとの side** を持つ。
+    #   ⛔ ここを side 引数だけで決めると、買いの行まで「N(売り)」として
+    #     決済値・損益・向きを計算してしまう。§18.63 で side 列が無く
+    #     ロングをショート表記にして3週間気づかなかったのと同じ形。
+    _mixed = ("side" in getattr(det, "columns", []))
     for r in det.itertuples():
+        if _mixed:
+            _short = int(getattr(r, "side", 1)) > 0
         _d = str(r.date)
         _md = f"{_d[5:7]}/{_d[8:10]}" if len(_d) >= 10 else _d
         # 同日決済。ショート pnl=(建値−決済値)×qty / ロング pnl=(決済値−建値)×qty
@@ -1064,6 +1083,21 @@ def _newgap_build(days: int, min_price: float, max_price: float,
         _rows = _rows[_m]
     if side == "long":
         _rows = _newgap_mirror_rows(_rows)
+    # ★★ **N優先 + 余りを鏡像** (2026-09-13 ユーザー依頼)。両側を1つの財布で回す。
+    #   ⛔ §18.75 で落ちた 200/200 とは **別物**。あれは予算を割るので N を
+    #     削る(機会費用が出る)。こちらは N を全部建ててから **余りだけ**
+    #     鏡像に回すので N は1件も削られない。
+    #   ★ N の稼働率は40%(§18.55: 投入162万/日 ÷ 予算400万)。平均して
+    #     238万/日 が遊んでいるので、そこを使えるかを見る。
+    #   ⚠ 同じ(銘柄,日)が両側に入ることは無い(前日リターンが +1.753% 以上
+    #     かつ -1.753% 以下は有り得ない / _newgap_mirror_rows の注記)。
+    #   ⚠ メモリは行数が2倍になる。19年窓(626万行)では鏡像タブより重い。
+    #     長い窓で落ちるなら set LSS_NEWGAP_NFIRST=0。
+    if variant == "nfirst":
+        _mi = _newgap_mirror_rows(_rows)
+        _rows = pd.concat([_rows.assign(ng_side=1), _mi.assign(ng_side=-1)],
+                          ignore_index=True)
+        del _mi
     # ★★ 50件制限なしの変種 (2026-09-07)。PUSH配信でローテーションできる
     #   ことが実測できたので(§18.69)、watch を外した場合を並べる。
     #   ⛔ **発注順も同時に変える**。ライブは 09:00 に全銘柄のギャップを
@@ -1087,13 +1121,16 @@ def _newgap_build(days: int, min_price: float, max_price: float,
                   (_NG_BUD2 if (variant == "bud2" and _NG_BUD2 > 0)
                    else (_eq_bud if variant == "eq" else _NG_BUDGET)))
     # 全部建てるなら順序は結果に影響しない。表示の一貫性のため liq にする
-    _ng_order = "liq" if variant in ("nocap", "all") else "gap"
+    _ng_order = ("nfirst" if variant == "nfirst" else
+                 ("liq" if variant in ("nocap", "all") else "gap"))
     # ★ eq = 資金が余っている日だけ株数を増やす(上限あり)
     _ng_eq = (variant == "eq")
     _sim = _newgap_sim(_rows, _ng_budget, _ng_watch, _NG_GAP_BP, _NG_RET1,
                        order=_ng_order,
                        qty_mode=("equal" if _ng_eq else "fixed"),
-                       max_qty=(_NG_EQ_MAXQTY if _ng_eq else 0))
+                       max_qty=(_NG_EQ_MAXQTY if _ng_eq else 0),
+                       # ★ 側ごとに watch50(ライブは別バッチで読む / §18.69)
+                       side_col=("ng_side" if variant == "nfirst" else ""))
     # ★ 日次の損益をCSVに出す(2026-09-01)。レジーム別の検定など、外の
     #   スクリプトから使うため。既定OFF。
     #     $env:LSS_NEWGAP_DAYS_CSV = "n_days.csv"
@@ -1178,12 +1215,16 @@ def _newgap_build(days: int, min_price: float, max_price: float,
     _short_data = days > 0 and _span_d < days * 0.9
 
     _shortside = side != "long"
+    # ★ N優先 + 余りを鏡像。両側が1つの財布に入るので、見出しも内訳も別扱い
+    _nfirst = (variant == "nfirst")
     _h = [
         f'<div style="background:#0f172a;border:1px solid #334155;border-radius:8px;'
         f'padding:12px;margin-bottom:12px">',
         f'<div style="color:{"#fbbf24" if _shortside else "#34d399"};'
         f'font-weight:700;font-size:0.95rem;margin-bottom:6px">'
-        + ('★ 新方式 N — 前日リターン + ギャップアップ（§18.54）</div>'
+        + ('🔀 N優先 + 余りを鏡像 — <b>1つの財布</b>（2026-09-13）</div>'
+           if _nfirst else
+           '★ 新方式 N — 前日リターン + ギャップアップ（§18.54）</div>'
            if _shortside else
            '★ 鏡像 — 前日下げ + ギャップダウンを<b>買う</b>（§18.56）</div>'),
         f'<div style="color:#94a3b8;font-size:0.8rem;line-height:1.7">'
@@ -1266,6 +1307,77 @@ def _newgap_build(days: int, min_price: float, max_price: float,
                   f'<div style="color:{_cc};font-size:1.1rem;font-weight:700">{_vv}</div>'
                   f'</div>')
     _h.append('</div>')
+    # ★★ N優先タブの本体 = **内訳**。合計だけ見ても何も分からない。
+    #   知りたいのは「鏡像は N の余りをどれだけ使えたか / それは儲かったか」。
+    if _nfirst and _det is not None and not _det.empty and "side" in _det.columns:
+        _sN = _det[_det["side"] > 0]
+        _sM = _det[_det["side"] < 0]
+        _capy = _ng_budget * 10_000.0
+
+        def _row(_lb, _dfp, _cc):
+            _n = len(_dfp)
+            _p = float(_dfp["pnl"].sum()) if _n else 0.0
+            _u = float((_dfp["entry_p"] * _dfp["qty"]).sum()) if _n else 0.0
+            _bp = ((float((_dfp["pnl"]
+                           / (_dfp["entry_p"] * _dfp["qty"])).mean()) * 1e4)
+                   if _n else 0.0)
+            _win = int((_dfp["pnl"] > 0).sum()) if _n else 0
+            return (f'<tr style="border-bottom:1px solid #1e293b">'
+                    f'<td style="padding:5px 8px;color:{_cc};font-weight:700">'
+                    f'{_lb}</td>'
+                    f'<td style="padding:5px 8px;text-align:right;'
+                    f'color:#e2e8f0">{_n:,}件</td>'
+                    f'<td style="padding:5px 8px;text-align:right;'
+                    f'color:#94a3b8">{(_win / _n * 100 if _n else 0):.0f}%</td>'
+                    f'<td style="padding:5px 8px;text-align:right;'
+                    f'color:{"#4ade80" if _p >= 0 else "#f87171"}">'
+                    f'{_p:+,.0f}円</td>'
+                    f'<td style="padding:5px 8px;text-align:right;'
+                    f'color:{"#4ade80" if _bp >= 0 else "#f87171"}">'
+                    f'{_bp:+.1f}bp</td>'
+                    f'<td style="padding:5px 8px;text-align:right;'
+                    f'color:#94a3b8">'
+                    f'{_u / max(1, len(_dd)) / 10_000:,.0f}万/日</td></tr>')
+
+        # N が使い残した額(=鏡像が使える枠)。日ごとに 予算 − N の投入
+        _uN = (_sN.assign(_u=_sN["entry_p"] * _sN["qty"])
+               .groupby("date")["_u"].sum()) if len(_sN) else pd.Series(dtype=float)
+        _idle = float((_capy - _uN.reindex(_dd["date"]).fillna(0.0)).mean())
+        _uM = (float((_sM["entry_p"] * _sM["qty"]).sum()) / max(1, len(_dd))
+               if len(_sM) else 0.0)
+        _h.append(
+            '<div style="background:#0f172a;border:1px solid #334155;'
+            'border-radius:8px;padding:12px;margin-bottom:12px">'
+            '<div style="color:#c084fc;font-weight:700;font-size:0.9rem;'
+            'margin-bottom:6px">🔀 内訳 — 鏡像は N の余りをどれだけ使えたか'
+            '</div>'
+            '<table style="width:100%;border-collapse:collapse;'
+            'font-size:0.82rem"><thead><tr style="color:#64748b">'
+            + "".join(f'<th style="padding:4px 8px;text-align:'
+                      f'{"left" if _i == 0 else "right"}">{_c}</th>'
+                      for _i, _c in enumerate(
+                          ("側", "件数", "勝率", "損益", "1件あたり", "投入")))
+            + '</tr></thead><tbody>'
+            + _row("N（先）", _sN, "#fbbf24")
+            + _row("鏡像（余り）", _sM, "#34d399")
+            + '</tbody></table>'
+            f'<div style="color:#94a3b8;font-size:0.78rem;line-height:1.7;'
+            f'margin-top:8px">'
+            f'★ N が使い残した枠 <b style="color:#e2e8f0">'
+            f'{_idle / 10_000:,.0f}万/日</b> のうち、鏡像が使えたのは '
+            f'<b style="color:#34d399">{_uM / 10_000:,.0f}万/日</b>'
+            f'（{(_uM / _idle * 100 if _idle > 0 else 0):.0f}%）<br>'
+            f'⛔ <b style="color:#fbbf24">N は1件も削られていません</b>。'
+            f'N を全部建ててから余りだけ鏡像に回すので、'
+            f'§18.75 で落ちた 200/200（予算を割る＝N を削る）とは別物です<br>'
+            f'⚠ <b>判定ではありません。</b>§18.75 は事前基準を凍結して'
+            f' 200/200 が t=1.89 で不合格。この形はその **後に** 実装した'
+            f'選択肢なので、同じ窓で採否を出すと窓の使い回しになります。'
+            f'<b style="color:#e2e8f0">参考値として読むこと</b><br>'
+            f'⚠ 鏡像側も watch{_NG_WATCH}件を **別に**読む前提です'
+            f'（ライブは2バッチ / §18.69 の PUSH ローテーション実測）。'
+            f'両側で 1日{_NG_WATCH * 2}件の板が要ります'
+            f'</div></div>')
     if _eq_note:
         _h.append(_eq_note)
 
@@ -23092,6 +23204,13 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
             if _NG_MIRROR_TAB:
                 _ng_sides.append(("long", "newgapm", "★ 鏡像(買い)",
                                   "#34d399", "#a7f3d0", _ng_lo, _ng_hi, ""))
+            if _NG_NFIRST_TAB:
+                # ★ N優先 + 余りを鏡像(2026-09-13 ユーザー依頼)。1つの財布。
+                #   ⛔ side は "short" のまま。中で両側を concat する
+                #     (_newgap_build の variant == "nfirst")。
+                _ng_sides.append(("short", "newgapnf", "🔀 N優先+余りを鏡像",
+                                  "#c084fc", "#e9d5ff", _ng_lo, _ng_hi,
+                                  "nfirst"))
             if _NG_NOCAP_TAB:
                 # ★★ 50件制限なし(2026-09-07)。PUSH配信でローテーションできる
                 #   と実測できたので(§18.69)、watch を外した場合を並べる。
@@ -23137,7 +23256,8 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                   + " / ".join(_s[2] for _s in _ng_sides), flush=True)
             print(f"     ON/OFF: 鏡像={_NG_MIRROR_TAB} 制限なし={_NG_NOCAP_TAB} "
                   f"予算なし={_NG_ALL_TAB} 株価制限なし={_NG_NOPX_TAB} "
-                  f"価格4分解={_NG_PXSPLIT} / 窓={_NG_DAYS or days}日", flush=True)
+                  f"価格4分解={_NG_PXSPLIT} N優先={_NG_NFIRST_TAB} "
+                  f"/ 窓={_NG_DAYS or days}日", flush=True)
             for (_ng_side, _ng_key, _ng_lbl, _ng_c1, _ng_c2,
                  _ng_pmin, _ng_pmax, _ng_var) in _ng_sides:
                 # ⛔ 2026-09-07: ここが **1つも計測されていなかった**。変種が

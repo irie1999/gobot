@@ -27,8 +27,9 @@ REM   backtest. So N alone can look back years. Its window is a separate
 REM   env var, LSS_NEWGAP_DAYS, and that is all this .bat sets.
 REM
 REM WHICH N TABS
-REM   DEFAULT (3)          1 N / 2 mirror / 3 no 50-name cap
-REM   with "all" (7 more)  4 no budget      a DIAGNOSTIC, not a rule (18.10)
+REM   DEFAULT (4)          1 N / 2 mirror / 3 no 50-name cap
+REM                        4 N-first plus mirror on the LEFTOVER budget
+REM   with "all" (7 more)  5 no budget      a DIAGNOSTIC, not a rule (18.10)
 REM                        5 no price band  1,000-6,000 removed
 REM                        6 lower band only
 REM                        7 upper band only
@@ -103,6 +104,7 @@ echo    the 5-min tabs stay at --days 180
 echo    heavy analysis blocks are OFF
 echo.
 echo    N TABS ONLY: N(400man) / mirror / no-50-cap / N(800man)
+echo                 plus N-first + mirror on the leftover budget
 echo                 (add "all" for the other 4)
 echo    the 4M-yen / H / J / L / K tabs are NOT built
 echo    plus n_report_YYYYMMDD.txt and n_days.csv
@@ -155,6 +157,24 @@ if not defined LSS_NEWGAP_BUDGET2 set "LSS_NEWGAP_BUDGET2=800"
 set "LSS_NEWGAP_MIRROR=1"
 set "LSS_NEWGAP_NOCAP=1"
 set "LSS_NEWGAP_CAP=1"
+REM *** N-FIRST PLUS MIRROR ON THE LEFTOVER (2026-09-13, user asked) ***
+REM   ONE wallet. Fill N completely first, then let the mirror use only
+REM   what is left. N LOSES NOTHING - that is the whole point, and it is
+REM   why this is NOT the 200/200 split that failed in 18.75 (that one
+REM   halves the budget, so it takes trades away from N).
+REM   N runs at 40 pct utilisation (18.55: 1.62M yen a day out of 4M), so
+REM   about 2.38M yen a day is idle. This tab asks what that idle money
+REM   could do.
+REM   The tab head prints the split: how much N left over, how much of it
+REM   the mirror actually used, and what each side earned.
+REM   IT IS A REFERENCE NUMBER, NOT A VERDICT. 18.75 froze the pass rules
+REM   and 200/200 came out at t=1.89. This shape was written AFTER that,
+REM   so scoring it on the same window is reusing the window.
+REM   Costs one extra budget sim. Memory: the row count DOUBLES because
+REM   both sides are concatenated - if a long window dies, set this to 0.
+REM   Both sides need their own watch-50, so the morning reads 100 names
+REM   in two PUSH batches (18.69 measured batch 2 at 1-3 seconds).
+if not defined LSS_NEWGAP_NFIRST set "LSS_NEWGAP_NFIRST=1"
 REM the other four only with "all" - they are what ran the PC out of memory
 if /i "%~2"=="all" (
   set "LSS_NEWGAP_ALL=1"
