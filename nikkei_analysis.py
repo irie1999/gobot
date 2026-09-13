@@ -1111,7 +1111,13 @@ def _newgap_build(days: int, min_price: float, max_price: float,
     #     別問題」がそのまま当てはまる。実運用は400万で1日十数件しか建たない。
     #   watch も外す(予算を外すのに板の上限だけ残すのは中途半端)。
     _ng_all = (variant == "all")
-    _ng_watch = 0 if variant in ("nocap", "all") else _NG_WATCH
+    # ★★ **N優先+鏡像 の対照** (2026-09-13)。朝に読む銘柄数を揃える。
+    #   N優先+鏡像 は N50 + 鏡像50 = **100件** の板を読む(2バッチ)。
+    #   同じ2バッチを **N だけに使う**とどうなるかが、本当の比較相手。
+    #   ⛔ これが無いと「余った資金を鏡像に回すと良い」を、
+    #     「読む数を増やすと良い」と取り違える(§18.24: 対照は同じ実行の中に)。
+    _ng_watch = (0 if variant in ("nocap", "all")
+                 else (_NG_WATCH * 2 if variant == "w2" else _NG_WATCH))
     # 予算なしは 10兆円。日次の最大投入(下で出す必要資金)が数億なので絶対に効かない
     # ★ bud2 = 予算だけ差し替えた変種(それ以外は基準とまったく同じ)
     # ★ eq は「資金が余っている日に増株」なので、**余っている側の予算**で見る
@@ -1239,8 +1245,18 @@ def _newgap_build(days: int, min_price: float, max_price: float,
         #       newgap_core:119 `(o1 - pc) / pc`
         + f'<span style="color:#94a3b8">（<b>終値→終値</b>。日中ではありません）</span>'
         + f' の銘柄を'
-        f'流動性降順に並べ <b style="color:#e2e8f0">上位{_NG_WATCH}件</b>'
-        f'（kabu の登録上限 / §18.44）<br>'
+        # ⛔ _NG_WATCH 決め打ちだと w2(watch×2) タブが「50件」と嘘を書く。
+        #   nocap は 0 = 無制限なので、そこも実態を書く(§18.40b)。
+        + f'流動性降順に並べ <b style="color:#e2e8f0">'
+        + (f'上位{_ng_watch}件' if _ng_watch > 0 else '全部（上限なし）')
+        + '</b>'
+        + ('（kabu の登録上限 / §18.44）<br>' if _ng_watch == _NG_WATCH else
+           f'（{_ng_watch // max(1, _NG_WATCH)}バッチ / '
+           f'kabu の登録上限は{_NG_WATCH}件なので '
+           f'<b>PUSH でローテーション</b>が要る / §18.69）<br>'
+           if _ng_watch > 0 else
+           f'（⚠ kabu の登録上限は{_NG_WATCH}件。'
+           f'<b>PUSH でローテーション</b>が要る / §18.69）<br>')
         + (f'09:00: その始値を見て <b style="color:#e2e8f0">'
            f'ギャップ ≥ +{_NG_GAP_BP:.0f}bp</b>'
            f'<span style="color:#94a3b8">（<b>前日終値→当日始値</b>の'
@@ -23211,6 +23227,17 @@ sm/tm は各戦略の既存値を使用。★現状 = 現在の全戦略共通�
                 _ng_sides.append(("short", "newgapnf", "🔀 N優先+余りを鏡像",
                                   "#c084fc", "#e9d5ff", _ng_lo, _ng_hi,
                                   "nfirst"))
+                # ★★ **対照を必ず一緒に出す**(§18.24: 比較相手は同じ実行の中に)。
+                #   N優先+鏡像 は N50 + 鏡像50 = 100件の板を読む(2バッチ)。
+                #   同じ2バッチを **N だけに使う**のがこのタブ。
+                #   ⛔ これが無いと「余りを鏡像に回すと良い」を
+                #     「読む数を増やすと良い」と取り違える。実測(2026-09-13
+                #     `.\nlong 700`)では 🔓制限なし が ÷σ 0.81 で
+                #     N優先+鏡像 0.67 を大きく上回っており、**同じ資金なら
+                #     鏡像より N を広げるほう**という可能性が濃い。
+                _ng_sides.append(("short", "newgapw2",
+                                  f"🎛 N watch{_NG_WATCH * 2}(対照)",
+                                  "#94a3b8", "#cbd5e1", _ng_lo, _ng_hi, "w2"))
             if _NG_NOCAP_TAB:
                 # ★★ 50件制限なし(2026-09-07)。PUSH配信でローテーションできる
                 #   と実測できたので(§18.69)、watch を外した場合を並べる。
