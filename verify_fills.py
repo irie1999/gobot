@@ -834,21 +834,37 @@ def _n_entry_report(rows: list, order_rows: list) -> None:
     #     戻った日(ws_ok=0)も同じ設定で走らせた以上 含める。結果で落とすと
     #     「失敗した日だけ消える」ことになる
     #   ・--no-ws のような意図的な比較運転は指定が違うので自動的に別集計
+    # ⛔⛔ **`x or ""` を使わない** (2026-09-14 に踏んだ)。
+    #   Python は **0.0 / 0 / -0.0 を falsy** に扱うので、
+    #   `str(0.0 or "")` は `""` になる。
+    #   実例 2026-09-14: 3件すべてエントリー滑り **ちょうど +0.0bp** で、
+    #   平均 0.0(float)がそのまま「未観測」と判定され、
+    #   **約定3件の日が『約定ゼロ』としてゲートから消えた**。
+    #   ⚠ この日を CSV から読み直すと "0.0"(文字列=truthy)なので正しく
+    #     数えられる。**壊れるのは その日の実行の表示だけ**だが、
+    #     「ゲート 0件」と出れば当然そう信じてしまう。
+    #   ★ 空か否かは **None と空文字だけ**で判定する。
+    def _sv(h: dict, k: str) -> str:
+        _v = h.get(k)
+        return "" if _v is None else str(_v).strip()
+
     def _isgate(h: dict) -> bool:
-        if str(h.get("版") or "") != _GATE_VER:
+        if _sv(h, "版") != _GATE_VER:
             return False
-        return all(str(h.get(_k) or "") == _v for _k, _v in _GATE_CFG.items())
+        return all(_sv(h, _k) == _v for _k, _v in _GATE_CFG.items())
 
     _has = [(d, h) for d, h in sorted(_hist.items())
-            if str(h.get("エントリー滑りbp") or "") != ""]
+            if _sv(h, "エントリー滑りbp") != ""]
     _ok = [(d, h) for d, h in _has if _isgate(h)]
-    _old = [d for d, h in _has if str(h.get("版") or "") != _GATE_VER]
+    _old = [d for d, h in _has if _sv(h, "版") != _GATE_VER]
     _oth = [d for d, h in _has
-            if str(h.get("版") or "") == _GATE_VER and not _isgate(h)]
+            if _sv(h, "版") == _GATE_VER and not _isgate(h)]
     # ★ 約定ゼロの日は滑りを観測できないのでゲートに入らない(仕様どおり)。
     #   ただし **暦日は進む**ので、見えないと「あと何日か」を読み違える。
+    #   ⚠ ここも 0.0 を空と混同しないこと(上の _sv)。「滑り0」と
+    #     「約定ゼロ」はまったく別の事象。
     _zero = [d for d, h in sorted(_hist.items())
-             if str(h.get("エントリー滑りbp") or "") == "" and _isgate(h)]
+             if _sv(h, "エントリー滑りbp") == "" and _isgate(h)]
     _nows = sum(1 for _, h in _ok if str(h.get("ws_ok") or "") != "1")
     _nb = sum(int(_f0(h.get("約定"))) for _, h in _ok)
     _nd = len(_ok)
