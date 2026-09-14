@@ -2223,6 +2223,17 @@ _dump(_rows)
 
 _got = sum(1 for r in _rows if float(r["open_p"] or 0) > 0)
 _late_n = sum(1 for r in _rows if r["late"])
+# ⛔⛔ **分母を『読む対象』にする** (2026-09-14 発覚)。
+#   --poll は **寄った銘柄しか行を作らない**(`if _op <= 0: continue`)ので、
+#   `_got / len(_rows)` は定義上いつも 100% になる。健全性チェックの
+#   見た目をして、何も検査していなかった。
+#   実例 2026-09-14: 46銘柄を読んだのに 1銘柄が 09:10 まで寄らず、
+#   表示は「読めた 45/45」= 満点。消えた1件は画面のどこにも出なかった。
+#   ★ 未寄%も同じ。3/45=6.7% と出ていたが、最後まで寄らなかった1件を
+#     入れれば 4/46=8.7%。「15.7% と大きく違うなら要調査」の判定が
+#     **低いほうに偏る**。§18.40b(分母が動く)と同じ形。
+_n_target = len(_syms) if args.poll else len(_rows)
+_never = max(0, _n_target - _got)          # 終端まで一度も寄らなかった
 _pass_k = [r for r in _rows if r["pass_gap"]]
 _j_seen = [r for r in _rows if r["in_j"]][:args.watch_j]
 _pass_j = [r for r in _j_seen if r["pass_gap"]]
@@ -2230,8 +2241,13 @@ print(f"""
 {'=' * 74}
 ■ 結果 — {_out_path}
 {'=' * 74}
-  読めた       {_got:,}/{len(_rows):,}銘柄   (最終 {_read_ts})
-  09:00に未寄  {_late_n:,}銘柄 ({_late_n / max(1, len(_rows)) * 100:.1f}%)
+  読めた       {_got:,}/{_n_target:,}銘柄   (最終 {_read_ts})""" + (
+    f"""
+  ⛔ 終端まで未寄 {_never:,}銘柄 — この銘柄は明細にも出ません"""
+    if _never else "") + f"""
+  09:00に未寄  {_late_n + _never:,}銘柄 """
+    f"""({(_late_n + _never) / max(1, _n_target) * 100:.1f}%)"""
+    f"""  ← 遅寄り {_late_n:,} + 終端まで未寄 {_never:,}
                ⚠ バックテストの実測は15.7%。大きく違うなら要調査
   グループ     {len(_groups)}回""")
 # ★ PUSH の合図で待ちを切り上げた回数。0 のままなら合図が来ていない
