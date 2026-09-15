@@ -55,10 +55,98 @@ ap.add_argument("--symbols", default="",
                 help="カンマ区切り。省略すると k_paper_<日付>.csv の合格を全部")
 ap.add_argument("--limit", default="",
                 help="指値をカンマ区切りで明示（省略時は k_paper の始値）")
+ap.add_argument("--bars", default="auto", choices=["auto", "1", "5", "0"],
+                help="分足で時刻まで詰める（auto=1分→5分の順に探す / 0=日足だけ）")
+ap.add_argument("--until", default="09:10",
+                help="この時刻までに戻れば約定だったとみなす（= --poll-until）")
+ap.add_argument("--cancel", default="",
+                help="実際に取消した時刻 HH:MM:SS（説明に使うだけ）")
+ap.add_argument("--selftest", action="store_true",
+                help="合成バーで判定ロジックだけ検算して終わる")
 a = ap.parse_args()
 
 _d = a.date or f"{_dt.date.today():%Y-%m-%d}"
 _ymd = _d.replace("-", "")
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 分足での判定（ここが本命。日足より1段 強い答えが出る）
+# ══════════════════════════════════════════════════════════════════════
+# ⛔⛔ **寄りバーは使えない**（analyze_fill_1m の落とし穴②と同じ）。
+#   板寄せの約定（＝始値そのもの）が必ず入るので、寄りバーの高値は
+#   定義上いつも 始値以上 = 指値以上。情報がゼロ。→ 次のバー以降だけ見る。
+#
+#   5分足の場合、寄りバーを落とすと最初に使えるのが **09:05〜09:10 のバー**に
+#   なる。これは今日の取消(09:03:10)より後・09:10 より前に完全に収まるので、
+#   「N3 なら約定していたか」がそのまま決まる。**5分足で決着する**のはこのため。
+#
+# ⚠ ただし **09:03:10〜09:05 は寄りバーに埋もれて判定できない**。
+#   そこで戻っていた場合、N3 なら約定していたが 5分足では見えない。
+#   → 「約定しなかった」側は 5分足では **上限** として読むこと（1分足なら出る）。
+
+def _bar_verdict(post, lim: float, t_until, conv_end: bool, minute: int):
+    """寄りバーを除いたバー列から『--until までに指値へ戻ったか』を決める。
+
+    post     : [(label(datetime.time), high(float)), ...] 時刻昇順
+    conv_end : ラベルが **バーの終端**なら True、**開始**なら False
+    返り値   : (判定, 窓内の最高値 or None, 最初に触れた窓の終端 or None,
+                窓より後の最高値 or None)
+    """
+    _eps = 1e-9
+    _in_hi = _af_hi = None
+    _hit = None
+    for _t, _h in post:
+        # そのバーが覆う区間の**終端**。ここが --until 以内なら「窓の中」。
+        if conv_end:
+            _we = _t
+        else:
+            _we = (_dt.datetime.combine(_dt.date(2000, 1, 1), _t)
+                   + _dt.timedelta(minutes=minute)).time()
+        if _we <= t_until:
+            _in_hi = _h if _in_hi is None else max(_in_hi, _h)
+            if _hit is None and _h >= lim - _eps:
+                _hit = _we
+        else:
+            _af_hi = _h if _af_hi is None else max(_af_hi, _h)
+    if _hit is not None:
+        return "fill", _in_hi, _hit, _af_hi
+    if _af_hi is not None and _af_hi >= lim - _eps:
+        return "no_late", _in_hi, None, _af_hi
+    return "no_never", _in_hi, None, _af_hi
+
+
+if a.selftest:
+    _T = _dt.time
+    _U = _T(9, 10)
+    _cases = [
+        # (name, post, lim, conv_end, minute, expect)
+        ("5分/終端ラベル: 09:10バーで戻る",
+         [(_T(9, 10), 105.0), (_T(9, 15), 99.0)], 104.0, True, 5, "fill"),
+        ("5分/終端ラベル: 戻るのは09:15",
+         [(_T(9, 10), 100.0), (_T(9, 15), 108.0)], 104.0, True, 5, "no_late"),
+        ("5分/終端ラベル: 一日中 届かない",
+         [(_T(9, 10), 100.0), (_T(9, 15), 101.0)], 104.0, True, 5, "no_never"),
+        ("5分/開始ラベル: 09:05バー(=09:05-09:10)で戻る",
+         [(_T(9, 5), 105.0)], 104.0, False, 5, "fill"),
+        ("5分/開始ラベル: 09:10バーは窓の外",
+         [(_T(9, 5), 100.0), (_T(9, 10), 105.0)], 104.0, False, 5, "no_late"),
+        ("1分/開始ラベル: 09:07に戻る",
+         [(_T(9, m), 100.0) for m in range(1, 7)]
+         + [(_T(9, 7), 105.0)], 104.0, False, 1, "fill"),
+        ("1分/開始ラベル: 09:11は窓の外(終端09:12)",
+         [(_T(9, 11), 105.0)], 104.0, False, 1, "no_late"),
+        ("境界: ちょうど指値に触れる",
+         [(_T(9, 10), 104.0)], 104.0, True, 5, "fill"),
+    ]
+    _ng = 0
+    print("■ 判定ロジックの検算（合成バー）")
+    for _n, _p, _l, _ce, _mi, _ex in _cases:
+        _got = _bar_verdict(_p, _l, _U, _ce, _mi)[0]
+        _ok = _got == _ex
+        _ng += 0 if _ok else 1
+        print(f"  {'✅' if _ok else '⛔'} {_n:42} → {_got} (期待 {_ex})")
+    print(f"\n  {len(_cases) - _ng}/{len(_cases)} 合格")
+    sys.exit(0 if _ng == 0 else 1)
 
 # ── 指値（= 始値）を k_paper から拾う ────────────────────────────────
 _px: dict = {}
@@ -151,5 +239,137 @@ print(f"       ① **高値が寄り付きの分かもしれない** — 日足�
 print(f"       ② **時刻が分からない** — 09:10 までとは限らない（14:00 かも）")
 print(f"       ③ **触れた ≠ 約定した** — 板の行列があるので、高値が指値ちょうど"
       f"\n          〜1ティック上なら自分の売り指値は刺さらないことがある")
-print(f"  ▶ 正確に知るには 1分足が入ってから:"
-      f"\n       python analyze_fill_1m.py --days 5 --workers 4")
+
+# ══════════════════════════════════════════════════════════════════════
+# 分足があるなら ①② は詰められる
+# ══════════════════════════════════════════════════════════════════════
+if a.bars == "0":
+    print(f"\n  ▶ 分足で時刻まで詰めるなら --bars auto")
+    sys.exit(0)
+
+try:
+    import tenkan_sim as _ts                                    # noqa: E402
+    _D5, _D1 = _ts.find_minute_dirs()
+except Exception as _te:                                        # noqa: BLE001
+    print(f"\n  ⚠ 分足モジュールを読めません: {_te}")
+    sys.exit(0)
+
+_want = [1, 5] if a.bars == "auto" else [int(a.bars)]
+_avail = [m for m in _want if (_D1 if m == 1 else _D5) is not None]
+if not _avail:
+    print(f"\n  ⚠ 分足フォルダが見つかりません"
+          f"（5分足 {_D5} / 1分足 {_D1}）。"
+          f"\n     ここはコンテナ等で分足が無い環境です。"
+          f"Windows の実機なら自動で見つかります")
+    sys.exit(0)
+
+_hh, _mm = (int(x) for x in a.until.split(":")[:2])
+_UNTIL = _dt.time(_hh, _mm)
+_dobj = _dt.date(*(int(x) for x in _d.split("-")))
+
+# ── その日のバーを読む ────────────────────────────────────────────
+_MIN = 0
+_day: dict = {}
+for _m in _avail:
+    _got = {}
+    for _s in _syms:
+        try:
+            _df = _ts._bars_one(f"{_s}.T", _m)
+        except Exception:                                       # noqa: BLE001
+            _df = None
+        if _df is None:
+            continue
+        try:
+            _b = _df[_df.index.date == _dobj]
+        except Exception:                                       # noqa: BLE001
+            continue
+        if len(_b) < 2:
+            continue
+        # ★ 寄りバー = その日の最初の **出来高 > 0** のバー
+        if "volume" in _b.columns:
+            _nz = _b.index[_b["volume"].fillna(0) > 0]
+            if len(_nz):
+                _b = _b.loc[_nz[0]:]
+        if len(_b) >= 2:
+            _got[_s] = _b
+    if len(_got) >= max(1, len(_syms) // 2):
+        _MIN, _day = _m, _got
+        break
+    if _got and not _day:
+        _MIN, _day = _m, _got
+
+if not _day:
+    print(f"\n  ⚠ {_d} の分足が1銘柄も入っていません"
+          f"（J-Quants は当日ぶんが翌営業日以降になります）")
+    sys.exit(0)
+
+# ── ラベルが「バーの開始」か「終端」かを **データから** 決める ──────────
+# ⛔ 決め打ちしない。CLAUDE.md §18.50 に「5分足の先頭バーが 09:05 で 90%」と
+#   あり、§18.32 の「09:00 でない日が 13%」と食い違ったまま未解決だった。
+#   ほぼ全銘柄が 09:00 に寄る以上、先頭が 09:05 なら **終端ラベル**
+#   (09:00-09:05 のバーを 09:05 と呼ぶ) でなければ辻褄が合わない。
+from collections import Counter as _Cnt                         # noqa: E402
+_first = _Cnt(str(_b.index[0].time())[:5] for _b in _day.values())
+_mode, _mn = _first.most_common(1)[0]
+_END = _mode == f"09:{_MIN:02d}"        # 先頭が 09:05(5分) / 09:01(1分) なら終端
+if not _END and _mode != "09:00":
+    print(f"\n  ⚠ 先頭バーの最頻値が {_mode} で、09:00 とも "
+          f"09:{_MIN:02d} とも違います。**開始ラベル**として扱います")
+
+print(f"\n{'=' * 74}")
+print(f"■ {_d} — {_MIN}分足で『{a.until} までに指値へ戻ったか』を見る")
+print(f"{'=' * 74}")
+print(f"  読めた {len(_day)}/{len(_syms)}銘柄 / 先頭バーの最頻値 {_mode}"
+      f"（{_mn}銘柄）→ ラベルは **バーの{'終端' if _END else '開始'}**")
+if a.cancel:
+    print(f"  実際の取消 {a.cancel}"
+          + (f" / ⛔ {_MIN}分足では "
+             f"{a.cancel[:5]}〜09:{(int(a.cancel[3:5]) // _MIN + 1) * _MIN:02d} "
+             f"が寄りバーに埋もれて見えません" if _MIN == 5 else ""))
+print(f"\n  {'銘柄':8}{'指値':>10}{'窓内 高値':>11}{'窓内−指値':>11}"
+      f"{'戻った':>8}{'窓後 高値':>11}  判定")
+print(f"  （「戻った」は**遅くともこの時刻まで**に指値へ届いたという意味。"
+      f"バー1本ぶんの幅がある）")
+
+_f = _nl = _nn = _nb = 0
+for _s in _syms:
+    _lim0 = _px[_s]
+    _b = _day.get(_s)
+    if _b is None:
+        print(f"  {_s:8}  ⚠ {_MIN}分足なし（または2本未満）")
+        _nb += 1
+        continue
+    # ⛔ 寄りバーを落とす（板寄せの約定が入るので高値が必ず 指値以上）
+    _post = [(t.time(), float(h))
+             for t, h in zip(_b.index[1:], _b["high"].iloc[1:])]
+    _vd, _ih, _ht, _ah = _bar_verdict(_post, _lim0, _UNTIL, _END, _MIN)
+    _dd = f"{(_ih - _lim0) / _lim0 * 1e4:+.1f}bp" if _ih is not None else "—"
+    if _vd == "fill":
+        _msg = f"✅ **{a.until} までに戻っている → N3 なら約定していた**"
+        _f += 1
+    elif _vd == "no_late":
+        _msg = f"⛔ 戻ったのは {a.until} より後 → **待っても約定しなかった**"
+        _nl += 1
+    else:
+        _msg = f"⛔ 一日中 戻っていない → **待っても約定しなかった**"
+        _nn += 1
+    print(f"  {_s:8}{_lim0:>10,.1f}"
+          f"{(f'{_ih:,.1f}' if _ih is not None else '—'):>11}{_dd:>11}"
+          f"{(str(_ht)[:5] if _ht else '—'):>8}"
+          f"{(f'{_ah:,.1f}' if _ah is not None else '—'):>11}  {_msg}")
+
+print(f"\n  ✅ N3 なら約定していた      **{_f}件**")
+print(f"  ⛔ 待っても約定しなかった    {_nl + _nn}件"
+      f"（{a.until} より後に戻った {_nl} / 一日中戻らず {_nn}）")
+if _nb:
+    print(f"  ⚠ 分足が無くて調べられない  {_nb}件")
+
+print(f"\n  ⚠ 読み方の注意:")
+if _MIN == 5:
+    print(f"    ① **09:0x の取消〜09:05 は判定できません**（寄りバーに埋もれる）。"
+          f"\n       そこで戻っていた場合も N3 なら約定していたので、"
+          f"✅ は **下限**、⛔ は「09:05 以降は戻らなかった」の意味です")
+print(f"    ② **触れた ≠ 約定した**。板の行列(価格・時間優先)があるので、"
+      f"\n       高値が指値ちょうどなら自分の売り指値は刺さらないことがあります")
+print(f"    ③ これは **1日ぶん**です。約定率の判定は 2年で:"
+      f"\n         python analyze_fill_1m.py --days 760 --workers 8")
