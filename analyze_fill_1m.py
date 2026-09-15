@@ -75,7 +75,14 @@ ap.add_argument("--qty", type=int, default=100)
 ap.add_argument("--min-price", type=float, default=1000.0)
 ap.add_argument("--max-price", type=float, default=6000.0)
 ap.add_argument("--cancel", default="09:10",
-                help="仕様どおりの取消時刻（既定 09:10）")
+                help="仕様どおりの取消時刻（既定 09:10）。**主判定はこれ1本**")
+# ★ 締切スイープ (2026-09-15 レビュー指摘)。
+#   「09:10 が仕様として正しい」ことと「09:10 が最も儲かる」ことは別問題。
+#   ライブは 09:10 に固定したまま、**どこで切るのが良かったか**はここで測る。
+#   ⛔ この表を見て --cancel を選び直さないこと。選び直すと同じ2年で
+#     設定を決めることになる(§18.28 の作法)。判定は別に TRAIN/TEST を割る。
+ap.add_argument("--cancel-sweep", default="09:03,09:05,09:10,09:15,09:30",
+                help="締切をいくつか並べて約定率と損益を出す（比較用・主判定には使わない）")
 ap.add_argument("--live-grace", type=int, default=11,
                 help="ライブ再現の取消 = 最後のwatch銘柄が寄った時刻 + この秒数"
                      "（実測 2026-09-15: 09:02:59 に寄って 09:03:10 に取消）")
@@ -92,6 +99,13 @@ ap.add_argument("--save-det", default="fill_1m_det.csv",
                 help="銘柄日ごとの分類（較正に使う / 空で書かない）")
 ap.add_argument("--limit", type=int, default=0, help="銘柄数を絞る(デバッグ)")
 a = ap.parse_args()
+
+# 締切スイープの時刻。主判定(--cancel)と重複しても害はないので除かない
+# （同じ値が2行出ると「主判定と一致しているか」の検算になる）
+_SWEEP = [t.strip() for t in a.cancel_sweep.split(",") if t.strip()]
+for _t0 in _SWEEP:
+    if len(_t0) != 5 or _t0[2] != ":" or not _t0.replace(":", "").isdigit():
+        sys.exit(f"[error] --cancel-sweep の {_t0!r} は HH:MM ではありません")
 
 # ══════════════════════════════════════════════════════════════════════
 # 1分足の読み込み
@@ -300,7 +314,15 @@ for _d in sorted(_watch):
 
     _row = {"date": _d, "watched": len(_w), "pass": len(_hits),
             "live_cut": str(_live_cut)[11:19], "spec_cut": a.cancel}
-    for _cn, _cut in (("live", _live_cut), ("spec", _spec_cut)):
+    # ★ 主判定は live / spec の2本。以降は締切スイープ(比較用)
+    _scen = [("live", _live_cut), ("spec", _spec_cut)]
+    for _ct in _SWEEP:
+        try:
+            _scen.append((f"c{_ct.replace(':', '')}",
+                          pd.Timestamp(f"{_d} {_ct}", tz="Asia/Tokyo")))
+        except Exception:
+            pass
+    for _cn, _cut in _scen:
         _cash = _CAPY
         _A = _Aopt = _B = _C = 0.0
         _nA = _nB = 0
@@ -382,6 +404,27 @@ print(f"  {'取消':16}{'建てた':>9}{'約定':>9}{'約定率':>9}")
 for _c, _lbl in (("live", "ライブ(N2)"), ("spec", f"仕様 {a.cancel}(N3)")):
     _nb, _nf = int(_R[f"{_c}_built"].sum()), int(_R[f"{_c}_filled"].sum())
     print(f"  {_lbl:16}{_nb:>9,}{_nf:>9,}{_nf / max(1, _nb) * 100:>8.1f}%")
+
+# ── 締切スイープ（比較用。主判定には使わない） ─────────────────────────
+if _SWEEP:
+    print(f"\n{'=' * 78}\n■ 締切スイープ（**参考**。ライブは {a.cancel} 固定）"
+          f"\n{'=' * 78}")
+    print(f"  ⛔ 「{a.cancel} が仕様として正しい」と「{a.cancel} が最も儲かる」は"
+          f"別問題。\n     ここは後者だけを見る表で、**この表で締切を選ばない**"
+          f"（同じ2年で設定を決めることになる / §18.28）")
+    print(f"\n  {'締切':>8}{'建てた':>9}{'約定':>9}{'約定率':>9}"
+          f"{'A 現行':>16}{'C 悲観':>16}")
+    for _ct in _SWEEP:
+        _c = f"c{_ct.replace(':', '')}"
+        if f"{_c}_built" not in _R.columns:
+            continue
+        _nb, _nf = int(_R[f"{_c}_built"].sum()), int(_R[f"{_c}_filled"].sum())
+        print(f"  {_ct:>8}{_nb:>9,}{_nf:>9,}"
+              f"{_nf / max(1, _nb) * 100:>8.1f}%"
+              f"{_R[f'{_c}_A'].sum():>+16,.0f}{_R[f'{_c}_C'].sum():>+16,.0f}")
+    print(f"\n  ⚠ 遅く切るほど約定率は上がるが、**無防備な時間も伸びる**"
+          f"（建ててから引けMOC を置くまで watcher が無い / §18.46）。"
+          f"\n     この表にその費用は入っていません")
 
 print(f"\n{'=' * 78}\n■ ★ 主判定 — 日ごとの対応差（仕様 {a.cancel}）\n{'=' * 78}")
 print(f"  A 現行(指値@始値) / B 理想上界(全部 始値) / C 悲観(未約定を次バー安値)")
