@@ -44,7 +44,8 @@ from backtest_limit_entry import (
     calc_qty,
 )
 from risk_metrics import enrich_backtest_result, calc_hold_stats
-from scan_breakout_entry import calc_donchian, calc_vol_breakout, calc_momentum
+from scan_breakout_entry import (calc_donchian, calc_vol_breakout,
+                                 calc_vol_breakout_tf, calc_momentum)
 from compute_wf_scores import build_wf_scores, calc_wf_score, wf_rank
 
 JST     = timezone(timedelta(hours=9))
@@ -142,15 +143,17 @@ WATCHLIST: list[tuple[str, str, str]] = [
 # TRADING_MODE 環境変数 or --aggressive CLI で aggressive を選択
 # デフォルトは conservative (現行踏襲)
 STRATEGY_PARAMS_CONSERVATIVE = {
-    "DON": (calc_donchian,     0.0, 1.5, 3.0),
-    "VOL": (calc_vol_breakout, 0.0, 1.5, 3.0),
-    "MOM": (calc_momentum,     0.0, 1.5, 3.0),
+    "DON":   (calc_donchian,       0.0, 1.5, 3.0),
+    "VOL":   (calc_vol_breakout,   0.0, 1.5, 3.0),
+    "VOLTF": (calc_vol_breakout_tf, 0.0, 1.5, 3.0),  # VOL+MA50 (falling knife除外)
+    "MOM":   (calc_momentum,       0.0, 1.5, 3.0),
 }
 # aggressive: sm=1.5/tm=2.0 (run_signals_prime.py / scan_walkforward と統一)
 STRATEGY_PARAMS_AGGRESSIVE = {
-    "DON": (calc_donchian,     0.0, 1.5, 2.0),   # 目標 +6% / 損切 -4.5% (1.33R)
-    "VOL": (calc_vol_breakout, 0.0, 1.5, 2.0),
-    "MOM": (calc_momentum,     0.0, 1.5, 2.0),
+    "DON":   (calc_donchian,       0.0, 1.5, 2.0),   # 目標 +6% / 損切 -4.5% (1.33R)
+    "VOL":   (calc_vol_breakout,   0.0, 1.5, 2.0),
+    "VOLTF": (calc_vol_breakout_tf, 0.0, 1.5, 2.0),
+    "MOM":   (calc_momentum,       0.0, 1.5, 2.0),
 }
 
 import os as _os
@@ -163,6 +166,11 @@ else:
     TRADING_MODE = "conservative"
 
 ENTRY_TYPE = "stop"   # 逆指値（高値 ≥ 前日終値 で約定）
+
+
+# 薄サンプル減点の閾値: 最長窓(365日)の実取引数がこれ未満だと、勝率/PF/安定の
+# 品質点(最大80点)を線形に割り引く。少数トレードでの過大評価(例: 2取引で91点)を抑制。
+MIN_TRADES_FOR_FULL_BT = 10
 
 
 def calc_recommend_score(period_results: dict) -> tuple[int, str]:
@@ -181,14 +189,14 @@ def calc_recommend_score(period_results: dict) -> tuple[int, str]:
     avg_pf   = sum(min(r["pf"] if r["pf"] != float("inf") else 10, 10)
                    for r in results) / len(results)
     stable   = sum(1 for r in results if r["total_pnl"] > 0) / len(results)
-    t_trades = sum(r["trades"] for r in results)
+    t_trades = max((r["trades"] for r in results), default=0)  # 重複窓を足さず実数(180日)で数える
 
-    score = round(
-        avg_wr * 0.4
-        + (avg_pf / 10) * 30
-        + stable * 20
-        + min(t_trades / 20, 1) * 10
-    )
+    # 薄サンプル減点: 勝率/PF/安定(最大80点)は少数トレードで簡単に満点化するため、
+    # 最長窓の実取引数が MIN_TRADES_FOR_FULL_BT 未満なら線形に割り引く。
+    # (取引回数点は元々サンプルに比例するので対象外)
+    confidence = min(1.0, t_trades / MIN_TRADES_FOR_FULL_BT) if MIN_TRADES_FOR_FULL_BT > 0 else 1.0
+    quality = avg_wr * 0.4 + (avg_pf / 10) * 30 + stable * 20
+    score = round(quality * confidence + min(t_trades / 20, 1) * 10)
     rank = "★★★" if score >= 80 else "★★" if score >= 60 else "★" if score >= 40 else "△"
     return score, rank
 
@@ -203,7 +211,7 @@ def calc_bt_type(period_results: dict) -> str:
     avg_wr   = sum(r["win_rate"] for r in results) / len(results)
     avg_pf   = sum(min(r["pf"] if r["pf"] != float("inf") else 10, 10) for r in results) / len(results)
     stable   = sum(1 for r in results if r["total_pnl"] > 0) / len(results)
-    t_trades = sum(r["trades"] for r in results)
+    t_trades = max((r["trades"] for r in results), default=0)  # 重複窓を足さず実数(180日)で数える
     components = {
         "安定":  stable,
         "高WR":  avg_wr / 100,
@@ -296,7 +304,8 @@ def check_signal_on_date(symbol: str, strategy: str,
     )
 
 
-def backtest_one(symbol: str, name: str, strategy: str) -> dict | None:
+def backtest_one(symbol: str, name: str, strategy: str,
+                 max_hold: int | None = None) -> dict | None:
     calc_fn, em, sm, tm = STRATEGY_PARAMS[strategy]
     df = fetch(symbol, max(PERIODS))
     if df is None:
@@ -304,7 +313,8 @@ def backtest_one(symbol: str, name: str, strategy: str) -> dict | None:
 
     full_r = run_limit_backtest(symbol, name, df, calc_fn,
                                 em, sm, tm, max(PERIODS), strategy,
-                                entry_type=ENTRY_TYPE)
+                                entry_type=ENTRY_TYPE,
+                                max_hold=max_hold)
     if not full_r:
         return None
 
@@ -312,12 +322,11 @@ def backtest_one(symbol: str, name: str, strategy: str) -> dict | None:
     period_results: dict[int, dict] = {}
     for days in PERIODS:
         cutoff = today - timedelta(days=days)
-        # 表示用: 発注中のみ除外（保有中は取引明細に表示する）
+        # 表示用: 発注中も含める（銘柄詳細タブで当日シグナルを可視化するため）
         sub_display = [t for t in full_r["trade_log"]
-                       if t["signal_dt"].date() >= cutoff
-                       and t.get("reason") != "発注中"]
-        # 統計・スコア計算用: 保有中も除外（未決済ポジションはスコアに影響させない）
-        sub = [t for t in sub_display if t.get("reason") != "保有中"]
+                       if t["signal_dt"].date() >= cutoff]
+        # 統計・スコア計算用: 発注中・保有中を除外（未決済ポジションはスコアに影響させない）
+        sub = [t for t in sub_display if t.get("reason") not in ("発注中", "保有中")]
         if not sub_display:
             continue
         filled = len(sub)
@@ -338,6 +347,9 @@ def backtest_one(symbol: str, name: str, strategy: str) -> dict | None:
             avg_hold=sum(t["hold_days"] for t in sub) / filled if filled else 0.0,
             fill_rate=full_r["fill_rate"],
             trade_log=sub_display,  # 表示用は保有中を含む
+            # 不約定(発注枠は消費/pnl=0)。lss予算シミュだけが参照。窓でトリム。
+            nofill_log=[t for t in full_r.get("nofill_log", [])
+                        if t.get("entry_dt") is not None and t["entry_dt"].date() >= cutoff],
         )
 
     return dict(symbol=symbol, name=name, strategy=strategy,

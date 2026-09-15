@@ -37,7 +37,7 @@ from backtest_limit_entry import (
     fetch,
     run_limit_backtest,
     fetch_n225_return,
-    SLIPPAGE_STOP_PCT, FEE_PCT_ONE_WAY,
+    SLIPPAGE_STOP_PCT, FEE_PCT_ONE_WAY, LIMIT_ENTRY_MARGIN_PCT,
     INITIAL_CASH as _INITIAL_CASH,
     WORKERS as _DEFAULT_WORKERS,
 )
@@ -141,16 +141,29 @@ def calc_gap_short(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def calc_gap_short_tf(df: pd.DataFrame) -> pd.DataFrame:
+    """GAP_S のトレンドフィルタ版。GAP_S はトレンドフィルタが無く、中期上昇
+    トレンド中の一時的なギャップダウンでも空売りしてしまう(踏み上げリスク)。
+    終値 < MA50 を追加し、既に下降基調にある銘柄の売りに限定する
+    (買い側 VOLTF の裏返し)。"""
+    df = calc_gap_short(df)
+    ma50 = df["close"].rolling(50).mean()
+    df["entry_sig"] = df["entry_sig"] & (df["close"] < ma50)
+    return df
+
+
 # ── プリセット切替 (TRADING_MODE: conservative / aggressive) ──────────────────
 STRATEGY_PARAMS_CONSERVATIVE = {
     "DON_S": (calc_donchian_short,  0.0, 1.5, 3.0),
     "MOM_S": (calc_momentum_short,  0.0, 1.5, 3.0),
     "GAP_S": (calc_gap_short,       0.0, 2.0, 1.5),  # sweep最適: sm=2.0, tm=1.5 (PF1.30)
+    "GAP_S_TF": (calc_gap_short_tf, 0.0, 2.0, 1.5),  # GAP_S + MA50下方フィルタ
 }
 STRATEGY_PARAMS_AGGRESSIVE = {
     "DON_S": (calc_donchian_short,  0.0, 1.5, 2.0),
     "MOM_S": (calc_momentum_short,  0.0, 1.5, 2.0),
     "GAP_S": (calc_gap_short,       0.0, 2.0, 1.5),  # sweep最適: sm=2.0, tm=1.5
+    "GAP_S_TF": (calc_gap_short_tf, 0.0, 2.0, 1.5),  # GAP_S + MA50下方フィルタ
 }
 
 import os as _os
@@ -164,6 +177,11 @@ else:
 ENTRY_TYPE = "stop_sell"
 
 
+# 薄サンプル減点の閾値: 最長窓(365日)の実取引数がこれ未満だと、勝率/PF/安定の
+# 品質点(最大80点)を線形に割り引く。少数トレードでの過大評価(例: 2取引で91点)を抑制。
+MIN_TRADES_FOR_FULL_BT = 10
+
+
 def calc_recommend_score(period_results: dict) -> tuple[int, str]:
     results = [r for r in period_results.values() if r and r.get("trades", 0) > 0]
     if not results:
@@ -173,12 +191,12 @@ def calc_recommend_score(period_results: dict) -> tuple[int, str]:
                    for r in results) / len(results)
     stable   = sum(1 for r in results if r["total_pnl"] > 0) / len(results)
     t_trades = sum(r["trades"] for r in results)
-    score = round(
-        avg_wr * 0.4
-        + (avg_pf / 10) * 30
-        + stable * 20
-        + min(t_trades / 20, 1) * 10
-    )
+    # 薄サンプル減点: 実サンプル数=最長窓の取引数で信頼度を判定し、
+    # 勝率/PF/安定(最大80点)を線形に割り引く(少数トレードの満点化を抑制)。
+    _sample = max((r["trades"] for r in results), default=0)
+    confidence = min(1.0, _sample / MIN_TRADES_FOR_FULL_BT) if MIN_TRADES_FOR_FULL_BT > 0 else 1.0
+    quality = avg_wr * 0.4 + (avg_pf / 10) * 30 + stable * 20
+    score = round(quality * confidence + min(t_trades / 20, 1) * 10)
     rank = "★★★" if score >= 80 else "★★" if score >= 60 else "★" if score >= 40 else "△"
     return score, rank
 
@@ -213,15 +231,17 @@ def check_signal_on_date(symbol: str, strategy: str,
     close_prev = float(prev["close"])
     current_p  = float(df.iloc[prev_idx]["close"])
 
-    order_p = close_prev - atr_v * em
-    sl      = order_p + atr_v * sm   # 損切り (ABOVE)
-    tp      = order_p - atr_v * tm   # 目標   (BELOW)
+    order_p     = close_prev - atr_v * em
+    sl          = order_p + atr_v * sm   # 損切り (ABOVE)
+    tp          = order_p - atr_v * tm   # 目標   (BELOW)
+    limit_entry = order_p * (1.0 - LIMIT_ENTRY_MARGIN_PCT)  # 指値下限 (-3%)
 
     sig_dt   = df.index[prev_idx]
     sig_date = sig_dt.strftime("%Y-%m-%d") if hasattr(sig_dt, "strftime") else str(sig_dt)
 
     return dict(
         order_price=round(order_p, 0),
+        limit_entry_price=round(limit_entry, 0),  # 指値下限 (-3%)
         stop_price=round(sl, 0),
         target_price=round(tp, 0),
         current_price=current_p,
@@ -230,7 +250,8 @@ def check_signal_on_date(symbol: str, strategy: str,
     )
 
 
-def backtest_one(symbol: str, name: str, strategy: str) -> dict | None:
+def backtest_one(symbol: str, name: str, strategy: str,
+                 max_hold: int | None = None) -> dict | None:
     calc_fn, em, sm, tm = STRATEGY_PARAMS[strategy]
     df = fetch(symbol, max(PERIODS))
     if df is None:
@@ -239,7 +260,8 @@ def backtest_one(symbol: str, name: str, strategy: str) -> dict | None:
     for days in PERIODS:
         r = run_limit_backtest(symbol, name, df, calc_fn,
                                em, sm, tm, days, strategy,
-                               entry_type=ENTRY_TYPE)
+                               entry_type=ENTRY_TYPE,
+                               max_hold=max_hold)
         if r and r["trades"] >= 1:
             period_results[days] = r
     return dict(symbol=symbol, name=name, strategy=strategy,
