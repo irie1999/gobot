@@ -40,11 +40,29 @@ r"""1分足2年で **指値@始値の約定率と取り逃しの損益** を測�
      理想上界(B−A)でも **日クラスタ t < 2** なら現行維持。
      上界が有意でも、**悲観(C−A)と前半・後半の両方**で残らなければ変更しない。
 
+★★ 「何分まで待てばいいか」（2026-09-15 追加）
+  締切を伸ばしても **注文する銘柄は変わらない**（予算は発注時に消費する）。
+  変わるのは「そのうち何件 刺さるか」だけ。しかも N は約定時刻が損益を
+  変えない（損益 = (始値 − 当日終値) × 株数 / 指値＝始値なので約定値は常に始値）。
+  → 締切の価値は **『待つことで増えた約定』が1件あたりプラスか**に尽きる。
+     合計の比較ではなく **限界(増分)** で見ること。合計は必ず単調に増える
+     ので「遅いほど良い」に見えてしまう。
+
+  ⛔ 採用条件（回す前に宣言。結果を見て緩めない）
+     ① TRAIN（--split より前）で増分の 円/件 > 0 かつ 日クラスタ t ≥ 2
+     ② TEST（--split 以降）でも 円/件 > 0
+     ③ ①②を満たす **最も早い** 締切を採る（遅いほど無防備な時間が伸びる）
+     ④ --split 無しの数字で締切を選ばない。同じ2年で設定を決めることになる
+
+  ⚠ この表に **無防備な時間の費用**は入っていない。建ててから引けMOC を
+     置くまで N には watcher が無い（§18.46 の事故 = 翌朝強制決済）。
+     増分がゼロ近傍なら **短いほうを採る**。
+
 ⛔ 朝の発注コードには一切触らない。オフライン専用。
 
 使い方:
     python check_1m_data.py --symbols symbols_listed_prime.py   # 先に在庫確認
-    python analyze_fill_1m.py --days 760 --workers 8
+    python analyze_fill_1m.py --days 760 --workers 8 --split 2025-09-15
     python analyze_fill_1m.py --days 760 --calibrate tick_truth.csv
 """
 from __future__ import annotations
@@ -83,6 +101,9 @@ ap.add_argument("--cancel", default="09:10",
 #     設定を決めることになる(§18.28 の作法)。判定は別に TRAIN/TEST を割る。
 ap.add_argument("--cancel-sweep", default="09:03,09:05,09:10,09:15,09:30",
                 help="締切をいくつか並べて約定率と損益を出す（比較用・主判定には使わない）")
+ap.add_argument("--split", default="",
+                help="TRAIN/TEST を割る日 YYYY-MM-DD（これ以降が TEST）。"
+                     "⛔ 空だと締切を選ぶ根拠にならない（同じ期間で決めることになる）")
 ap.add_argument("--live-grace", type=int, default=11,
                 help="ライブ再現の取消 = 最後のwatch銘柄が寄った時刻 + この秒数"
                      "（実測 2026-09-15: 09:02:59 に寄って 09:03:10 に取消）")
@@ -425,6 +446,83 @@ if _SWEEP:
     print(f"\n  ⚠ 遅く切るほど約定率は上がるが、**無防備な時間も伸びる**"
           f"（建ててから引けMOC を置くまで watcher が無い / §18.46）。"
           f"\n     この表にその費用は入っていません")
+
+# ══════════════════════════════════════════════════════════════════════
+# ★★ 何分まで待てばいいか — 限界(増分)で測る
+# ══════════════════════════════════════════════════════════════════════
+# ⛔ 合計で比べてはいけない。締切を伸ばすと約定は **必ず単調に増える**ので、
+#   合計は「遅いほど良い」に決まっている。知りたいのは
+#   「あと5分待って増えた約定が、1件あたりプラスか」= 限界。
+#
+# ★ これが成立するのは N が
+#     ① 予算を **発注時**に消費する → 締切を変えても注文する銘柄は同じ
+#     ② 約定時刻が損益を変えない（損益 = (始値 − 当日終値) × 株数）
+#   の2つを満たすから。①②が崩れる戦略にこの表を流用しないこと。
+if _SWEEP and len(_DET):
+    _bd = sorted(set(_SWEEP))
+    _TS = _DET["touch_ts"].fillna("").astype(str)
+
+    def _within(hi: str):
+        """その締切までに『寄りの次のバー以降』で指値へ触れたか。"""
+        return (_TS != "") & (_TS <= f"{hi}:00")
+
+    def _marginal(_keep, _label: str) -> None:
+        _msk = _DET["date"].isin(_keep)
+        _sub = _DET[_msk]
+        _ds = sorted(_keep)
+        if not len(_sub) or not _ds:
+            print(f"\n  【{_label}】 該当なし")
+            return
+        print(f"\n  【{_label}】 {len(_ds)}営業日 / 発注 {len(_sub):,}件"
+              f" / 判定不能 {int((_sub['cls'] == '判定不能').sum()):,}件は除外")
+        print(f"  {'待つ区間':>16}{'増える約定':>11}{'円/件':>10}"
+              f"{'合計':>14}{'日次t':>8}")
+        _lo, _cn, _ct = "00:00", 0, 0.0
+        for _hi in _bd:
+            _add = _msk & _within(_hi) & ~_within(_lo)
+            _n = int(_add.sum())
+            _g = (_DET[_add].groupby("date")["pnl_at_open"].sum()
+                  .reindex(_ds).fillna(0.0).tolist())
+            _m, _sd, _tv = _t(_g)
+            _tot = float(_DET[_add]["pnl_at_open"].sum())
+            _cn, _ct = _cn + _n, _ct + _tot
+            print(f"  {_lo}→{_hi:>5}{_n:>11,}"
+                  f"{(_tot / _n if _n else 0.0):>+10,.0f}"
+                  f"{_tot:>+14,.0f}{_tv:>+8.2f}")
+            _lo = _hi
+        # ★ 検算: 区間の足し上げ == 最後の締切までの約定（入れ子なので必ず一致）
+        _fin = _msk & _within(_bd[-1])
+        _fn, _ft = int(_fin.sum()), float(_DET[_fin]["pnl_at_open"].sum())
+        _ok = (_cn == _fn) and abs(_ct - _ft) < 1.0
+        print(f"  {'合計':>16}{_cn:>11,}"
+              f"{(_ct / _cn if _cn else 0.0):>+10,.0f}{_ct:>+14,.0f}"
+              f"   {'✅' if _ok else '⛔ 検算不一致'}")
+        if not _ok:
+            print(f"  ⛔ 区間の足し上げ {_cn:,}件/{_ct:+,.0f}円 が "
+                  f"{_bd[-1]}まで {_fn:,}件/{_ft:+,.0f}円 と合いません")
+
+    print(f"\n{'=' * 78}\n■ ★★ 何分まで待てばいいか（**限界**で測る）\n{'=' * 78}")
+    print(f"  「あと数分待って **増えた約定だけ**」を取り出す。合計で比べると"
+          f"\n  約定は単調に増えるので必ず『遅いほど良い』に見えてしまう。")
+    print(f"  ⚠ 1分足なので時刻の粒度は **±1分**。バーのラベルぶんの誤差が出る")
+
+    _alld = sorted(_DET["date"].unique())
+    if a.split:
+        _tr = [d for d in _alld if str(d) < a.split]
+        _te = [d for d in _alld if str(d) >= a.split]
+        _marginal(set(_tr), f"TRAIN 〜{a.split} の手前")
+        _marginal(set(_te), f"TEST  {a.split}〜")
+        print(f"\n  ⛔ 採用条件（回す前に宣言済み / 冒頭の docstring）")
+        print(f"     ① TRAIN で 円/件 > 0 かつ 日次 t ≥ 2")
+        print(f"     ② TEST でも 円/件 > 0")
+        print(f"     ③ ①②を満たす **最も早い** 締切を採る"
+              f"（遅いほど無防備な時間が伸びる / §18.46）")
+    else:
+        _marginal(set(_alld), "全期間")
+        print(f"\n  ⛔⛔ **--split を付けていないので、この表で締切を選べません。**"
+              f"\n     同じ期間で設定を決めることになります(§18.28)。例:"
+              f"\n       python analyze_fill_1m.py --days 760 --workers 8"
+              f" --split 2025-09-15")
 
 print(f"\n{'=' * 78}\n■ ★ 主判定 — 日ごとの対応差（仕様 {a.cancel}）\n{'=' * 78}")
 print(f"  A 現行(指値@始値) / B 理想上界(全部 始値) / C 悲観(未約定を次バー安値)")
