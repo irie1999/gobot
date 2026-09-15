@@ -41,12 +41,23 @@ r"""1分足2年で **指値@始値の約定率と取り逃しの損益** を測�
      上界が有意でも、**悲観(C−A)と前半・後半の両方**で残らなければ変更しない。
 
 ★★ 「何分まで待てばいいか」（2026-09-15 追加）
-  締切を伸ばしても **注文する銘柄は変わらない**（予算は発注時に消費する）。
-  変わるのは「そのうち何件 刺さるか」だけ。しかも N は約定時刻が損益を
-  変えない（損益 = (始値 − 当日終値) × 株数 / 指値＝始値なので約定値は常に始値）。
+  N は約定時刻が損益を変えない（損益 = (始値 − 当日終値) × 株数 /
+  指値＝始値なので約定値は常に始値。09:00 に刺さっても 09:09 に刺さっても同額）。
   → 締切の価値は **『待つことで増えた約定』が1件あたりプラスか**に尽きる。
      合計の比較ではなく **限界(増分)** で見ること。合計は必ず単調に増える
      ので「遅いほど良い」に見えてしまう。
+
+  ⛔ 締切を伸ばすと効果が **2つ** 出る。混ぜてはいけない（レビュー指摘）:
+     ① 同じ注文を長く残す効果   … 発注済みの銘柄が、あとから刺さる
+     ② 遅く寄る銘柄を新たに発注 … 09:07 に寄る銘柄は 09:03 締切では
+                                  ポーリングが終わっていて注文できない
+     ①②は厳密に足し算になる。予算は発注時に消費し、発注順は寄り時刻の
+     昇順なので、締切を伸ばして増える銘柄は **末尾に足される**だけで
+     予算の押し出しが起きない（短い締切の集合 ⊂ 長い締切の集合の前半）。
+
+  ⛔ **タッチ ≠ 約定**。指値ちょうどの約定は時間優先(板の行列)なので
+     自分が刺さったとは限らない。指値より **厳密に上**で約定が出たときだけ
+     価格優先で確実。→ 下限(厳密のみ)と上限(同値も約定扱い)の両方を出す。
 
   ⛔ 採用条件（回す前に宣言。結果を見て緩めない）
      ① TRAIN（--split より前）で増分の 円/件 > 0 かつ 日クラスタ t ≥ 2
@@ -127,6 +138,13 @@ _SWEEP = [t.strip() for t in a.cancel_sweep.split(",") if t.strip()]
 for _t0 in _SWEEP:
     if len(_t0) != 5 or _t0[2] != ":" or not _t0.replace(":", "").isdigit():
         sys.exit(f"[error] --cancel-sweep の {_t0!r} は HH:MM ではありません")
+_BD = sorted(set(_SWEEP))
+# ★ 限界(増分)の分解に使う明細は **いちばん遅い締切**で集める。
+#   予算は発注時に消費し、発注順は寄り時刻の昇順なので、締切を伸ばして
+#   増える銘柄は必ず **末尾に足される**。つまり短い締切の集合は長い締切の
+#   集合の **前半そのもの**で、予算の押し出しが起きない(入れ子)。
+#   → いちばん遅い締切の明細を open_ts で切れば、どの締切も再現できる。
+_FULLSC = f"c{_BD[-1].replace(':', '')}" if _BD else ""
 
 # ══════════════════════════════════════════════════════════════════════
 # 1分足の読み込み
@@ -254,15 +272,23 @@ def _one(sym: str):
         _o = _b.iloc[0]
         _rec = {"open_ts": _b.index[0], "o1_open": float(_o["open"]),
                 "o1_high": float(_o["high"]),
-                "touch_ts": None, "next_low": float("nan")}
+                "touch_ts": None, "touch_strict_ts": None,
+                "next_low": float("nan")}
         _op = _op_of.get((_d, sym))
         if _op is not None and len(_b) > 1:
             # ⛔ **寄りバーは使わない**(落とし穴②)。次のバー以降だけ見る
             _post = _b.iloc[1:]
             _rec["next_low"] = float(_post["low"].iloc[0])
-            _hit = _post.index[_post["high"] >= _op - 1e-9]
+            # ⛔⛔ **タッチ ≠ 約定**(2026-09-15 レビュー指摘)。
+            #   指値ちょうどの約定は **時間優先(板の行列)** なので、自分が
+            #   刺さったとは限らない。指値より **厳密に上**で約定が出たときだけ
+            #   価格優先で必ず自分が先に約定する。→ 2つ持って上下限を出す。
+            _hit = _post.index[_post["high"] >= _op - 1e-9]      # 同値を含む
             if len(_hit):
                 _rec["touch_ts"] = _hit[0]
+            _hs = _post.index[_post["high"] > _op + 1e-9]        # 厳密に上
+            if len(_hs):
+                _rec["touch_strict_ts"] = _hs[0]
         out[_d] = _rec
     return sym, out
 
@@ -289,18 +315,27 @@ print(f"  読めた {len(_bar):,}銘柄日"
 _CAPY = a.budget * 10_000.0
 _days_out: list = []
 _det: list = []
+_full: list = []          # いちばん遅い締切での明細（限界の分解に使う）
 _skip_split = 0
 
 
-def _cls_of(rec: dict, op: float, cut) -> str:
-    """3分類。cut までに寄りの次のバーで始値に触れたか。"""
+def _cls_of(rec: dict, op: float, cut) -> tuple:
+    """3分類 + 判定不能の理由。返り値 (cls, why)。
+
+    ⛔ **タッチ ≠ 約定**。指値ちょうどの約定は時間優先(板の行列)なので、
+       自分が刺さったとは限らない。指値より厳密に上で約定が出たときだけ、
+       価格優先で必ず自分が先に約定する。
+    """
+    _ts = rec.get("touch_strict_ts")
+    if _ts is not None and _ts <= cut:
+        return "約定", ""                    # 価格優先。確実
     _t = rec["touch_ts"]
     if _t is not None and _t <= cut:
-        return "約定"
+        return "判定不能", "同値"            # 指値ちょうど。行列次第
     # 板寄せが寄りバーの高値 = その1分に始値以上の約定が他に無い
     if rec["o1_high"] <= op + 1e-9:
-        return "不約定"
-    return "判定不能"
+        return "不約定", ""
+    return "判定不能", "寄り"                # 寄りの1分に指値以上の約定がある
 
 
 for _d in sorted(_watch):
@@ -349,13 +384,20 @@ for _d in sorted(_watch):
         _nA = _nB = 0
         _cc = {"約定": 0, "不約定": 0, "判定不能": 0}
         for _r, _b, _op in _hits:
+            # ⛔⛔ **締切より後に寄った銘柄は、そもそも注文できない**
+            #   (2026-09-15 レビュー指摘)。09:07 に寄る銘柄は 09:03 締切の
+            #   ポーリングでは検知されないので発注に至らない。ここを入れないと
+            #   「同じ注文を長く残す効果」と「遅く寄る銘柄を新たに発注できる
+            #   効果」が混ざり、短い締切を過大評価する。
+            if _b["open_ts"] > _cut:
+                continue
             _cost = _op * a.qty
             if _cost > _cash:
                 continue              # 予算切れ。⛔ 埋め直さない(発注時に消費)
             _cash -= _cost
             _nB += 1
             _close = _op - float(_r.pnl) / a.qty         # ショート: 当日終値
-            _k = _cls_of(_b, _op, _cut)
+            _k, _why = _cls_of(_b, _op, _cut)
             _cc[_k] += 1
 
             def _pat(px: float, _c=_close) -> float:
@@ -372,16 +414,24 @@ for _d in sorted(_watch):
                     _Aopt += _pat(_op)                   # 楽観
                 _lo = _b["next_low"]
                 _C += _pat(_op if (_lo != _lo) else _lo)  # 悲観(次バー安値)
-            if _cn == "spec":
-                _det.append({
+            if _cn in ("spec", _FULLSC):
+                _rec_o = {
                     "date": _d, "symbol": str(_r.symbol), "cls": _k,
+                    "why": _why,
                     "gap_bp": float(_r.gap_bp), "open_p": _op,
                     "o1_high": _b["o1_high"], "next_low": _b["next_low"],
                     "touch_ts": (str(_b["touch_ts"])[11:19]
                                  if _b["touch_ts"] is not None else ""),
+                    "touch_strict_ts": (str(_b["touch_strict_ts"])[11:19]
+                                        if _b["touch_strict_ts"] is not None
+                                        else ""),
                     "open_ts": str(_b["open_ts"])[11:19],
                     "pnl_at_open": _pat(_op),
-                })
+                }
+                if _cn == "spec":
+                    _det.append(_rec_o)
+                if _cn == _FULLSC:
+                    _full.append(dict(_rec_o))
         _row.update({
             f"{_cn}_built": _nB, f"{_cn}_filled": _nA,
             f"{_cn}_A": _A, f"{_cn}_Aopt": _Aopt,
@@ -413,10 +463,20 @@ print(f"\n{'=' * 78}\n■ 約定の3分類（仕様 {a.cancel} 取消）\n{'=' *
 _tot = len(_DET)
 for _k in ("約定", "不約定", "判定不能"):
     _v = int((_DET["cls"] == _k).sum())
-    print(f"  {_k:8} {_v:>7,}件  ({_v / max(1, _tot) * 100:5.1f}%)")
-print(f"  ⚠ **判定不能** = 寄りの1分の中でしか始値以上の約定が無かったもの。"
-      f"\n     1分足では自分の注文の前か後か分からないので、"
-      f"楽観(A_opt)と悲観(A)の両方を出します")
+    _ex = ""
+    if _k == "判定不能" and "why" in _DET.columns:
+        _w1 = int(((_DET["cls"] == _k) & (_DET["why"] == "同値")).sum())
+        _w2 = int(((_DET["cls"] == _k) & (_DET["why"] == "寄り")).sum())
+        _ex = f"   （同値 {_w1:,} / 寄り {_w2:,}）"
+    print(f"  {_k:8} {_v:>7,}件  ({_v / max(1, _tot) * 100:5.1f}%){_ex}")
+print(f"  ⚠ **判定不能** は2種類（どちらも楽観 A_opt と悲観 A の両方で出す）")
+print(f"     **同値** … 指値ちょうどでしか約定が出ていない。板の行列"
+      f"(時間優先)次第\n              なので刺さったとは限らない"
+      f"（2026-09-15 レビュー指摘）")
+print(f"     **寄り** … 寄りの1分の中にしか指値以上の約定が無い。自分の注文の"
+      f"\n              前か後か 1分足では分からない")
+print(f"  ★ 指値より **厳密に上**で約定が出たときだけ「約定」とした。"
+      f"価格優先なので\n     そこは確実に自分が先に刺さる")
 
 print(f"\n{'=' * 78}\n■ 取消時刻で約定率がどう変わるか\n{'=' * 78}")
 print(f"  ⛔ N2 までのライブは **watch の最後の銘柄が寄った時刻**で取消していた"
@@ -454,59 +514,91 @@ if _SWEEP:
 #   合計は「遅いほど良い」に決まっている。知りたいのは
 #   「あと5分待って増えた約定が、1件あたりプラスか」= 限界。
 #
-# ★ これが成立するのは N が
-#     ① 予算を **発注時**に消費する → 締切を変えても注文する銘柄は同じ
-#     ② 約定時刻が損益を変えない（損益 = (始値 − 当日終値) × 株数）
-#   の2つを満たすから。①②が崩れる戦略にこの表を流用しないこと。
-if _SWEEP and len(_DET):
-    _bd = sorted(set(_SWEEP))
-    _TS = _DET["touch_ts"].fillna("").astype(str)
+# ★ 締切を伸ばすと効果が **2つ** 出る。混ぜると「待ったから良かった」のか
+#   分からなくなる(2026-09-15 レビュー指摘)ので、必ず分けて出す:
+#     ① 同じ注文を長く残す効果      … 既に発注済みの銘柄が、あとから刺さる
+#     ② 遅く寄る銘柄を新たに発注    … 09:07 に寄る銘柄は 09:03 締切では
+#                                     そもそも注文できない
+#   ①②は厳密に足し算になる。予算は発注時に消費し、発注順は寄り時刻の昇順
+#   なので、締切を伸ばして増える銘柄は **末尾に足される**だけ。短い締切の
+#   集合は長い締切の集合の前半そのもので、予算の押し出しが起きない。
+#
+# ⛔ **タッチ ≠ 約定**。指値ちょうどは行列次第なので、下限(厳密に上で約定が
+#   出たものだけ)と上限(同値も約定扱い)の両方を出す。
+_FULL = pd.DataFrame(_full)
+if _SWEEP and len(_FULL):
+    _bd = list(_BD)
+    _OP = _FULL["open_ts"].fillna("").astype(str)
+    _TS = _FULL["touch_ts"].fillna("").astype(str)
+    _TT = _FULL["touch_strict_ts"].fillna("").astype(str)
 
-    def _within(hi: str):
-        """その締切までに『寄りの次のバー以降』で指値へ触れたか。"""
-        return (_TS != "") & (_TS <= f"{hi}:00")
+    def _ordered(hi: str):
+        """その締切までに寄った = **発注できた**銘柄。"""
+        return _OP <= f"{hi}:00"
+
+    def _fill(hi: str, strict: bool):
+        _s = _TT if strict else _TS
+        return (_s != "") & (_s <= f"{hi}:00")
+
+    def _stat(_m, _ds) -> tuple:
+        """(件数, 合計, 円/件, 日クラスタt)"""
+        _n = int(_m.sum())
+        _tot = float(_FULL[_m]["pnl_at_open"].sum())
+        _g = (_FULL[_m].groupby("date")["pnl_at_open"].sum()
+              .reindex(_ds).fillna(0.0).tolist())
+        return _n, _tot, (_tot / _n if _n else 0.0), _t(_g)[2]
 
     def _marginal(_keep, _label: str) -> None:
-        _msk = _DET["date"].isin(_keep)
-        _sub = _DET[_msk]
+        _msk = _FULL["date"].isin(_keep)
         _ds = sorted(_keep)
-        if not len(_sub) or not _ds:
+        if not int(_msk.sum()) or not _ds:
             print(f"\n  【{_label}】 該当なし")
             return
-        print(f"\n  【{_label}】 {len(_ds)}営業日 / 発注 {len(_sub):,}件"
-              f" / 判定不能 {int((_sub['cls'] == '判定不能').sum()):,}件は除外")
-        print(f"  {'待つ区間':>16}{'増える約定':>11}{'円/件':>10}"
-              f"{'合計':>14}{'日次t':>8}")
-        _lo, _cn, _ct = "00:00", 0, 0.0
-        for _hi in _bd:
-            _add = _msk & _within(_hi) & ~_within(_lo)
-            _n = int(_add.sum())
-            _g = (_DET[_add].groupby("date")["pnl_at_open"].sum()
-                  .reindex(_ds).fillna(0.0).tolist())
-            _m, _sd, _tv = _t(_g)
-            _tot = float(_DET[_add]["pnl_at_open"].sum())
-            _cn, _ct = _cn + _n, _ct + _tot
-            print(f"  {_lo}→{_hi:>5}{_n:>11,}"
-                  f"{(_tot / _n if _n else 0.0):>+10,.0f}"
-                  f"{_tot:>+14,.0f}{_tv:>+8.2f}")
-            _lo = _hi
-        # ★ 検算: 区間の足し上げ == 最後の締切までの約定（入れ子なので必ず一致）
-        _fin = _msk & _within(_bd[-1])
-        _fn, _ft = int(_fin.sum()), float(_DET[_fin]["pnl_at_open"].sum())
-        _ok = (_cn == _fn) and abs(_ct - _ft) < 1.0
-        print(f"  {'合計':>16}{_cn:>11,}"
-              f"{(_ct / _cn if _cn else 0.0):>+10,.0f}{_ct:>+14,.0f}"
-              f"   {'✅' if _ok else '⛔ 検算不一致'}")
-        if not _ok:
-            print(f"  ⛔ 区間の足し上げ {_cn:,}件/{_ct:+,.0f}円 が "
-                  f"{_bd[-1]}まで {_fn:,}件/{_ft:+,.0f}円 と合いません")
+        print(f"\n  【{_label}】 {len(_ds)}営業日 / "
+              f"いちばん遅い締切({_bd[-1]})までに発注 {int(_msk.sum()):,}件")
+
+        for _ttl, _strict in (("下限（指値より厳密に上で約定が出たものだけ）",
+                               True),
+                              ("上限（指値ちょうどのタッチも約定扱い）",
+                               False)):
+            print(f"\n  ◆ {_ttl}")
+            print(f"  {'待つ区間':>14}"
+                  f"{'①長く残す':>11}{'円/件':>9}{'合計':>13}{'t':>7}"
+                  f"{'②新規発注':>11}{'円/件':>9}{'合計':>13}{'t':>7}")
+            _lo, _s1, _s2 = "00:00", 0.0, 0.0
+            for _hi in _bd:
+                # ① 既に発注済み(open_ts <= _lo)で、締切を伸ばして刺さった
+                _a1 = (_msk & _ordered(_lo)
+                       & _fill(_hi, _strict) & ~_fill(_lo, _strict))
+                # ② 新たに発注できた銘柄(_lo < open_ts <= _hi)のうち刺さった
+                _a2 = (_msk & _ordered(_hi) & ~_ordered(_lo)
+                       & _fill(_hi, _strict))
+                _n1, _t1, _p1, _v1 = _stat(_a1, _ds)
+                _n2, _t2, _p2, _v2 = _stat(_a2, _ds)
+                _s1, _s2 = _s1 + _t1, _s2 + _t2
+                # ★ 最初の区間は比較相手が無い = **基準**。①が必ず0件になり、
+                #   ②に全部入る。ここを「新規発注の効果」と読まないこと。
+                _lbl = f"〜{_hi} 基準" if _lo == "00:00" else f"{_lo}→{_hi}"
+                print(f"  {_lbl:>14}"
+                      f"{_n1:>11,}{_p1:>+9,.0f}{_t1:>+13,.0f}{_v1:>+7.2f}"
+                      f"{_n2:>11,}{_p2:>+9,.0f}{_t2:>+13,.0f}{_v2:>+7.2f}")
+                _lo = _hi
+            # ★ 検算: ①+② の足し上げ == いちばん遅い締切までの約定
+            _fin = _msk & _ordered(_bd[-1]) & _fill(_bd[-1], _strict)
+            _ft = float(_FULL[_fin]["pnl_at_open"].sum())
+            _ok = abs(_s1 + _s2 - _ft) < 1.0
+            print(f"  {'①+②':>14}{'':>11}{'':>9}{_s1 + _s2:>+13,.0f}"
+                  f"   {'✅ 検算一致' if _ok else '⛔ 検算不一致'}"
+                  + ("" if _ok else f" (期待 {_ft:+,.0f})"))
 
     print(f"\n{'=' * 78}\n■ ★★ 何分まで待てばいいか（**限界**で測る）\n{'=' * 78}")
     print(f"  「あと数分待って **増えた約定だけ**」を取り出す。合計で比べると"
           f"\n  約定は単調に増えるので必ず『遅いほど良い』に見えてしまう。")
+    print(f"  ★ 効果を2つに分ける（混ぜると『待ったから良かった』のか不明）:"
+          f"\n     ① 同じ注文を長く残す効果  ② 遅く寄る銘柄を新たに発注できる効果")
     print(f"  ⚠ 1分足なので時刻の粒度は **±1分**。バーのラベルぶんの誤差が出る")
 
-    _alld = sorted(_DET["date"].unique())
+    _alld = sorted(_FULL["date"].unique())
     if a.split:
         _tr = [d for d in _alld if str(d) < a.split]
         _te = [d for d in _alld if str(d) >= a.split]
