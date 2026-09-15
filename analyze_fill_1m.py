@@ -548,6 +548,42 @@ if _SWEEP and len(_FULL):
               .reindex(_ds).fillna(0.0).tolist())
         return _n, _tot, (_tot / _n if _n else 0.0), _t(_g)[2]
 
+    def _grid(_keep, _label: str) -> None:
+        """受付締切 × 取消締切 の2次元。**この2つは別の設定にできる。**
+
+        ★ 2026-09-15 の歩み値(8月20営業日)で、09:05→09:10 の内訳が
+            ① 同じ注文を長く残す   +9,100円
+            ② 遅く寄る銘柄を新規発注 −9,400円
+          と相殺していた。合計(−300円)だけ見ると「どちらでも同じ」に見えるが、
+          **②だけ切れば①が残る**可能性がある。それを直接見る表。
+
+        ⛔ この表で設定を選ばないこと。同じ期間で決めることになる。
+           別の月・別の期間で再現したときだけ候補にする(§18.28)。
+        """
+        _msk = _FULL["date"].isin(_keep)
+        if not int(_msk.sum()):
+            return
+        for _ttl, _strict in (("下限（厳密に上で約定）", True),
+                              ("上限（同値も約定扱い）", False)):
+            print(f"\n  ◆ 受付締切 × 取消締切 — {_ttl} / {_label}")
+            # ⛔ f-string の式に \ は書けない(Python 3.11 以前)。変数に逃がす
+            _hdr = "受付 / 取消"
+            print(f"  {_hdr:>10}" + "".join(f"{_c:>13}" for _c in _bd))
+            for _ac in _bd:
+                _cells = []
+                for _cc2 in _bd:
+                    if _cc2 < _ac:
+                        _cells.append(f"{'—':>13}")
+                        continue
+                    _m = _msk & _ordered(_ac) & _fill(_cc2, _strict)
+                    _v = float(_FULL[_m]["pnl_at_open"].sum())
+                    # 対角 = 受付と取消が同じ = 現行の作り
+                    _cells.append(f"{_v:>+12,.0f}" + ("*" if _cc2 == _ac
+                                                      else " "))
+                print(f"  {_ac:>10}" + "".join(_cells))
+            print(f"  * = 受付と取消が同じ（現行の作り）。"
+                  f"右上ほど『受付は早く締め、注文は長く残す』")
+
     def _marginal(_keep, _label: str) -> None:
         _msk = _FULL["date"].isin(_keep)
         _ds = sorted(_keep)
@@ -604,6 +640,8 @@ if _SWEEP and len(_FULL):
         _te = [d for d in _alld if str(d) >= a.split]
         _marginal(set(_tr), f"TRAIN 〜{a.split} の手前")
         _marginal(set(_te), f"TEST  {a.split}〜")
+        _grid(set(_tr), f"TRAIN 〜{a.split} の手前")
+        _grid(set(_te), f"TEST  {a.split}〜")
         print(f"\n  ⛔ 採用条件（回す前に宣言済み / 冒頭の docstring）")
         print(f"     ① TRAIN で 円/件 > 0 かつ 日次 t ≥ 2")
         print(f"     ② TEST でも 円/件 > 0")
@@ -611,6 +649,7 @@ if _SWEEP and len(_FULL):
               f"（遅いほど無防備な時間が伸びる / §18.46）")
     else:
         _marginal(set(_alld), "全期間")
+        _grid(set(_alld), "全期間")
         print(f"\n  ⛔⛔ **--split を付けていないので、この表で締切を選べません。**"
               f"\n     同じ期間で設定を決めることになります(§18.28)。例:"
               f"\n       python analyze_fill_1m.py --days 760 --workers 8"
