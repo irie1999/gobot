@@ -1808,7 +1808,12 @@ _QPATH = Path(__file__).resolve().parent / f"n_quotes_{_dt.date.today():%Y%m%d}.
 #     N1c … PUSH あり。ただし ①前日の始値で起床済みになり合図が出ない
 #           ②ping で73秒ごとに自分で切断(〜2026-09-10)
 #     N2  … PUSH + イベント駆動で起床 + ping 停止 (2026-09-11〜)
-_EXEC_VER = "N2"
+#     N3  … **注文を --poll-until まで残す** (2026-09-15〜)。
+#           N2 までは「全銘柄が寄ったらループを抜ける」ため、注文の有効時間が
+#           『最後の watch 銘柄が寄った時刻』になっていた(実例 09-15: 09:03:10
+#           で未約定4件を取消。09:10 まで残していない)。**約定率に直接効く**
+#           ので N2 と混ぜない。
+_EXEC_VER = "N3"
 # ⛔ ts(周回の時刻)を秒単位の分析に使わないこと。1周に約6秒かかるので、
 #   1銘柄目と50銘柄目では6秒ずれる。**req_ts / resp_ts を使う**(ミリ秒つき)。
 #
@@ -2131,6 +2136,8 @@ if args.poll:
           flush=True)
     _n_poll = 0
     _n_wake = 0
+    # 全部寄ったあと「待ちます」を1回だけ出すためのフラグ(list で可変に)
+    _waited_note = [False]
     # ⛔ 合図を消すのは **読む前**。読んだ後に消すと、読み取りと clear の
     #   すきまに寄った銘柄の合図を捨ててしまい、次の時間切れまで気づけない。
     _WAKE = (getattr(_WS, "opened", None)
@@ -2180,8 +2187,30 @@ if args.poll:
         _dump(_rows)
         if args.now and _n_poll >= max(1, args.now_polls):
             break
-        if _dt.datetime.now() >= _t_end or len(_seen) >= len(_syms):
+        # ⛔⛔ **全銘柄が寄ってもループを抜けない** (2026-09-15 発覚)。
+        #   以前は `len(_seen) >= len(_syms)` で即 break していた。
+        #   ループを抜けると直後に **未約定の注文を全部取消**するので、
+        #   注文の有効時間が「最後の watch 銘柄が寄った時刻」になっていた。
+        #   実例 2026-09-15: 最後の1件が 09:02:59 に寄った → 09:03:10 に
+        #   未約定4件を取消。**--poll-until 09:10 は効いていなかった。**
+        #
+        #   ★ これは約定率に直接効く。指値@始値は「寄り直後に下げた銘柄」が
+        #     刺さらないが(逆選択)、**戻ってくれば刺さる**。戻る時間を
+        #     相場と無関係な『最後の遅寄り銘柄』が決めていた。
+        #     日によって数秒〜10分近くまで揺れる = 約定率がノイズを拾う。
+        #
+        #   ⚠ 発注していないとき(観測・dry-run)は、全部寄ったら
+        #     もう記録するものが無いので今までどおり早く抜けてよい。
+        _live = any(int(r.get("ordered") or 0) for r in _rows)
+        if _dt.datetime.now() >= _t_end:
             break
+        if len(_seen) >= len(_syms) and not _live:
+            break
+        if len(_seen) >= len(_syms) and _live and not _waited_note[0]:
+            _waited_note[0] = True
+            print(f"  ⏳ 全 {len(_syms)}銘柄が寄りました。**未約定の注文を"
+                  f"残すため {args.poll_until} まで待ちます**"
+                  f"(戻れば始値で刺さる / 2026-09-15 修正)", flush=True)
         _sl = max(0.0, args.every - (time.time() - _t0))
         if _sl > 0:
             # ★★ PUSH が「新しく寄った」と教えてきたら **待たずに起きる**
