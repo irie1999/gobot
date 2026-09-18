@@ -193,15 +193,24 @@ if _ov < pk["symbol"].nunique() * 0.5:
 if a.publish_bd > 0:
     # ★ 営業日は **picks の取引日** から作る。これが実際に市場が開いた日
     #   なので、祝日も正しく扱える(外部カレンダー不要)。
-    _bdays = np.array(sorted(pk["date"].unique()))
-    _pos = np.searchsorted(_bdays, mg["Date"].values, side="right")
+    # ⛔ `np.array(sorted(...))` は使わない(2026-09-18)。
+    #   Series.unique() は datetime64 を返すが、sorted() が Python の
+    #   Timestamp のリストにしてしまい、np.array() が **object dtype** に
+    #   なる。searchsorted が Timestamp と int を比べようとして落ちる。
+    #   ⚠ 古い numpy では通ってしまい、Python 3.14 + 新しい numpy で
+    #     初めて露見した。**dtype を暗黙に任せず、明示する。**
+    #   ⚠ pandas 3.0 では pd.to_datetime(ndarray) が DatetimeArray を返し
+    #     .values が無い。Series.to_numpy() なら版に依らず datetime64。
+    _bdays = np.sort(pk["date"].drop_duplicates().to_numpy())
+    assert _bdays.dtype.kind == "M", f"営業日の dtype が {_bdays.dtype}"
+    _pos = np.searchsorted(_bdays, mg["Date"].to_numpy(), side="right")
     _tgt = _pos - 1 + a.publish_bd      # 前週末の次の営業日から数える
     _tgt = np.clip(_tgt, 0, len(_bdays) - 1)
-    mg["avail"] = _bdays[_tgt]
-    # 営業日カレンダーの外(取引のない期間)に落ちた行は暦日で代替
+    # 営業日カレンダーの外(取引のない期間)に落ちた行は暦日で代替。
+    # ★ np.where ではなく Series.where を使う(dtype が保たれる)
+    _av = pd.Series(_bdays[_tgt], index=mg.index)
     _fb = mg["Date"] + pd.Timedelta(days=_LAG_DAYS)
-    mg["avail"] = np.where(mg["avail"].values < mg["Date"].values,
-                           _fb.values, mg["avail"].values)
+    mg["avail"] = _av.where(_av >= mg["Date"], _fb)
     print(f"[公表日] 前週末 + {a.publish_bd}営業日 "
           f"(picks の取引日をカレンダーに使用)")
 else:
@@ -214,6 +223,14 @@ if _has_split:
     _cols += ["ShrtStdVol", "ShrtNegVol"]
 if "IssType" in mg.columns:
     _cols.append("IssType")
+
+# ★ merge_asof は dtype がズレると黙って壊れる/落ちるので、直前に確認する
+#   (2026-09-18: np.array(sorted(...)) が object dtype を作って落ちた)
+for _nm, _s in (("picks.date", pk["date"]), ("margin.avail", mg["avail"]),
+                ("margin.Date", mg["Date"])):
+    if not pd.api.types.is_datetime64_any_dtype(_s):
+        _die(f"{_nm} の dtype が {_s.dtype} です(datetime64 でないと"
+             " merge_asof が壊れます)")
 
 jd = pd.merge_asof(
     pk.sort_values("date"),
