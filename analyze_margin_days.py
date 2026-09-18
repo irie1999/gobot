@@ -75,6 +75,11 @@ ap.add_argument("--margin", required=True,
                 help="週次信用残 CSV (Date,Code,ShrtVol,LongVol,...)")
 ap.add_argument("--confirm", default="",
                 help="TEST を1回だけ使う。形式 axis:Qn (例 sell_days:Q5)")
+ap.add_argument("--confirm-cross", default="",
+                help="★ **事前登録された交差条件を1つだけ**評価する。\n"
+                     "形式 <買残の上位%%>:<売残の下位%%> (例 80:20)。\n"
+                     "⛔ 複数は受け付けない。掃いた結果を後から入れないこと。\n"
+                     "TRAIN で境界を決め、TRAIN が通ったときだけ TEST を開く。")
 ap.add_argument("--nulls", type=int, default=500,
                 help="帰無較正の試行回数(既定500)")
 ap.add_argument("--seed", type=int, default=20260918)
@@ -423,6 +428,125 @@ def _null_worst(df: pd.DataFrame, n: int, seed: int) -> np.ndarray:
         out[k] = np.nanmin(_m)
     return out
 
+
+# ══════════════════════════════════════════════════════════════════
+# 5b. 事前登録された交差条件を1つだけ評価する (--confirm-cross)
+# ══════════════════════════════════════════════════════════════════
+#   ⛔ このツールは「交互作用は掃かない」で凍結してある。ここは **掃く**
+#     経路ではない: 外で事前に登録された条件を **1つだけ** 受け取り、
+#     独立実装で評価するためのもの。引数は1ペアしか受け付けない。
+#   ★ 実数(1.58日 など)ではなく **分位** で受けるのは、母集団や adv20 の
+#     出所が違うと絶対値がズレるから。分位なら「同じ位置」を選べる。
+if a.confirm_cross:
+    try:
+        _bq, _sq = (float(x) for x in a.confirm_cross.split(":", 1))
+    except Exception:
+        _die("--confirm-cross は <買残の上位%>:<売残の下位%> です (例 80:20)")
+    if not (0 < _bq < 100 and 0 < _sq < 100):
+        _die("百分位は 0〜100 の間で指定してください")
+
+    print("\n" + "=" * 74)
+    print(f" ★ 交差条件を1つだけ評価 — 買残 上位{100 - _bq:.0f}% "
+          f"かつ 売残 下位{_sq:.0f}%")
+    print("=" * 74)
+    print("   ⛔ これは **外で事前登録された1条件** の独立評価です。")
+    print("      ここで分位を変えて試し直したら、それは掃いたことになります。")
+
+    # ★ 境界は TRAIN で決める。TEST には同じ境界を当てる
+    _b_edge = float(tr["buy_days"].quantile(_bq / 100.0))
+    _s_edge = float(tr["sell_days"].quantile(_sq / 100.0))
+    print(f"\n   境界(TRAIN で決定)  買残 >= {_b_edge:.3f}日 / "
+          f"売残 <= {_s_edge:.4f}日")
+
+    def _cross(df):
+        _in = df[(df["buy_days"] >= _b_edge) & (df["sell_days"] <= _s_edge)]
+        return _in, df.drop(_in.index)
+
+    _tr_in, _tr_out = _cross(tr)
+    print(f"\n   ── TRAIN ────────────────────────────────")
+    print(f"     該当   {len(_tr_in):>7,}件 / {_tr_in['date'].nunique():>4,}営業日"
+          f"  {_tr_in['bp'].mean():+8.1f}bp/件"
+          f"  ({len(_tr_in) / max(1, tr['date'].nunique()):.2f}件/日)")
+    print(f"     それ以外 {len(_tr_out):>5,}件"
+          f"                   {_tr_out['bp'].mean():+8.1f}bp/件")
+    _t_tr = _daily_t(_tr_in, tr)
+    _se_tr = _daily_se(_tr_in, tr)
+    print(f"     日クラスタ t {_t_tr:+.2f}  (SE {_se_tr:.1f}bp → "
+          f"**{_PASS_T * _se_tr:.0f}bp より小さい効果は見えません**)")
+    if len(_tr_in) < 300:
+        print(f"     ⚠ **300件未満**。実効サンプルは "
+              f"{_tr_in['date'].nunique()}日しかなく t は不安定です")
+
+    # 前半・後半
+    _hf = tr["date"].quantile(0.5)
+    _v1 = _cross(tr[tr["date"] <= _hf])[0]["bp"].mean()
+    _v2 = _cross(tr[tr["date"] > _hf])[0]["bp"].mean()
+    _sgn = (not np.isnan(_v1)) and (not np.isnan(_v2)) and ((_v1 > 0) == (_v2 > 0))
+    print(f"     前半 {_v1:+.1f} / 後半 {_v2:+.1f}  "
+          f"{'✅ 符号一致' if _sgn else '⛔ 反転(期間依存)'}")
+
+    # ★ 帰無較正: 同じ日の中で「該当/非該当」のラベルだけ入れ替える
+    _rng = np.random.default_rng(a.seed)
+    _tt = tr.reset_index(drop=True)
+    _flag = np.zeros(len(_tt), dtype=bool)
+    _flag[((_tt["buy_days"] >= _b_edge)
+           & (_tt["sell_days"] <= _s_edge)).values] = True
+    _idx = [g.index.values for _, g in _tt.groupby("date")]
+    _bpv = _tt["bp"].values
+    _null = np.empty(a.nulls, dtype=float)
+    for _k in range(a.nulls):
+        _sh = _flag.copy()
+        for _ix in _idx:
+            _sh[_ix] = _rng.permutation(_flag[_ix])
+        _null[_k] = _bpv[_sh].mean() if _sh.any() else np.nan
+    _obs = float(_tr_in["bp"].mean())
+    _p_hi = float(np.nanpercentile(_null, _PASS_NULL))
+    _p_lo = float(np.nanpercentile(_null, 100.0 - _PASS_NULL))
+    print(f"     帰無({a.nulls}本 / 同日シャッフル) 中央 "
+          f"{np.nanmedian(_null):+.1f} / {100 - _PASS_NULL:.0f}%点 {_p_lo:+.1f} "
+          f"/ {_PASS_NULL:.0f}%点 {_p_hi:+.1f}bp")
+    _out_null = (_obs > _p_hi) or (_obs < _p_lo)
+    print(f"     帰無の外か … {'✅' if _out_null else '⛔ 帯の中'}")
+
+    _tr_ok = (abs(_t_tr) >= _PASS_T) and _sgn and _out_null
+    print(f"\n   TRAIN 判定 … "
+          + ("✅ 通過。TEST を開きます" if _tr_ok
+             else "⛔ **不合格。TEST は開きません**"))
+    if not _tr_ok:
+        print("\n   ▶ この条件は閉じます。基準を緩めて再判定しないこと。")
+        print("     ⚠ TEST は1回も使っていません(温存されています)。")
+        sys.exit(0)
+
+    if te.empty:
+        _die("TEST の行がありません")
+    _te_in, _te_out = _cross(te)
+    print(f"\n   ── TEST (この条件について、これ1回) ─────────────")
+    print(f"     該当   {len(_te_in):>7,}件 / {_te_in['date'].nunique():>4,}営業日"
+          f"  {_te_in['bp'].mean():+8.1f}bp/件")
+    print(f"     それ以外 {len(_te_out):>5,}件"
+          f"                   {_te_out['bp'].mean():+8.1f}bp/件")
+    _t_te = _daily_t(_te_in, te)
+    print(f"     日クラスタ t {_t_te:+.2f}")
+    _hf2 = te["date"].quantile(0.5)
+    _w1 = _cross(te[te["date"] <= _hf2])[0]["bp"].mean()
+    _w2 = _cross(te[te["date"] > _hf2])[0]["bp"].mean()
+    _sgn2 = ((not np.isnan(_w1)) and (not np.isnan(_w2))
+             and ((_w1 > 0) == (_w2 > 0)))
+    print(f"     前半 {_w1:+.1f} / 後半 {_w2:+.1f}  "
+          f"{'✅ 符号一致' if _sgn2 else '⛔ 反転'}")
+    _same = (_obs > 0) == (_te_in["bp"].mean() > 0)
+    print(f"\n   TRAIN と TEST で符号一致 … {'✅' if _same else '⛔ **反転**'}")
+    print(f"   TEST の日クラスタ t >= {_PASS_T} … "
+          f"{'✅' if abs(_t_te) >= _PASS_T else '⛔'}")
+    if _same and abs(_t_te) >= _PASS_T and _sgn2:
+        print("\n   ▶ ★ 通りました。ただし採用の前に:")
+        print("     ① 予算シミュを通す(総額比較だけで発注ルールを決めない)")
+        print("     ② 該当が何件/日か見る。除外に使うのか選抜に使うのか決める")
+        print("     ③ 実運用では規制銘柄が既に建てられない点を差し引く")
+    else:
+        print("\n   ▶ ⛔ 不合格。**この条件は閉じます**。")
+        print("     基準を緩めて再判定しないこと。TEST は使い切りました。")
+    sys.exit(0)
 
 # ══════════════════════════════════════════════════════════════════
 # 5. TEST を1回だけ使う (--confirm)
