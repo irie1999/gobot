@@ -684,6 +684,11 @@ def _scan(sym: str) -> list[dict]:
     _atr_v = _tr.ewm(span=14, adjust=False).mean()        # ATR 本体(バリア用)
     _atr_pct = (_atr_v / _c * 100.0)
     _turn = (_c * _v).rolling(20).mean()                  # 売買代金 20日平均
+    # ★ ADV20(出来高 20日平均・**株数**)。信用残の「日数」換算に要る
+    #   (買残日数 = 信用買い残[株] ÷ ADV20[株])。
+    #   ⛔ liq(売買代金) ÷ 終値 では代用できない: mean(c*v) ≠ mean(c)*mean(v)。
+    #   D 時点までの rolling なので先読みなし(上のコメントと同じ扱い)。
+    _adv20 = _v.rolling(20).mean()
     _mx20, _mn20 = _c.rolling(20).max(), _c.rolling(20).min()
     _rngpos = ((_c - _mn20) / (_mx20 - _mn20).replace(0.0, float("nan")) * 100.0)
     _ret1, _ret5, _ret20 = (_c.pct_change(1) * 100.0, _c.pct_change(5) * 100.0,
@@ -834,6 +839,9 @@ def _scan(sym: str) -> list[dict]:
             # ── 選別軸(D時点で確定) ──
             "atr_pct": _fv(_atr_pct, pos),
             "liq": _fv(_turn, pos),
+            # ★ 選別軸には入れない(_AXES に無い)。--dump-picks で
+            #   信用残の日数換算に使うためだけに持ち回る(2026-09-18)
+            "adv20": _fv(_adv20, pos),
             # ⛔ これも _SIDE 漏れだった(2026-09-13 / up_streak と同じ)。
             #   0=20日安値 / 100=20日高値。ショートの「過熱」は高値圏なので
             #   そのまま、鏡像の「過熱」は安値圏なので **100 - x** で揃える。
@@ -1595,6 +1603,9 @@ def _make_ops_sim(_src_all, _pool_df, _ond):
                     "d1_close": float(getattr(_r, "d1_close", 0.0) or 0.0),
                     "d2_open": _sf(getattr(_r, "d2_open", None)),
                     "atr": float(getattr(_r, "atr", 0.0) or 0.0),
+                    # ★ 信用残の日数換算用(2026-09-18)。D時点の20日平均出来高[株]
+                    "adv20": _sf(getattr(_r, "adv20", None)),
+                    "liq": _sf(getattr(_r, "liq", None)),
                     "beta": _sf(getattr(_r, "beta", None)),   # --beta-scan 用
                     "beta2": _sf(getattr(_r, "beta2", None)),
                     "pnl": _pp,
