@@ -80,6 +80,12 @@ ap.add_argument("--confirm-cross", default="",
                      "形式 <買残の上位%%>:<売残の下位%%> (例 80:20)。\n"
                      "⛔ 複数は受け付けない。掃いた結果を後から入れないこと。\n"
                      "TRAIN で境界を決め、TRAIN が通ったときだけ TEST を開く。")
+ap.add_argument("--publish-bd", type=int, default=0,
+                help="★ 公表日を **前週末 + N営業日** にする。0=既定の暦日7日。\n"
+                     "週次残高は前週末(金)時点で、公表は翌週火曜の夕方。\n"
+                     "3 なら水曜 = 公表の翌営業日(実際の公表日に基づく定義)。\n"
+                     "⛔ 詰め方は1回だけ決めること。2 と 3 を試して良い方を\n"
+                     "   採るのは、基準を緩めるのと同じ。")
 ap.add_argument("--nulls", type=int, default=500,
                 help="帰無較正の試行回数(既定500)")
 ap.add_argument("--seed", type=int, default=20260918)
@@ -184,7 +190,23 @@ if _ov < pk["symbol"].nunique() * 0.5:
 #   Date は **前週末(金)時点**。公表は翌週火曜の夕方。
 #   N は前夜に候補を作るので、火曜の朝には間に合わない。
 #   Date + 7暦日 = 翌週金曜 なら、どんな祝日配置でも公表後になる。
-mg["avail"] = mg["Date"] + pd.Timedelta(days=_LAG_DAYS)
+if a.publish_bd > 0:
+    # ★ 営業日は **picks の取引日** から作る。これが実際に市場が開いた日
+    #   なので、祝日も正しく扱える(外部カレンダー不要)。
+    _bdays = np.array(sorted(pk["date"].unique()))
+    _pos = np.searchsorted(_bdays, mg["Date"].values, side="right")
+    _tgt = _pos - 1 + a.publish_bd      # 前週末の次の営業日から数える
+    _tgt = np.clip(_tgt, 0, len(_bdays) - 1)
+    mg["avail"] = _bdays[_tgt]
+    # 営業日カレンダーの外(取引のない期間)に落ちた行は暦日で代替
+    _fb = mg["Date"] + pd.Timedelta(days=_LAG_DAYS)
+    mg["avail"] = np.where(mg["avail"].values < mg["Date"].values,
+                           _fb.values, mg["avail"].values)
+    print(f"[公表日] 前週末 + {a.publish_bd}営業日 "
+          f"(picks の取引日をカレンダーに使用)")
+else:
+    mg["avail"] = mg["Date"] + pd.Timedelta(days=_LAG_DAYS)
+    print(f"[公表日] 前週末 + {_LAG_DAYS}暦日(既定・保守側)")
 mg = mg.sort_values("avail").reset_index(drop=True)
 
 _cols = ["symbol", "avail", "Date", "ShrtVol", "LongVol"]
