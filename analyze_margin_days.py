@@ -3,18 +3,33 @@
 ⛔ **発注しない。既存の CSV を読むだけ。**
 
 ────────────────────────────────────────────────────────────────────
-★ この検証で測るもの (3つだけ。これで打ち切る)
+★ この検証で測るもの (6軸。★ここで打ち切ると事前宣言)
 ────────────────────────────────────────────────────────────────────
+  【第1弾 = 日数換算 3軸】(2026-09-18 実施済み・候補ゼロ)
     buy_days  = 信用買い残 ÷ ADV20     … やれ込み(戻り売りの燃料)
     sell_days = 信用売り残 ÷ ADV20     … 踏み上げリスク
     net_days  = (買残 − 売残) ÷ ADV20  … 上2つの差(独立ではない)
 
+  【第2弾 = 割合 3軸】(2026-09-18 追加。**0〜1 に有界**)
+    long_share      = 買残 ÷ (買残 + 売残)   … 買い偏り度
+    neg_long_share  = 一般買残 ÷ 買残        … 個人スイングの比率
+    std_short_share = 制度売残 ÷ 売残        … 規制がかかる側の比率
+
+  ★ なぜ割合なのか(第1弾との違い):
+      信用倍率(買残 ÷ 売残)は **売残が極小のとき発散する**。売残が
+      0.001日の銘柄なら倍率1000倍で、分位の上端が外れ値だけになる。
+      Codex の倍率テストが「前半 −1.75 / 後半 +18.73 で不安定」と
+      出たのは、これが原因かもしれない。**有界な指標なら安定する。**
+      そして一般/制度の分離は、データに4象限があるのに **誰も使って
+      いなかった**(参加者が違う: 制度=機関・裁定 / 一般=個人)。
+
   ⛔ 交互作用(ギャップ幅 × / 前日上昇率 ×)は掃かない。
-     2026-09-18 までに 6指標 + 12条件 = 18検定を消費済み。
-     ここに条件を足すと帰無の期待が上がるだけ。
+     2026-09-18 までに 6指標 + 12条件 + 交差4 = 22検定を消費済み。
+     ここに 3軸 を足して **累計25**。⛔ **これ以上は足さない。**
 
   ⚠ 生の株数は使わない。大型株ほど絶対値が大きいので **流動性の代理**に
-     なる(流動性は 2026-08 までに3回ヌル)。必ず ADV20 で割る。
+     なる(流動性は 2026-08 までに3回ヌル)。必ず ADV20 で割るか、
+     比率にして無次元にする。
 
 ────────────────────────────────────────────────────────────────────
 ★★ 合格条件 (回す前に凍結。結果を見て動かさない)
@@ -49,7 +64,15 @@
 
   # ③ ①〜④を通ったものだけ、1回だけ
   python analyze_margin_days.py --picks n_picks.csv --margin margin_interest_n_10y.csv \
-      --confirm sell_days:Q5
+      --confirm long_share:Q5
+
+★ 読み方(これを外すと必ず誤読する)
+  ・「候補ゼロ」は『効果がない』ではなく **『MDE より大きい効果は無い』**。
+    各軸の最後に出る「検出力 SE → **Xbp より小さい効果は見えません**」を
+    必ず併記すること。N のグロスは +15.7bp/件 なので、MDE が 10bp なら
+    『戦略のエッジの2/3の識別力を持つ軸でないと見えない』という意味。
+  ・除外案は **抜いた集団の絶対値**で判断する。「他より悪い」≠「損している」。
+    N は稼働率40%で、空いた枠を埋める代わりがいない(§18.64/§18.77)。
 """
 from __future__ import annotations
 
@@ -65,7 +88,12 @@ _PASS_T = 2.0          # ② 日クラスタ t の下限
 _PASS_NULL = 95.0      # ③ 帰無較正のパーセンタイル
 _NQ = 5                # 分位数
 _LAG_DAYS = 7          # 公表日 = Date + これ(暦日)。翌週金曜 = 火曜夕方より後
-_AXES = ("buy_days", "sell_days", "net_days")   # ⛔ ここに足さない
+#   第1弾(日数換算) + 第2弾(割合)。⛔ **ここに足さない**(累計25検定)
+_AXES_DAYS = ("buy_days", "sell_days", "net_days")
+_AXES_SHARE = ("long_share", "neg_long_share", "std_short_share")
+_AXES = _AXES_DAYS + _AXES_SHARE
+# 一般/制度の内訳列が無い CSV では下2つが作れない。実行時に落とす
+_AXES_NEED_SPLIT = {"neg_long_share", "std_short_share"}
 
 ap = argparse.ArgumentParser(description=__doc__,
                              formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -221,6 +249,10 @@ mg = mg.sort_values("avail").reset_index(drop=True)
 _cols = ["symbol", "avail", "Date", "ShrtVol", "LongVol"]
 if _has_split:
     _cols += ["ShrtStdVol", "ShrtNegVol"]
+# ★ 買い側の内訳。第2弾の neg_long_share に要る(第1弾では運んでいなかった)
+_has_long_split = {"LongNegVol", "LongStdVol"} <= set(mg.columns)
+if _has_long_split:
+    _cols += ["LongStdVol", "LongNegVol"]
 if "IssType" in mg.columns:
     _cols.append("IssType")
 
@@ -264,6 +296,39 @@ print(f"[検算] 信用残の古さ(取引日 − 残高時点) 中央 {int(_age
 jd["buy_days"] = jd["LongVol"] / jd["adv20"]
 jd["sell_days"] = jd["ShrtVol"] / jd["adv20"]
 jd["net_days"] = (jd["LongVol"] - jd["ShrtVol"]) / jd["adv20"]
+
+# ── 第2弾: 割合(0〜1 に有界)──────────────────────────────────────
+#   ★ 分母が 0 の行は NaN にして落とす。⛔ 0 で埋めると「売残ゼロの銘柄」が
+#     全部 long_share=1.0 の同じ場所に積み上がり、上位分位がそれで埋まる。
+def _share(num: pd.Series, den: pd.Series) -> pd.Series:
+    _d = den.where(den > _EPS)
+    return (num / _d).replace([np.inf, -np.inf], np.nan)
+
+# 買い偏り度。売残が極小でも 1.0 で頭打ちになる(倍率と違って発散しない)
+jd["long_share"] = _share(jd["LongVol"], jd["LongVol"] + jd["ShrtVol"])
+if _has_long_split:
+    # 一般買残の比率。高い = 個人のスイングが積み上がっている
+    jd["neg_long_share"] = _share(jd["LongNegVol"], jd["LongVol"])
+if _has_split:
+    # 制度売残の比率。高い = 規制・逆日歩がかかる側に寄っている
+    jd["std_short_share"] = _share(jd["ShrtStdVol"], jd["ShrtVol"])
+
+# ★ 実際に使える軸だけに絞る(列が作れなかったものは落とす)
+_AXES = tuple(_a for _a in _AXES if _a in jd.columns)
+_drop = _AXES_NEED_SPLIT - set(_AXES)
+if _drop:
+    print(f"\n⚠ 内訳列が無いので {sorted(_drop)} は掃けません")
+
+# 検算: 割合が [0,1] に収まっているか。外れたらデータか式が壊れている
+for _a in _AXES_SHARE:
+    if _a not in jd.columns:
+        continue
+    _v = jd[_a].dropna()
+    if _v.empty:
+        continue
+    _out = int(((_v < -_EPS) | (_v > 1.0 + _EPS)).sum())
+    print(f"[検算] {_a:<16} 有効 {len(_v):>7,}件 / 中央 {_v.median():.3f} / "
+          + ("✅ 全行が [0,1]" if _out == 0 else f"⛔ **範囲外 {_out:,}行**"))
 
 # ══════════════════════════════════════════════════════════════════
 # 3b. ⛔ 株数の基準が揃っているかの検算 (株式分割)
@@ -469,8 +534,19 @@ def _daily_se(sub: pd.DataFrame, base: pd.DataFrame) -> float:
 
 
 def _quantiles(df: pd.DataFrame, ax: str, edges=None):
-    """分位に割る。edges を渡すとその境界を使う(TEST 用)。"""
+    """分位に割る。edges を渡すとその境界を使う(TEST 用)。
+
+    ⛔ NaN を **先に落とす**。np.searchsorted は NaN を末尾に置くので、
+      落とさないと「分母が0で計算できなかった行」が全部 最上位分位に
+      積み上がり、その分位の中身が別物になる(2026-09-18 に第2弾の
+      割合軸を足したとき、割合の分母が0になりうるので顕在化した)。
+    """
+    df = df[df[ax].notna()]
     _v = df[ax]
+    if _v.empty:
+        out = df.copy()
+        out["_q"] = pd.Series(dtype=object)
+        return out, (edges if edges is not None else [])
     if edges is None:
         _q = np.linspace(0, 1, _NQ + 1)[1:-1]
         edges = list(np.unique(_v.quantile(_q).values))
@@ -481,9 +557,15 @@ def _quantiles(df: pd.DataFrame, ax: str, edges=None):
 
 
 def _report(df: pd.DataFrame, ax: str, edges=None, title=""):
+    _n0 = len(df)
     _d, edges = _quantiles(df, ax, edges)
+    _unit = "割合" if ax in _AXES_SHARE else "日数"
+    _lost = _n0 - len(_d)
     print(f"\n  ── {ax} {title} ─────────────────────────────")
-    print(f"    {'分位':<5}{'件数':>8}{'bp/件':>10}{'日t':>8}   実数境界(日数)")
+    if _lost:
+        print(f"    ⚠ {ax} が計算できない行を {_lost:,}件 除外 "
+              f"({_lost / max(1, _n0) * 100:.1f}%)")
+    print(f"    {'分位':<5}{'件数':>8}{'bp/件':>10}{'日t':>8}   実数境界({_unit})")
     rows = []
     for i in range(_NQ):
         _q = f"Q{i + 1}"
@@ -492,8 +574,9 @@ def _report(df: pd.DataFrame, ax: str, edges=None, title=""):
             continue
         _bp = float(_s["bp"].mean())
         _t = _daily_t(_s, _d)
-        _lo = "-inf" if i == 0 else f"{edges[i - 1]:.2f}"
-        _hi = "+inf" if i >= len(edges) else f"{edges[i]:.2f}"
+        _fmt = ".3f" if ax in _AXES_SHARE else ".2f"
+        _lo = "-inf" if i == 0 else f"{edges[i - 1]:{_fmt}}"
+        _hi = "+inf" if i >= len(edges) else f"{edges[i]:{_fmt}}"
         print(f"    {_q:<5}{len(_s):>8,}{_bp:>+10.1f}{_t:>+8.2f}   "
               f"{_lo} 〜 {_hi}")
         rows.append((_q, len(_s), _bp, _t))
@@ -696,6 +779,9 @@ if a.confirm:
 # ══════════════════════════════════════════════════════════════════
 print("\n" + "=" * 74)
 print(f" TRAIN で掃く — {len(_AXES)}軸。⛔ 交互作用は掃かない")
+print(f"   日数換算 {len([a for a in _AXES if a in _AXES_DAYS])}軸 + "
+      f"割合 {len([a for a in _AXES if a in _AXES_SHARE])}軸")
+print("   ⛔ これで打ち切り。累計25検定(6指標 + 12条件 + 交差4 + 本3)")
 print("=" * 74)
 
 _half = tr["date"].quantile(0.5)
