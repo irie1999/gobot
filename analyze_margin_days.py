@@ -242,6 +242,23 @@ if _has_split:
 # ══════════════════════════════════════════════════════════════════
 # 4. 日クラスタ t と分位
 # ══════════════════════════════════════════════════════════════════
+def _resid(sub: pd.DataFrame, base: pd.DataFrame):
+    """(日付, その日の全体平均からの残差) を **対応を崩さずに** 返す。
+
+    ⛔ NaN を落としたあと date を先頭から切ってはいけない(2026-09-18)。
+      NaN が途中にあると日付と残差の対応がズレる。**同じマスクで両方を
+      絞る**のが正しい。エラーにならず静かに間違うので、たちが悪い。
+    """
+    if sub.empty or len(sub) < 10:
+        return None, None
+    _m = base.groupby("date")["bp"].mean()
+    _r = sub["bp"].values - sub["date"].map(_m).values
+    _ok = ~np.isnan(_r)
+    if int(_ok.sum()) < 10:
+        return None, None
+    return sub["date"].values[_ok], _r[_ok]
+
+
 def _daily_t(sub: pd.DataFrame, base: pd.DataFrame) -> float:
     """その分位の bp が、同じ日の全体平均とどれだけ違うか(日クラスタ頑健)。
 
@@ -253,15 +270,11 @@ def _daily_t(sub: pd.DataFrame, base: pd.DataFrame) -> float:
       5分位に割ると **1日1〜5件**しかない。日次平均のノイズが巨大になり、
       検出力が壊滅する。日内の残差を **合計**するのが正しい形。
     """
-    if sub.empty or len(sub) < 10:
-        return float("nan")
-    _m = base.groupby("date")["bp"].mean()
-    _d = sub["bp"].values - sub["date"].map(_m).values
-    _d = _d[~np.isnan(_d)]
-    if len(_d) < 10:
+    _dt, _d = _resid(sub, base)
+    if _d is None:
         return float("nan")
     _mean = float(_d.mean())
-    _r = pd.DataFrame({"date": sub["date"].values[:len(_d)], "r": _d - _mean})
+    _r = pd.DataFrame({"date": _dt, "r": _d - _mean})
     _S = _r.groupby("date")["r"].sum().values
     _var = float((_S ** 2).sum()) / (len(_d) ** 2)
     if _var < _EPS:
@@ -281,15 +294,10 @@ def _daily_se(sub: pd.DataFrame, base: pd.DataFrame) -> float:
       「Q1-Q5 で 15bp」なら 最悪分位の差は 7〜8bp 程度。MDE と比べる
       ときはこの換算を忘れないこと(2026-09-18 の自己テストで実測)。
     """
-    if sub.empty or len(sub) < 10:
+    _dt, _d = _resid(sub, base)
+    if _d is None:
         return float("nan")
-    _m = base.groupby("date")["bp"].mean()
-    _d = sub["bp"].values - sub["date"].map(_m).values
-    _d = _d[~np.isnan(_d)]
-    if len(_d) < 10:
-        return float("nan")
-    _r = pd.DataFrame({"date": sub["date"].values[:len(_d)],
-                       "r": _d - _d.mean()})
+    _r = pd.DataFrame({"date": _dt, "r": _d - _d.mean()})
     _S = _r.groupby("date")["r"].sum().values
     _var = float((_S ** 2).sum()) / (len(_d) ** 2)
     return float(np.sqrt(_var)) if _var > _EPS else float("nan")
@@ -336,10 +344,19 @@ def _null_worst(df: pd.DataFrame, n: int, seed: int) -> np.ndarray:
       下振れするので、0 と比べてはいけない。
     """
     rng = np.random.default_rng(seed)
+    # ⛔ groupby(...).index.values は **元の index ラベル**であって位置では
+    #   ない。numpy 配列の添字に使うと、ラベルが 0..n-1 でないときズレる
+    #   (2026-09-18 に実データで IndexError。合成データでは TRAIN が先頭に
+    #    固まっていて偶然 0..n-1 だったので露見しなかった)。
+    #   ⚠ 範囲内にさえ収まれば **エラーも出ず静かに間違う**ので、
+    #     必ず位置ベースに直してから使うこと。
+    df = df.reset_index(drop=True)
     _g = df.groupby("date")
     _idx = [g.index.values for _, g in _g]
     _lab = df["_q"].values
     _bp = df["bp"].values
+    assert all(int(ix.max()) < len(_lab) for ix in _idx if len(ix)), \
+        "reset_index が効いていません"
     _qs = sorted(set(_lab))
     out = np.empty(n, dtype=float)
     for k in range(n):
