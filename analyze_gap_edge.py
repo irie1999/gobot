@@ -337,6 +337,12 @@ ap.add_argument("--dump-picks", type=str, default="",
                 help="★ その日実際に建てた明細(銘柄/株数/建値)を CSV に書き出す。"
                      "ポートフォリオ損切りの検証(analyze_portfolio_stop.py)に使う。"
                      "TRAIN/TEST の両方を1つのファイルに出す(win 列で区別)")
+ap.add_argument("--dump-universe-gaps", type=str, default="",
+                help="★ **ユニバース全銘柄×全営業日**の寄りギャップを書き出す。"
+                     "_pool_of を通さない(ret1 もギャップ閾値も掛けない)ので、"
+                     "『その朝、その業種全体がどれだけ動いたか』を後から作れる。"
+                     "analyze_sector_residual.py の入力。"
+                     "⛔ 判定でも探索でもない(素の明細を書くだけ)")
 ap.add_argument("--hedge", action="store_true",
                 help="★★ **同日ヘッジ**(寄りで日経先物を買い、引けで売る)で"
                      "σ を削れるか。⛔ これは予測ではない(当日の相場を当てる"
@@ -501,6 +507,7 @@ _NEEDS_TRAIN = bool(a.explore or a.confirm or a.confirm_both or a.sweep_regime
                     or a.sweep_ops or a.sweep_barrier or a.sweep_relax
                     or a.sweep_watch or bool(a.confirm_watch) or a.sweep_wall
                     or a.tail_diag or a.hedge or bool(a.dump_picks)
+                    or bool(a.dump_universe_gaps)
                     or a.sector_scan)
 if _NEEDS_TRAIN and not a.split:
     import sys as _sys
@@ -562,7 +569,8 @@ _KEEP_CAND = bool(a.sweep_cands)
 
 if a.side == "both" and not (a.sweep_ops or a.confirm_both or a.sweep_regime
                              or a.search_switch or a.sweep_size
-                             or bool(a.dump_picks)):
+                             or bool(a.dump_picks)
+                             or bool(a.dump_universe_gaps)):
     # ★ --dump-picks は **判定でも探索でもない**(明細を書き出すだけ)ので
     #   both を許可する(2026-09-11)。しかも picks には side 列があるので
     #   後から方向を分離できる。むしろ両建ての明細は both でしか出せない。
@@ -2098,6 +2106,37 @@ if a.sweep_wall:
                       f"(前半 最小 {_h1:+,.0f}円/月)。符号は揃うが、"
                       f"実質 後半だけで効いている")
     print(f"  {'=' * 68}")
+    sys.exit(0)
+
+if a.dump_universe_gaps:
+    # ══ ユニバース全銘柄×全営業日の寄りギャップ ════════════════════
+    #   ⛔ **_pool_of を通さない**。ret1 もギャップ閾値も掛けない素の全体。
+    #     これが要るのは「その朝、その業種**全体**がどれだけ動いたか」を
+    #     作るため。候補(ギャップアップした銘柄)だけの平均を使うと、
+    #     定義上そこは必ず大きく、セクターの動きにならない。
+    _rows_u: list = []
+    for _wn, _wf in (("TRAIN", _train),
+                     ("TEST", _test if _test is not None else None)):
+        if _wf is None or not len(_wf):
+            continue
+        # ★ ret1 も出す。「業種の動きが、**その銘柄自身の前日上昇とギャップを
+        #   揃えた上で** まだ効くか」を下流で測るのに要る(2026-09-19)。
+        #   これが無いと、業種残差が gap_bp の言い換えになっていても気づけない。
+        _cu = [c for c in ("date", "symbol", "gap_bp", "ret1")
+               if c in _wf.columns]
+        _sub = _wf[_cu].copy()
+        _sub["win"] = _wn
+        _rows_u.append(_sub)
+        print(f"[dump] {_wn}: {len(_sub):,}銘柄日 / "
+              f"{_sub['date'].nunique():,}営業日 / "
+              f"{_sub['symbol'].nunique():,}銘柄")
+    if not _rows_u:
+        sys.exit("[error] 書き出す銘柄日がありません")
+    _du = pd.concat(_rows_u, ignore_index=True)
+    _du.to_csv(a.dump_universe_gaps, index=False, encoding="utf-8-sig")
+    print(f"[dump] {a.dump_universe_gaps} に {len(_du):,}行 書きました")
+    print(f"  ★ 次: python analyze_sector_residual.py "
+          f"--picks <picks.csv> --universe {a.dump_universe_gaps}")
     sys.exit(0)
 
 if a.dump_picks:
