@@ -1266,6 +1266,61 @@ def _pool_of(w: pd.DataFrame) -> pd.DataFrame:
     return w
 
 
+if a.dump_universe_gaps:
+    # ══ (date, 業種) ごとの寄りギャップの合計と件数 ═════════════════
+    #   ⛔ **窓分割より前**に処理して抜ける。分割は r_all[_m] で
+    #     全列の巨大コピーを2つ作るので、2.6M行だとメモリが尽きる
+    #     (2026-09-19 に実機で _ArrayMemoryError)。
+    #   ★ 銘柄日を全部書き出す必要は無い。leave-one-out は
+    #     (合計 − 自分) / (件数 − 1) で作れるので、**合計と件数だけ**あればよい。
+    #     2.6M行 → 約9万行になる。
+    from pathlib import Path as _P
+    _sp = _P(a.sector_file)
+    if not _sp.exists():
+        sys.exit(f"[error] {_sp} がありません。\n"
+                 "        → python fetch_jquants_extra.py --only master\n"
+                 "        (--sector-file で場所を指定することもできます)")
+    _mst = pd.read_csv(_sp, dtype=str, encoding="utf-8-sig")
+    _cc = next((c for c in _mst.columns if c.lower() == "code"), None)
+    _c33 = next((c for c in _mst.columns if "sector33" in c.lower()
+                 and "name" in c.lower()), None)
+    if not (_cc and _c33):
+        sys.exit(f"[error] {_sp} に Code / Sector33CodeName がありません")
+    _smap = {_jq_to_yf(getattr(_r, _cc)): str(getattr(_r, _c33))
+             for _r in _mst.itertuples(index=False)}
+    print(f"\n[dump] 業種マスタ {_sp} … {len(_smap):,}銘柄 "
+          f"({len(set(_smap.values())):,}区分)")
+    _cut = str(pd.Timestamp(a.split.split(",")[0].strip()).date())
+    # メモリを使わないよう 40万行ずつ畳む
+    _acc: list = []
+    for _i in range(0, len(r_all), 400_000):
+        _ch = r_all.iloc[_i:_i + 400_000]
+        _g = pd.DataFrame({
+            "date": _ch["date"].to_numpy(),
+            "sector": _ch["symbol"].map(_smap).to_numpy(),
+            "gap_bp": _ch["gap_bp"].to_numpy(),
+        })
+        _g = _g[_g["sector"].notna()]
+        if _g.empty:
+            continue
+        _acc.append(_g.groupby(["date", "sector"], as_index=False)["gap_bp"]
+                    .agg(gap_sum="sum", gap_n="count"))
+    if not _acc:
+        sys.exit("[error] 業種を当てられた銘柄日がありません")
+    _du = (pd.concat(_acc, ignore_index=True)
+           .groupby(["date", "sector"], as_index=False)
+           .agg(gap_sum=("gap_sum", "sum"), gap_n=("gap_n", "sum")))
+    _du["win"] = np.where(_du["date"] < _cut, "TRAIN", "TEST")
+    _du.to_csv(a.dump_universe_gaps, index=False, encoding="utf-8-sig")
+    _cov = float(_du["gap_n"].sum()) / max(1, len(r_all)) * 100
+    print(f"[dump] {a.dump_universe_gaps} に {len(_du):,}行 "
+          f"({_du['date'].nunique():,}営業日 × {_du['sector'].nunique():,}業種)")
+    print(f"  業種を当てられた銘柄日 … {_cov:.1f}%  "
+          f"(1業種あたり中央 {_du['gap_n'].median():.0f}銘柄/日)")
+    print(f"  ★ 次: python analyze_sector_residual.py "
+          f"--picks <picks.csv> --universe {a.dump_universe_gaps}")
+    sys.exit(0)
+
 # ── 期間分割。**上限で切る**(§18.25) ───────────────────────────────
 #    --split はカンマ区切りで複数可。判定は **最も古い窓**(=未使用期間)に対して行う。
 _windows = [("全期間", r_all)]
@@ -1613,6 +1668,8 @@ def _make_ops_sim(_src_all, _pool_df, _ond):
                     "atr": float(getattr(_r, "atr", 0.0) or 0.0),
                     # ★ 信用残の日数換算用(2026-09-18)。D時点の20日平均出来高[株]
                     "adv20": _sf(getattr(_r, "adv20", None)),
+                    # ★ セクター残差の統制用(2026-09-19)。前日リターン%
+                    "ret1": _sf(getattr(_r, "ret1", None)),
                     "liq": _sf(getattr(_r, "liq", None)),
                     "beta": _sf(getattr(_r, "beta", None)),   # --beta-scan 用
                     "beta2": _sf(getattr(_r, "beta2", None)),
@@ -2106,37 +2163,6 @@ if a.sweep_wall:
                       f"(前半 最小 {_h1:+,.0f}円/月)。符号は揃うが、"
                       f"実質 後半だけで効いている")
     print(f"  {'=' * 68}")
-    sys.exit(0)
-
-if a.dump_universe_gaps:
-    # ══ ユニバース全銘柄×全営業日の寄りギャップ ════════════════════
-    #   ⛔ **_pool_of を通さない**。ret1 もギャップ閾値も掛けない素の全体。
-    #     これが要るのは「その朝、その業種**全体**がどれだけ動いたか」を
-    #     作るため。候補(ギャップアップした銘柄)だけの平均を使うと、
-    #     定義上そこは必ず大きく、セクターの動きにならない。
-    _rows_u: list = []
-    for _wn, _wf in (("TRAIN", _train),
-                     ("TEST", _test if _test is not None else None)):
-        if _wf is None or not len(_wf):
-            continue
-        # ★ ret1 も出す。「業種の動きが、**その銘柄自身の前日上昇とギャップを
-        #   揃えた上で** まだ効くか」を下流で測るのに要る(2026-09-19)。
-        #   これが無いと、業種残差が gap_bp の言い換えになっていても気づけない。
-        _cu = [c for c in ("date", "symbol", "gap_bp", "ret1")
-               if c in _wf.columns]
-        _sub = _wf[_cu].copy()
-        _sub["win"] = _wn
-        _rows_u.append(_sub)
-        print(f"[dump] {_wn}: {len(_sub):,}銘柄日 / "
-              f"{_sub['date'].nunique():,}営業日 / "
-              f"{_sub['symbol'].nunique():,}銘柄")
-    if not _rows_u:
-        sys.exit("[error] 書き出す銘柄日がありません")
-    _du = pd.concat(_rows_u, ignore_index=True)
-    _du.to_csv(a.dump_universe_gaps, index=False, encoding="utf-8-sig")
-    print(f"[dump] {a.dump_universe_gaps} に {len(_du):,}行 書きました")
-    print(f"  ★ 次: python analyze_sector_residual.py "
-          f"--picks <picks.csv> --universe {a.dump_universe_gaps}")
     sys.exit(0)
 
 if a.dump_picks:

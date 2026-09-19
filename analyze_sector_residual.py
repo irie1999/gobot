@@ -102,7 +102,7 @@
   python analyze_gap_edge.py --days 4200 --min-gap-bp 100 --split 2020-09-01 \
       --min-ret1 1.753 --min-price 1000 --max-price 6000 --dump-picks n_picks.csv
 
-  # ② ユニバース全体のギャップ(セクターの動きを作るのに要る)
+  # ② (date, 業種) ごとのギャップの合計と件数(セクターの動きを作るのに要る)
   python analyze_gap_edge.py --days 4200 --min-gap-bp 100 --split 2020-09-01 \
       --min-ret1 1.753 --min-price 1000 --max-price 6000 \
       --dump-universe-gaps n_universe.csv
@@ -178,15 +178,20 @@ print(f"[入力] universe {a.universe}  {len(un):,}行")
 _need = {"date", "symbol", "entry_p", "qty", "pnl", "gap_bp", "win"}
 if _need - set(pk.columns):
     _die(f"picks に列がありません: {sorted(_need - set(pk.columns))}")
-_needu = {"date", "symbol", "gap_bp"}
+# ★ universe は **(date, 業種) ごとの合計と件数**。銘柄日を全部持たない。
+#   leave-one-out は (合計 - 自分) / (件数 - 1) で作れるので、これで足りる。
+#   ⛔ 銘柄日を全部書き出す版は 2.6M行 でメモリが尽きた(2026-09-19 実機)。
+_needu = {"date", "sector", "gap_sum", "gap_n"}
 if _needu - set(un.columns):
-    _die(f"universe に列がありません: {sorted(_needu - set(un.columns))}")
-# ★ ret1 は統制に要る。古い universe には無いので、無ければ gap_bp だけで統制
-_HAS_RET1 = "ret1" in un.columns
+    _die(f"universe に列がありません: {sorted(_needu - set(un.columns))}\n"
+         "         → analyze_gap_edge.py --dump-universe-gaps を\n"
+         "           2026-09-19 以降の版で出し直してください")
+# ★ ret1 は統制に要る。picks 側に入っている(2026-09-19 以降の版)
+_HAS_RET1 = "ret1" in pk.columns and pk["ret1"].notna().mean() > 0.95
 if not _HAS_RET1:
-    print("\n⚠ universe に ret1 列がありません(古い版で出したファイル)。\n"
+    print("\n⚠ picks に ret1 列がありません(古い版で出したファイル)。\n"
           "   統制が gap_bp だけになります。ret1 も揃えたいなら\n"
-          "   --dump-universe-gaps を 2026-09-19 以降の版で出し直してください")
+          "   --dump-picks を 2026-09-19 以降の版で出し直してください")
 
 for _d in (pk, un):
     _d["date"] = pd.to_datetime(_d["date"])
@@ -207,18 +212,9 @@ print(f"[検品] picks    {pk['date'].nunique():,}営業日 / "
       f"{pk['symbol'].nunique():,}銘柄 / 窓 "
       + " ".join(f"{w} {int((pk['win'] == w).sum()):,}件"
                  for w in pk["win"].unique()))
-print(f"[検品] universe {un['date'].nunique():,}営業日 / "
-      f"{un['symbol'].nunique():,}銘柄 / "
-      f"{len(un) / max(1, un['date'].nunique()):.0f}銘柄日/日")
-
-# ⛔ universe が picks を包含しているか。していなければセクター平均が作れない
-_pi = set(map(tuple, pk[["date", "symbol"]].astype(str).values))
-_ui = set(map(tuple, un[["date", "symbol"]].astype(str).values))
-_miss = len(_pi - _ui)
-print(f"[検算] picks が universe に含まれる … "
-      + ("✅ 全件" if _miss == 0 else f"⛔ **{_miss:,}件 欠け**"))
-if _miss > len(_pi) * 0.02:
-    _die("universe が picks を包含していません。同じ条件で出し直してください")
+print(f"[検品] universe {un['date'].nunique():,}営業日 × "
+      f"{un['sector'].nunique():,}業種 / "
+      f"1業種あたり中央 {un['gap_n'].median():.0f}銘柄/日")
 
 # ── 業種マスタ ────────────────────────────────────────────────────
 _sp = Path(a.sector_file)
@@ -250,15 +246,20 @@ print(f"[入力] 業種マスタ {_sp} … {len(_sec):,}銘柄 ({a.sector_col}�
 print("  ⚠ **いまの上場一覧を過去に遡って当てている**。上場廃止銘柄の欠落と"
       "業種変更の未反映は残る(探索用)")
 
-for _d in (pk, un):
-    _d["sector"] = _d["symbol"].map(_sec)
+pk["sector"] = pk["symbol"].map(_sec)
 _r1 = pk["sector"].notna().mean() * 100
-_r2 = un["sector"].notna().mean() * 100
-print(f"[検算] 業種の判明率  picks {_r1:.1f}% / universe {_r2:.1f}%")
+print(f"[検算] 業種の判明率  picks {_r1:.1f}%")
 if _r1 < 90:
     _die("picks の業種判明率が低すぎます。マスタを取り直してください")
-
-un = un[un["sector"].notna()].copy()
+# ⛔ picks と universe が **同じマスタ**で作られているか。違うと
+#   leave-one-out の分母がずれて残差が壊れる(気づけない形で)。
+_us = set(un["sector"].unique())
+_ps = set(pk["sector"].dropna().unique())
+_bad = _ps - _us
+print(f"[検算] picks の業種が universe に在る … "
+      + ("✅ 全区分" if not _bad else f"⛔ **{len(_bad)}区分 欠け** {sorted(_bad)[:3]}"))
+if _bad:
+    _die("業種マスタが食い違っています。同じ --sector-file で出し直してください")
 pk = pk[pk["sector"].notna()].copy()
 
 # ══════════════════════════════════════════════════════════════════
@@ -269,7 +270,7 @@ pk = pk[pk["sector"].notna()].copy()
 #     定義上そこは必ず大きく、「セクターの動き」にならない。
 #   ★ 自分自身を除く(leave-one-out)。除かないと resid が自分の分だけ
 #     機械的に縮み、軸が自分の bp と相関してしまう。
-_g = un.groupby(["date", "sector"])["gap_bp"].agg(["sum", "count"])
+_g = un.set_index(["date", "sector"])[["gap_sum", "gap_n"]]
 _g.columns = ["s", "n"]
 pk = pk.join(_g, on=["date", "sector"])
 pk["n_peers"] = (pk["n"].fillna(0) - 1).astype(int)     # 自分を除いた相手の数
@@ -307,16 +308,8 @@ print(f"[検算] sector_gap + resid_gap == gap_bp … "
       + ("✅" if _chk < 1e-6 else f"⛔ **最大ずれ {_chk:.3g}**"))
 
 # ── ret1 を universe から持ってくる(統制に要る)────────────────────
-_CTRL = ["gap_bp"]
-if _HAS_RET1:
-    pk = pk.merge(un[["date", "symbol", "ret1"]].drop_duplicates(
-        ["date", "symbol"]), on=["date", "symbol"], how="left")
-    _rr = pk["ret1"].notna().mean() * 100
-    print(f"[検算] ret1 の結合 … {_rr:.1f}%")
-    if _rr > 95:
-        _CTRL.append("ret1")
-    else:
-        print("       ⚠ 結合できない行が多いので ret1 は統制に使いません")
+_CTRL = ["gap_bp"] + (["ret1"] if _HAS_RET1 else [])
+print(f"[検算] 統制に使う列 … {' + '.join(_CTRL)}")
 
 # ⛔⛔ 軸が gap_bp の言い換えになっていないか。**判定の前に必ず見る**
 print("\n[検算] 軸と gap_bp の順位相関 "
