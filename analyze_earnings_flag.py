@@ -101,7 +101,32 @@ _EARN_CANDS = (
     "jquants_extra/earnings_cal.csv",
     "jq_earnings.csv", "earnings.csv", "statements.csv",
 )
-_EARN_GLOBS = ("jquants_extra/*.csv", "*earning*.csv", "*statement*.csv", "*kessan*.csv")
+#   ⛔ glob を広く取らない。jquants_extra/*.csv は信用残・銘柄マスタ・
+#     業種などを全部拾う。2026-09-22 に margin_interest_n_10y.csv を
+#     決算CSV として読んで、週次公表のカレンダーを測る結果を出した。
+_EARN_GLOBS = ("jquants_extra/*statement*.csv", "jquants_extra/*earn*.csv",
+               "jquants_extra/fin*.csv", "*earning*.csv", "*statement*.csv",
+               "*kessan*.csv")
+#   決算は 1銘柄あたり 年4〜8回(本決算+四半期+業績修正)。
+#   これを大きく超えるなら別のデータ(信用残=年52回 / 日足=年244回)。
+_MAX_PER_SYM_YEAR = 20.0
+
+#   ⛔ **この列があったら決算CSV ではない**。頻度チェックだけでは
+#     取りこぼす(2026-09-22: 合成した信用残が毎週ちがう銘柄だったので
+#     頻度が低く出て通った)。列名で確実に弾く。
+_NOT_EARNINGS = {
+    "ShortMarginTradeVolume": "週次の信用残",
+    "LongMarginTradeVolume": "週次の信用残",
+    "ShortNegotiableMarginTradeVolume": "週次の信用残",
+    "LongStandardizedMarginTradeVolume": "週次の信用残",
+    "IssueType": "信用残 / 貸借区分",
+    "CompanyName": "銘柄マスタ",
+    "MarketCode": "銘柄マスタ",
+    "ScaleCategory": "銘柄マスタ",
+    "Sector33CodeName": "業種マスタ",
+    "TurnoverValue": "日足",
+    "AdjustmentClose": "日足",
+}
 _PICKS_CANDS = ("n_picks.csv", "picks.csv", "n_picks_train.csv")
 
 _CODE_COLS = ("Code", "LocalCode", "symbol", "code", "Symbol")
@@ -282,6 +307,19 @@ def _load(picks: str, earnings: str | None, data_since: str,
             "  ★ 決算CSV が無くても、picks だけで **検出限界(MDE)の下見**が\n"
             "    できます。決算あり率ごとに何円/件まで測れるかが出ます:\n"
             f"        python analyze_earnings_flag.py --picks {picks} --scout\n")
+    #   ⛔ まず「決算CSV ではない」ものを列名で弾く。Code と Date を持つ
+    #     CSV は他にもたくさんある(信用残・マスタ・日足)。
+    _bad = [(c, _NOT_EARNINGS[c]) for c in e.columns if c in _NOT_EARNINGS]
+    if _bad:
+        names = " / ".join(f"{c}({w})" for c, w in _bad[:4])
+        sys.exit(
+            f"\n⛔ '{earnings}' は決算CSV ではありません。\n"
+            f"\n  決算にはあり得ない列があります: {names}\n"
+            f"  列: {list(e.columns)[:12]}\n"
+            "\n  --earnings で決算CSV を明示してください。\n"
+            "  まだ無いなら、決算CSV 無しで下見だけできます:\n"
+            "      python analyze_earnings_flag.py --no-earnings\n")
+
     cc = _pick_col(e, _CODE_COLS)
     dc = _pick_col(e, _DATE_COLS)
     if cc is None or dc is None:
@@ -294,6 +332,29 @@ def _load(picks: str, earnings: str | None, data_since: str,
     e["code4"] = _norm_code(e["code4"])
     e["edate"] = pd.to_datetime(e["edate"], errors="coerce").dt.normalize()
     e = e.dropna(subset=["edate"]).drop_duplicates()
+
+    #   ⛔⛔ **中身が決算か確かめる**。Code と Date の列を持つCSVは他にもある
+    #     (信用残・銘柄マスタ・業種)。2026-09-22 に margin_interest_n_10y.csv を
+    #     読んで、週次公表のカレンダーを「決算フラグ」として測る結果を出した。
+    #     ★ 印字するだけでは防げなかった。**頻度で判定する**。
+    _ns = e["code4"].nunique()
+    _yr = max((e["edate"].max() - e["edate"].min()).days / 365.25, 0.5)
+    _per = len(e) / max(_ns, 1) / _yr
+    print(f"[検証] 決算CSV {len(e):,}行 / {_ns:,}銘柄 / {_yr:.1f}年"
+          f" -> 1銘柄あたり **年 {_per:.1f}回**")
+    if _per > _MAX_PER_SYM_YEAR:
+        sys.exit(
+            f"\n⛔ '{earnings}' は決算CSV ではありません。\n"
+            f"\n  1銘柄あたり **年 {_per:.1f}回** の頻度があります。\n"
+            "  決算は年4〜8回(本決算+四半期+業績修正)です。\n"
+            "    年 約52回 -> 週次の信用残\n"
+            "    年 約244回 -> 日足\n"
+            "\n  --earnings で決算CSV を明示してください。\n"
+            "  まだ無いなら、決算CSV 無しで下見だけできます:\n"
+            "      python analyze_earnings_flag.py --no-earnings\n")
+    if _per < 2.0:
+        print(f"  ⚠ 年 {_per:.1f}回 は決算(年4〜8回)より**少ない**。"
+              "本決算だけ / 一部銘柄だけの可能性があります")
 
     # ── フラグを作る ────────────────────────────────────────────
     #   ⛔ 「当日(D+1)の開示」は **時刻**で寄り前/場中を分ける。
@@ -618,6 +679,8 @@ def main() -> None:
                                     "省略すると n_picks.csv などを自動で探す")
     ap.add_argument("--earnings", help="J-Quants の決算CSV。"
                                        "省略すると jquants_extra/ などを自動で探す")
+    ap.add_argument("--no-earnings", action="store_true",
+                    help="決算CSV を探さない。検出限界の下見だけ出す")
     ap.add_argument("--data-since", default=_DATA_SINCE,
                     help=f"決算データの契約開始日。これより前は **欠測として落とす** (既定 {_DATA_SINCE})")
     ap.add_argument("--lag-days", default="1,3,5",
@@ -649,8 +712,10 @@ def main() -> None:
             "    python analyze_gap_edge.py --days 4200 --min-gap-bp 100 "
             "--split 2020-09-01 --min-ret1 1.753 --min-price 1000 "
             "--max-price 6000 --dump-picks n_picks.csv\n")
-    if not a.earnings:
+    if not a.earnings and not a.no_earnings:
         a.earnings = _autofind("earnings")
+    if a.no_earnings:
+        a.earnings = None
 
     lags = tuple(int(x) for x in a.lag_days.split(",") if x.strip())
     p, flags = _load(a.picks, a.earnings, a.data_since, lags)
