@@ -262,7 +262,20 @@ def _load(picks: str, earnings: str | None, data_since: str,
         p["earn_d1_pre"] = [(c, d) in pk for c, d in zip(p["code4"], p["date"])]
         flags.append("earn_d1_pre")
 
-    # 過去 k 営業日以内(D+1 から見て遡る)。営業日は picks の日付集合で近似
+    #   ★ 日付の整理 (ここを取り違えると寄り前フラグでなくなる)
+    #       D    = シグナル日。前日比 +1.75% 以上 上げた日
+    #       D+1  = **建てる日**。picks の `date` はこちら
+    #
+    #   ⛔ earn_prev{k} は **D+1 を含めない**。D+1 の開示は場中かもしれず
+    #     09:00 には分からない(= 回避できない)。寄り前に確実に分かるのは
+    #     **D の引けまで**。D+1 の開示は earn_d1 / earn_d1_pre で別に見る。
+    #
+    #     earn_prev1 = {D}            ← 最も典型的。D に決算 -> 上げる -> D+1 にギャップ
+    #     earn_prev3 = {D-2, D-1, D}
+    #     earn_prev5 = {D-4, ..., D}
+    #
+    #   ⛔ 2026-09-22: ここを range(lo, i+1) と書いて D+1 を含めていた。
+    #     「寄り前に分かる」はずのフラグに場中の開示が混ざっていた。
     bdays = np.array(sorted(p["date"].unique()))
     pos = {d: i for i, d in enumerate(bdays)}
     for k in lag_days:
@@ -274,7 +287,7 @@ def _load(picks: str, earnings: str | None, data_since: str,
                 hit.append(False)
                 continue
             lo = max(0, i - k)
-            hit.append(any((c, bdays[j]) in ekeys for j in range(lo, i + 1)))
+            hit.append(any((c, bdays[j]) in ekeys for j in range(lo, i)))
         p[col] = hit
         flags.append(col)
 
@@ -461,12 +474,63 @@ def _scout_only(p: pd.DataFrame, data_since: str, split: str | None) -> None:
     print("     python analyze_earnings_flag.py --picks <picks> --earnings <決算CSV> --scout")
 
 
+def _test_date_boundary() -> None:
+    """フラグの日付境界を手で確かめる。
+
+    ⛔ 2026-09-22 に range(lo, i+1) と書いて **建てる日(D+1)を含めて**
+      いた。「寄り前に分かる」はずの earn_prev に場中の開示が混ざる。
+      同じ取り違えを二度としないための回帰テスト。
+    """
+    import os
+    import tempfile
+
+    bd = pd.bdate_range("2020-01-06", periods=8)
+    picks = pd.DataFrame({
+        "date": bd, "symbol": ["7203.T"] * len(bd),
+        "entry_p": [2000.0] * len(bd), "gap_bp": [200.0] * len(bd),
+        "pnl": [0.0] * len(bd),
+    })
+    # 開示は 1件だけ。bd[3] に置く
+    earn = pd.DataFrame({"Code": ["72030"], "DisclosedDate": [bd[3].date()]})
+
+    d = tempfile.mkdtemp()
+    fp, fe = os.path.join(d, "p.csv"), os.path.join(d, "e.csv")
+    picks.to_csv(fp, index=False)
+    earn.to_csv(fe, index=False)
+    out, _ = _load(fp, fe, "2000-01-01", (1, 3, 5))
+    got = out.set_index("date")
+
+    # bd[3] に開示 -> その日に建てる行は earn_d1、翌営業日 bd[4] は earn_prev1
+    exp = [
+        ("earn_d1",    bd[3], True,  "開示日そのもの = 建てる日(D+1)に開示"),
+        ("earn_d1",    bd[4], False, "翌日は当日開示ではない"),
+        ("earn_prev1", bd[4], True,  "bd[4] から見て D=bd[3] に開示"),
+        ("earn_prev1", bd[3], False, "⛔ 建てる日(D+1)を含めてはいけない"),
+        ("earn_prev1", bd[5], False, "2営業日前は prev1 に入らない"),
+        ("earn_prev3", bd[5], True,  "bd[5] の D-1 = bd[3]"),
+        ("earn_prev3", bd[7], False, "4営業日前は prev3 に入らない"),
+        ("earn_prev5", bd[7], True,  "bd[7] の D-3 = bd[3]"),
+    ]
+    ng = 0
+    print("[selftest] 日付境界")
+    for col, day, want, why in exp:
+        have = bool(got.loc[day, col])
+        ok = have == want
+        ng += (not ok)
+        print(f"  {'✅' if ok else '⛔'} {col:<11} {day.date()} "
+              f"= {str(have):<5} (期待 {want})  {why}")
+    if ng:
+        sys.exit(f"\n⛔ 日付境界のテストが {ng}件 失敗しました")
+    print("  -> 8件すべて一致\n")
+
+
 def _selftest() -> None:
     """合成データで、力がある場合/ない場合の両方を確かめる。
 
     ⛔ §18.77 の反省: 下地を1回だけ引いて、効果だけ差し替える。
       ケースごとに乱数を引き直すと母集団そのものが別物になる。
     """
+    _test_date_boundary()
     rng = np.random.default_rng(7)
     days = pd.bdate_range("2017-01-04", "2020-08-31")
     rows = []
