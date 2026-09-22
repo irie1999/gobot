@@ -46,20 +46,24 @@
 使い方
 ────────────────────────────────────────────────────────────────────
 
-    # 0) 決算CSV が **まだ無い**とき。検出限界だけ下見する
-    python analyze_earnings_flag.py --picks n_picks.csv --split 2020-09-01
+    # ★ これだけ。picks も決算CSV も **自動で探す**
+    python analyze_earnings_flag.py
 
-    # 1) 決算CSV ができたら。分類ごとの r と MDE を見る(損益は見ない)
-    python analyze_earnings_flag.py --picks n_picks.csv --earnings jq_earnings.csv --scout
+      決算CSV が無ければ  -> 検出限界の下見だけ出す
+      決算CSV があれば    -> TRAIN(既定)で判定まで通す
+      どのファイルを使ったかは必ず印字する
 
-    # 2) 本番。TRAIN で探索
-    python analyze_earnings_flag.py --picks n_picks.csv --earnings jq_earnings.csv --split 2020-09-01 --win TRAIN
+    # TRAIN で候補が出たときだけ、最後に TEST を **1回**
+    python analyze_earnings_flag.py --win TEST --confirm
 
-    # 3) TRAIN で候補が出たときだけ TEST を **1回**
-    python analyze_earnings_flag.py --picks n_picks.csv --earnings jq_earnings.csv --split 2020-09-01 --win TEST --confirm
+    # 損益を見ずに r と MDE だけ
+    python analyze_earnings_flag.py --scout
 
-    # 自己検証(合成データ。力がある/ない の2ケース)
+    # 自己検証(合成データ。力がある/ない の2ケース + 日付境界)
     python analyze_earnings_flag.py --selftest
+
+    # ファイルを明示したいとき
+    python analyze_earnings_flag.py --picks n_picks.csv --earnings jquants_extra/statements.csv
 
 決算 CSV に要る列(名前は自動で探す):
     コード   Code / LocalCode / symbol / code
@@ -89,10 +93,52 @@ _DATA_SINCE = "2016-09-23"   # J-Quants の契約開始
 #   5分位比較なので実効 n = 1/(1/1934+1/1934) = 967
 _BASE_N, _BASE_MDE_BP = 967.0, 10.0
 
+#   決算CSV の置き場。fetch_jquants_extra.py は <out-dir>/<name>.csv に書く
+#   (既定の out-dir は jquants_extra/、name は statements / earnings_cal)
+_EARN_CANDS = (
+    "jquants_extra/statements.csv",
+    "jquants_extra/fin_summary.csv",
+    "jquants_extra/earnings_cal.csv",
+    "jq_earnings.csv", "earnings.csv", "statements.csv",
+)
+_EARN_GLOBS = ("jquants_extra/*.csv", "*earning*.csv", "*statement*.csv", "*kessan*.csv")
+_PICKS_CANDS = ("n_picks.csv", "picks.csv", "n_picks_train.csv")
+
 _CODE_COLS = ("Code", "LocalCode", "symbol", "code", "Symbol")
 _DATE_COLS = ("DisclosedDate", "Date", "date", "disclosed_date", "AnnouncementDate")
 _TIME_COLS = ("DisclosedTime", "time", "disclosed_time")
 _TYPE_COLS = ("TypeOfDocument", "type", "DocumentType")
+
+
+def _autofind(kind: str) -> str | None:
+    """決算CSV / picks を自動で探す。
+
+    ★ ファイル名を覚えるのが面倒なので、よくある置き場を順に見る。
+      ⛔ **どれを使ったかは必ず印字する**。黙って別のファイルを掴むと、
+        §18.40b(1日つぶした)と同じ「ラベルと中身が食い違う」事故になる。
+    """
+    import glob
+    import os
+
+    cands = _EARN_CANDS if kind == "earnings" else _PICKS_CANDS
+    hits: list[str] = []
+    for c in cands:
+        if os.path.isfile(c):
+            hits.append(c)
+    if kind == "earnings":
+        for g in _EARN_GLOBS:
+            for f in sorted(glob.glob(g)):
+                if f not in hits and os.path.getsize(f) > 0:
+                    hits.append(f)
+    if not hits:
+        return None
+    if len(hits) > 1:
+        print(f"[自動検出] {kind} の候補 {len(hits)}件: " + " / ".join(hits[:6]))
+        print(f"           -> **{hits[0]}** を使います "
+              f"(別のを使うなら --{kind} で指定)")
+    else:
+        print(f"[自動検出] {kind} = {hits[0]}")
+    return hits[0]
 
 
 def _pick_col(df: pd.DataFrame, cands: tuple) -> str | None:
@@ -568,13 +614,16 @@ def _selftest() -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--picks", help="analyze_gap_edge --dump-picks の出力")
-    ap.add_argument("--earnings", help="J-Quants の決算CSV")
+    ap.add_argument("--picks", help="analyze_gap_edge --dump-picks の出力。"
+                                    "省略すると n_picks.csv などを自動で探す")
+    ap.add_argument("--earnings", help="J-Quants の決算CSV。"
+                                       "省略すると jquants_extra/ などを自動で探す")
     ap.add_argument("--data-since", default=_DATA_SINCE,
                     help=f"決算データの契約開始日。これより前は **欠測として落とす** (既定 {_DATA_SINCE})")
     ap.add_argument("--lag-days", default="1,3,5",
                     help="過去N営業日以内の決算フラグを作る (既定 1,3,5)")
-    ap.add_argument("--split", help="TRAIN/TEST の境目 (例 2020-09-01)")
+    ap.add_argument("--split", default="2020-09-01",
+                    help="TRAIN/TEST の境目 (既定 2020-09-01 = §18.54 で固定した値)")
     ap.add_argument("--win", choices=("TRAIN", "TEST", "ALL"), default="TRAIN",
                     help="どちらの窓で測るか (既定 TRAIN)")
     ap.add_argument("--confirm", action="store_true",
@@ -588,8 +637,20 @@ def main() -> None:
     if a.selftest:
         _selftest()
         return
+
+    #   ★ ファイル名を覚えなくていいように、省略されたら自動で探す
     if not a.picks:
-        sys.exit("[error] --picks が要ります (--selftest なら不要)")
+        a.picks = _autofind("picks")
+    if not a.picks:
+        sys.exit(
+            "\n[error] picks CSV が見つかりません。\n"
+            "\n  探した場所: " + " / ".join(_PICKS_CANDS) + "\n"
+            "\n  作り方(1回だけ。数分かかります):\n"
+            "    python analyze_gap_edge.py --days 4200 --min-gap-bp 100 "
+            "--split 2020-09-01 --min-ret1 1.753 --min-price 1000 "
+            "--max-price 6000 --dump-picks n_picks.csv\n")
+    if not a.earnings:
+        a.earnings = _autofind("earnings")
 
     lags = tuple(int(x) for x in a.lag_days.split(",") if x.strip())
     p, flags = _load(a.picks, a.earnings, a.data_since, lags)
