@@ -180,11 +180,11 @@ _na._PNL_CONFIGS[:] = _all_configs
 _bt_cache: dict[tuple, dict | None] = {}
 
 def _make_cached_bt(orig_fn):
-    def wrapper(symbol, name, strategy):
+    def wrapper(symbol, name, strategy, max_hold=None):
         mode = os.environ.get("TRADING_MODE", "conservative")
-        key  = (symbol, strategy, mode)
+        key  = (symbol, strategy, mode, max_hold)
         if key not in _bt_cache:
-            _bt_cache[key] = orig_fn(symbol, name, strategy)
+            _bt_cache[key] = orig_fn(symbol, name, strategy, max_hold)
         return _bt_cache[key]
     return wrapper
 

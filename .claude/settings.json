@@ -1,4 +1,16 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(*)",
+      "Read(*)",
+      "Write(*)",
+      "Edit(*)",
+      "Glob(*)",
+      "Grep(*)",
+      "mcp__Claude_Code_Remote__*",
+      "mcp__github__*"
+    ]
+  },
   "hooks": {
     "SessionStart": [
       {

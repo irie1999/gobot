@@ -27,14 +27,23 @@ import pickle
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import re
+
 import pandas as pd
 import requests
 
 # ── JPX データソース ──────────────────────────────────────────
-JPX_XLS_URL = (
-    "https://www.jpx.co.jp/markets/statistics-equities/misc/"
-    "tvdivq0000001vg2-att/data_j.xls"
-)
+# ⛔ 2026-09-06: JPX が **.xls → .xlsx** に変わって直リンクが404になった。
+#   拡張子も変わりうるので、既知の候補を順に試し、全滅したら一覧ページから探す。
+JPX_XLS_URLS = [
+    ("https://www.jpx.co.jp/markets/statistics-equities/misc/"
+     "tvdivq0000001vg2-att/data_j.xlsx"),      # 2026-09-06 実測でこれが現行
+    ("https://www.jpx.co.jp/markets/statistics-equities/misc/"
+     "tvdivq0000001vg2-att/data_j.xls"),       # 旧(2026-09-05 まで)
+]
+JPX_XLS_URL = JPX_XLS_URLS[0]                  # 表示用(互換)
+# ★ 直リンクが 404 になったときに、ここから現在のリンクを探す
+JPX_INDEX_URL = "https://www.jpx.co.jp/markets/statistics-equities/misc/01.html"
 CACHE_FILE  = Path(".jpx_listed_cache.pkl")
 CACHE_DAYS  = 7   # 7日間キャッシュ
 
@@ -65,18 +74,58 @@ def fetch_jpx_raw(no_cache: bool = False) -> pd.DataFrame:
 
     print(f"  JPX から銘柄リストをダウンロード中...")
     print(f"  URL: {JPX_XLS_URL}")
-    try:
-        r = requests.get(JPX_XLS_URL, timeout=30, headers={
-            "User-Agent": "Mozilla/5.0",
-            "Referer":    "https://www.jpx.co.jp/",
-        })
-        r.raise_for_status()
-    except requests.RequestException as e:
+    # ⛔⛔ 直リンクは **JPX 側で変わる**(2026-09-06 に 404。添付フォルダの
+    #   ハッシュ部分 tvdivq0000001vg2-att が変更された)。決め打ちを1本だけ持つと
+    #   その日から取れなくなる。→ **一覧ページを読んで今のリンクを拾う**。
+    _HD = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.jpx.co.jp/"}
+
+    def _discover() -> str | None:
+        """一覧ページから data_j.xls の現在のURLを探す。"""
+        try:
+            _ix = requests.get(JPX_INDEX_URL, timeout=30, headers=_HD)
+            _ix.raise_for_status()
+        except requests.RequestException:
+            return None
+        # ⛔ [sx] だと .xlsx で `x` が余って一致しない(2026-09-06 検算で判明)。
+        #   xlsx? にすること。JPX が xls → xlsx に変えても拾える
+        _m = re.search(r'href="([^"]*data_j\.xlsx?)"', _ix.text)
+        if not _m:
+            return None
+        _u = _m.group(1)
+        if _u.startswith("//"):
+            return "https:" + _u
+        if _u.startswith("/"):
+            return "https://www.jpx.co.jp" + _u
+        if _u.startswith("http"):
+            return _u
+        return "https://www.jpx.co.jp/markets/statistics-equities/misc/" + _u
+
+    r = None
+    _tried = []
+    _cands = [(_u, f"既知の直リンク({_u.rsplit('.', 1)[-1]})")
+              for _u in JPX_XLS_URLS]
+    for _u, _how in _cands + [(_discover(), "一覧ページから発見")]:
+        if not _u:
+            continue
+        _tried.append(f"{_how}: {_u}")
+        try:
+            r = requests.get(_u, timeout=30, headers=_HD)
+            r.raise_for_status()
+            if _how == "一覧ページから発見":
+                print(f"  ★ 直リンクが変わっていたので一覧ページから取得: {_u}")
+                print(f"     → JPX_XLS_URL を更新すると次回から速くなります")
+            break
+        except requests.RequestException as _e:
+            print(f"  ⚠ {_how} が失敗: {str(_e)[:80]}")
+            r = None
+    if r is None:
+        e = RuntimeError("すべての取得先が失敗")
         raise RuntimeError(
             f"ダウンロード失敗: {e}\n"
             f"  ブラウザで以下にアクセスして data_j.xls を手動ダウンロードし、\n"
             f"  同じフォルダに置いてから --local data_j.xls で実行してください:\n"
             f"  https://www.jpx.co.jp/markets/statistics-equities/misc/01.html"
+            + "\n  試した先:\n    " + "\n    ".join(_tried)
         ) from e
 
     df = _parse_xls(io.BytesIO(r.content))
@@ -138,8 +187,17 @@ def _parse_xls(file_obj) -> pd.DataFrame:
                 "JPX の Excel フォーマットが変わった可能性があります。"
             )
 
-    df = raw[required].copy()
-    df.columns = ["code", "name", "market"]
+    # ★ 業種列があれば拾う(2026-09-06)。JPX の data_j.xls は
+    #   33業種コード/区分・17業種コード/区分・規模コード/区分 を持っている。
+    #   ⛔ 以前は3列だけ残して **捨てていた**ので、業種を J-Quants に
+    #     取りに行って 403 で詰まっていた。ここにあるなら契約は要らない。
+    _opt = [c for c in ("33業種コード", "33業種区分",
+                        "17業種コード", "17業種区分",
+                        "規模コード", "規模区分") if c in raw.columns]
+    df = raw[required + _opt].copy()
+    df.columns = (["code", "name", "market"]
+                  + ["s33", "s33name", "s17", "s17name",
+                     "scale", "scalename"][:len(_opt)])
     df = df.dropna(subset=["code"])
     df["code"]   = df["code"].str.strip().str.zfill(4)
     df["name"]   = df["name"].str.strip()
@@ -147,6 +205,9 @@ def _parse_xls(file_obj) -> pd.DataFrame:
     # コードが4桁数字のもののみ（ETF等を除外）
     df = df[df["code"].str.match(r"^\d{4}$")].copy()
     df["ticker"] = df["code"] + ".T"
+    for _c in ("s33name", "s17name", "scalename"):
+        if _c in df.columns:
+            df[_c] = df[_c].astype(str).str.strip()
     return df.reset_index(drop=True)
 
 
@@ -215,6 +276,13 @@ def main() -> None:
                         help="キャッシュを無視して再ダウンロード")
     parser.add_argument("--out",      default=None, metavar="FILE",
                         help="出力ファイル名（省略時は市場区分から自動決定）")
+    # ★ 業種CSVを吐く(2026-09-06)。J-Quants の equities/master は 403
+    #   だったが、業種は JPX の data_j.xls に入っている。契約は要らない。
+    parser.add_argument("--emit-sectors", default=None, metavar="CSV",
+                        nargs="?", const="jquants_extra/master.csv",
+                        help="銘柄→業種の CSV も書く(既定 jquants_extra/master.csv)。"
+                             "列名は analyze_gap_edge --sector-scan が読む形"
+                             "(Code / Sector33CodeName / Sector17CodeName)")
     args = parser.parse_args()
 
     print()
@@ -234,6 +302,25 @@ def main() -> None:
 
     # 市場区分フィルター
     df = filter_by_market(raw_df, args.market)
+
+    # ★ 業種CSV。**市場で絞る前の全銘柄**を書く(絞ると分析側で引けない銘柄が出る)
+    if args.emit_sectors:
+        import pathlib as _pl
+        if "s33name" not in raw_df.columns:
+            print("\n  ⛔ この data_j.xls に業種列がありません"
+                  f"(列: {list(raw_df.columns)[:8]})。"
+                  "\n     --no-cache で取り直すか、JPX の書式変更を確認してください")
+        else:
+            _o = _pl.Path(args.emit_sectors)
+            _o.parent.mkdir(parents=True, exist_ok=True)
+            _sec = raw_df[["code", "name", "s33", "s33name", "s17", "s17name"]].copy()
+            # analyze_gap_edge --sector-scan が探す列名に合わせる
+            _sec.columns = ["Code", "CompanyName", "Sector33Code",
+                            "Sector33CodeName", "Sector17Code", "Sector17CodeName"]
+            _sec.to_csv(_o, index=False, encoding="utf-8-sig")
+            _n33 = _sec["Sector33CodeName"].nunique()
+            print(f"\n  [業種] {len(_sec):,}銘柄 / {_n33}業種 → {_o.resolve()}")
+            print(f"         ⛔ J-Quants は使っていません(JPX の data_j.xls)")
 
     market_labels = {
         "prime":    "プライム",
