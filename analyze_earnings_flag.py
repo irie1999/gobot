@@ -46,15 +46,17 @@
 使い方
 ────────────────────────────────────────────────────────────────────
 
-    # 1) まず測れるかどうか(分類ごとの r と MDE)。損益は見ない
-    python analyze_earnings_flag.py --picks n_picks.csv --earnings earn.csv --scout
+    # 0) 決算CSV が **まだ無い**とき。検出限界だけ下見する
+    python analyze_earnings_flag.py --picks n_picks.csv --split 2020-09-01
 
-    # 2) 測れる分類だけ本番。TRAIN で探索
-    python analyze_earnings_flag.py --picks n_picks.csv --earnings earn.csv \
-        --split 2020-09-01 --win TRAIN
+    # 1) 決算CSV ができたら。分類ごとの r と MDE を見る(損益は見ない)
+    python analyze_earnings_flag.py --picks n_picks.csv --earnings jq_earnings.csv --scout
+
+    # 2) 本番。TRAIN で探索
+    python analyze_earnings_flag.py --picks n_picks.csv --earnings jq_earnings.csv --split 2020-09-01 --win TRAIN
 
     # 3) TRAIN で候補が出たときだけ TEST を **1回**
-    python analyze_earnings_flag.py ... --win TEST --confirm
+    python analyze_earnings_flag.py --picks n_picks.csv --earnings jq_earnings.csv --split 2020-09-01 --win TEST --confirm
 
     # 自己検証(合成データ。力がある/ない の2ケース)
     python analyze_earnings_flag.py --selftest
@@ -219,7 +221,21 @@ def _load(picks: str, earnings: str | None, data_since: str,
     if earnings is None:
         return p, flags
 
-    e = pd.read_csv(earnings)
+    try:
+        e = pd.read_csv(earnings)
+    except FileNotFoundError:
+        sys.exit(
+            f"\n[error] 決算CSV '{earnings}' がありません。\n"
+            "\n"
+            "  このファイルは **J-Quants から取ってくるもの** で、まだ存在しません。\n"
+            "  必要な列(名前は自動で探します):\n"
+            "      コード   Code / LocalCode / symbol\n"
+            "      開示日   DisclosedDate / Date\n"
+            "      開示時刻 DisclosedTime            (任意。寄り前/場中を分ける)\n"
+            "\n"
+            "  ★ 決算CSV が無くても、picks だけで **検出限界(MDE)の下見**が\n"
+            "    できます。決算あり率ごとに何円/件まで測れるかが出ます:\n"
+            f"        python analyze_earnings_flag.py --picks {picks} --scout\n")
     cc = _pick_col(e, _CODE_COLS)
     dc = _pick_col(e, _DATE_COLS)
     if cc is None or dc is None:
@@ -382,6 +398,69 @@ def _report(p: pd.DataFrame, flags: list[str], scout: bool, seeds: int,
     print("   ⛔ TRAIN で候補が出たときだけ TEST を1回使う。")
 
 
+def _scout_only(p: pd.DataFrame, data_since: str, split: str | None) -> None:
+    """決算CSV が **まだ無い** ときの下見。
+
+    ★ 答えるのは1つ: 「決算あり率が r のとき、何円/件の差まで測れるか」
+      これが分かると、Codex が持ってくる分類のうち **どれが最初から
+      測れないか** が、損益を1円も見ずに決まる。
+    """
+    px_yen = float((p["entry_p"] * 100).median()) if "entry_p" in p.columns else 225_700.0
+    cut = pd.Timestamp(data_since)
+    keep = p[p["date"] >= cut]
+
+    print("=" * 78)
+    print(" 下見 — 決算CSV が無いので、検出限界だけ出します")
+    print("=" * 78)
+    print(f"\n  picks {len(p):,}件 / {p['date'].nunique():,}営業日 "
+          f"/ {p['date'].min().date()}〜{p['date'].max().date()}")
+    print(f"  建値中央 {px_yen / 100:,.0f}円 -> 1bp = {px_yen / 10000:.1f}円")
+    miss = len(p) - len(keep)
+    print(f"\n  ⛔ 決算データの契約開始 {data_since} より前: "
+          f"**{miss:,}件 ({miss / len(p):.0%}) が欠測**")
+    print("     ここは『決算なし』ではなく **落とす**。混ぜると差が過大に出ます")
+    print(f"     残る母集団: {len(keep):,}件")
+
+    for c in ("entry_p", "gap_bp", "pnl", "side"):
+        if c not in p.columns:
+            print(f"  ⚠ picks に '{c}' がありません(あると精度が上がります)")
+
+    windows = [("全体", keep)]
+    if split:
+        s = pd.Timestamp(split)
+        windows = [("TRAIN", keep[keep["date"] < s]), ("TEST", keep[keep["date"] >= s])]
+
+    for wname, w in windows:
+        if len(w) < 100:
+            print(f"\n  [{wname}] {len(w):,}件 — 少なすぎて計算できません")
+            continue
+        print(f"\n  [{wname}] {len(w):,}件 / {w['date'].nunique():,}営業日")
+        print(f"  {'決算あり率 r':>12}{'あり':>9}{'なし':>9}"
+              f"{'MDE(円/件)':>12}   判定")
+        print("  " + "-" * 66)
+        for r in (0.02, 0.05, 0.10, 0.15, 0.20, 0.30, 0.40):
+            n1 = len(w) * r
+            n2 = len(w) - n1
+            mde = _mde_yen(n1, n2, px_yen)
+            if mde > _MDE_NG:
+                j = f"⛔ N のエッジ({_EDGE_YEN:.0f}円)と同じ桁。区別できない"
+            elif mde > _MDE_WARN:
+                j = "⚠ きわどい"
+            else:
+                j = "✅ 十分"
+            print(f"  {r:>12.0%}{n1:>9,.0f}{n2:>9,.0f}{mde:>12,.0f}   {j}")
+
+    print("\n" + "=" * 78)
+    print(" ★ この表の読み方")
+    print("=" * 78)
+    print("   「当日が決算発表予定日」は年4回なので **r が数%**。")
+    print("   その分類は、決算CSV を取ってきても **最初から測れません**。")
+    print("   「過去5営業日の決算」なら r が高いので測れます。")
+    print("   -> Codex に取得を頼むときは、**まず r の大きい分類から**。")
+    print("\n   決算CSV ができたら:")
+    print("     python analyze_earnings_flag.py --picks <picks> --earnings <決算CSV> --scout")
+
+
 def _selftest() -> None:
     """合成データで、力がある場合/ない場合の両方を確かめる。
 
@@ -451,7 +530,9 @@ def main() -> None:
     lags = tuple(int(x) for x in a.lag_days.split(",") if x.strip())
     p, flags = _load(a.picks, a.earnings, a.data_since, lags)
     if not flags:
-        sys.exit("[error] --earnings が無いのでフラグを作れません")
+        #   ★ 決算CSV がまだ無くても、検出限界の下見はできる
+        _scout_only(p, a.data_since, a.split)
+        return
 
     if a.split:
         cut = pd.Timestamp(a.split)
